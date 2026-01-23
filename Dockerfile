@@ -1,0 +1,55 @@
+FROM debian:bookworm-slim
+
+# Create a non-root user with UID 1000
+RUN useradd -m -u 1000 -s /bin/bash claude && \
+    mkdir -p /workspace/origin /workspace/current && \
+    chown -R claude:claude /workspace
+
+# Install essential tools (as root)
+RUN apt-get update && apt-get install -y \
+    git \
+    ca-certificates \
+    python3 \
+    python3-pip \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+USER claude
+
+RUN mkdir ~/.tmp && \
+    mkdir ~/.opt && \
+    mkdir ~/.local && \
+    mkdir ~/.local/bin
+
+# Install latest Neovim from GitHub releases
+RUN curl -fsSL https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-linux-x86_64.tar.gz -o ~/.tmp/nvim.tar.gz && \
+    tar -xzf ~/.tmp/nvim.tar.gz -C ~/.opt && \
+    ln -s ~/.opt/nvim-linux-x86_64/bin/nvim ~/.local/bin/nvim && \
+    rm -f ~/.tmp/nvim.tar.gz
+
+# Install jj binary
+RUN curl -fsSL https://github.com/jj-vcs/jj/releases/download/v0.37.0/jj-v0.37.0-x86_64-unknown-linux-musl.tar.gz -o ~/.tmp/jj.tar.gz && \
+    tar -xzf ~/.tmp/jj.tar.gz -C ~/.opt && \
+    ln -s ~/.opt/jj ~/.local/bin/jj && \
+    rm -f ~/.tmp/jj.tar.gz
+
+# Install Poetry (Python package manager)
+RUN curl -sSL https://install.python-poetry.org | POETRY_HOME=~/.opt/poetry python3 - && \
+    ln -s ~/.opt/poetry/bin/poetry ~/.local/bin/poetry
+
+
+# Install Claude (installs to user directory)
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# Add ~/.local/bin to PATH for claude command
+ENV PATH="/home/claude/.local/bin:${PATH}"
+
+WORKDIR /workspace
+
+USER root
+COPY container_run.sh ./container_run.sh
+RUN chmod +x ./container_run.sh && chown claude:claude ./container_run.sh
+
+USER claude
+
+ENTRYPOINT ["/workspace/container_run.sh"]
