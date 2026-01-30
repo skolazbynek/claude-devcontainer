@@ -1,0 +1,18 @@
+FROM claude-base:latest AS base
+
+USER root
+
+RUN mkdir -p /workspace/output /config && \
+    chown -R claude:claude /workspace /config
+
+# Install jq
+RUN apt-get update && apt-get install -y jq
+
+# Copy agent orchestrator script
+COPY agent_orchestrator.sh /workspace/agent
+RUN chmod +x /workspace/agent && chown claude:claude /workspace/agent
+
+USER claude
+
+# Set entrypoint to agent orchestrator
+ENTRYPOINT ["/workspace/agent"]

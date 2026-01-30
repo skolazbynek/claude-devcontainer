@@ -62,6 +62,7 @@ MOUNT_PATHS=(
     ".claude"
     ".claude.json"
     ".gitconfig"
+    # specify .config/nvim to resolve symlink
     ".config/nvim"
     ".cache/nvim"
     ".config"
@@ -69,9 +70,6 @@ MOUNT_PATHS=(
     ".local/state/nvim"
     ".bashrc"
 )
-
-# Create .claude directory if it doesn't exist (required for OAuth tokens)
-mkdir -p "$HOME/.claude"
 
 # Iterate over mount paths and add them to docker args
 log_info "Mounting configured paths from host to container..."
@@ -94,6 +92,7 @@ done
 # Mount current directory as workspace
 CURRENT_DIR=$(pwd)
 DOCKER_ARGS+=(
+    "-v" "/etc/ssl/certs:/etc/ssl/certs"
     "-v" "$CURRENT_DIR:$WORKSPACE_BASE/origin"
     "-w" "$WORKSPACE_BASE/current"
 )

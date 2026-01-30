@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "WebSearch"
+      "WebSearch",
+      "mcp__GitLab__manage_merge_requests",
+      "Bash(ls:*)"
     ]
   }
 }
