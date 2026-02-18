@@ -3,7 +3,7 @@ set -e
 
 IMAGE_NAME="claude-agent:latest"
 CONTAINER_USER="claude"
-AGENT_NAME="agent_$RANDOM"
+AGENT_NAME="${AGENT_NAME:-agent_$RANDOM}"
 
 # Check arguments
 if [ $# -lt 1 ]; then

@@ -9,8 +9,10 @@ fi
 
 FEATURE_BRANCH="$1"
 TRUNK_BRANCH="$2"
-AGENT_NAME="review_$RANDOM"
+export AGENT_NAME="review_$RANDOM"
 CURRENT_DIR="$(pwd)"
+SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+TEMPLATE_FILE="/home/zet/.config/claude/templates/review-template.md"
 
 # Find jj repository root
 find_jj_root() {
@@ -36,8 +38,12 @@ cd "$JJ_ROOT"
 
 # Generate diff
 DIFF_FILE="review-diff-$AGENT_NAME.patch"
-echo "Generating diff: $TRUNK_BRANCH -> $FEATURE_BRANCH"
-jj diff --from "$TRUNK_BRANCH" --to "fork_point($TRUNK_BRANCH | $FEATURE_BRANCH)" --git > "$DIFF_FILE"
+echo "Generating diff: fork_point($FEATURE_BRANCH | $TRUNK_BRANCH) -> $FEATURE_BRANCH"
+if ! jj diff --from "fork_point($FEATURE_BRANCH | $TRUNK_BRANCH)" --to "$FEATURE_BRANCH" --git > "$DIFF_FILE" 2>&1; then
+    echo "Error: Failed to generate diff" >&2
+    rm -f "$DIFF_FILE"
+    exit 1
+fi
 
 if [ ! -s "$DIFF_FILE" ]; then
     echo "Error: Generated diff is empty" >&2
@@ -47,7 +53,6 @@ fi
 echo "Diff saved to: $DIFF_FILE"
 
 # Create task file from template
-TEMPLATE_FILE="$HOME/.config/claude/templates/merge-review.md"
 if [ ! -f "$TEMPLATE_FILE" ]; then
     echo "Error: Template not found: $TEMPLATE_FILE" >&2
     exit 1
@@ -55,23 +60,19 @@ fi
 
 TASK_FILE="/tmp/review-task-$AGENT_NAME.md"
 
-# Read template, skip line 2 (the diff generation instruction), replace variables
-{
-    head -n 1 "$TEMPLATE_FILE"
-    tail -n +3 "$TEMPLATE_FILE" | sed "s/\${TRUNK_BRANCH}/$TRUNK_BRANCH/g" | sed "s/\${FEATURE_BRANCH}/$FEATURE_BRANCH/g"
-    echo ""
-    echo "# Input"
-    echo ""
-    echo "The diff has been generated and saved to \`/workspace/origin/$DIFF_FILE\`. Read this file to perform the review."
-    echo ""
-    echo "# Output Location"
-    echo ""
-    echo "Write your review findings to \`review-output.md\` in the repository root directory."
-} > "$TASK_FILE"
+# Export variables for envsubst
+export TRUNK_BRANCH FEATURE_BRANCH
+export DIFF_FILE_PATH="/workspace/origin/$DIFF_FILE"
+envsubst '$TRUNK_BRANCH $FEATURE_BRANCH $DIFF_FILE_PATH' < "$TEMPLATE_FILE" > "$TASK_FILE"
 
 echo "Task file created: $TASK_FILE"
 echo ""
 
 # Call upstream agent
-SCRIPT_DIR="$(dirname "$(realpath "$0")")"
-exec "$SCRIPT_DIR/../run-agent.sh" "$TASK_FILE"
+UPSTREAM_AGENT="$SCRIPT_DIR/../run-agent.sh"
+if [ ! -x "$UPSTREAM_AGENT" ]; then
+    echo "Error: Upstream run-agent.sh not found or not executable: $UPSTREAM_AGENT" >&2
+    exit 1
+fi
+
+exec "$UPSTREAM_AGENT" "$TASK_FILE"
