@@ -89,11 +89,31 @@ for rel_path in "${MOUNT_PATHS[@]}"; do
     fi
 done
 
-# Mount current directory as workspace
+# Find jj repository root
+find_jj_root() {
+    local dir="$1"
+    while [ "$dir" != "/" ]; do
+        if [ -d "$dir/.jj" ]; then
+            echo "$dir"
+            return 0
+        fi
+        dir="$(dirname "$dir")"
+    done
+    return 1
+}
+
 CURRENT_DIR=$(pwd)
+JJ_ROOT=$(find_jj_root "$CURRENT_DIR") || true
+
+if [ -n "$JJ_ROOT" ]; then
+    MOUNT_DIR="$JJ_ROOT"
+else
+    MOUNT_DIR="$CURRENT_DIR"
+fi
+
 DOCKER_ARGS+=(
     "-v" "/etc/ssl/certs:/etc/ssl/certs"
-    "-v" "$CURRENT_DIR:$WORKSPACE_BASE/origin"
+    "-v" "$MOUNT_DIR:$WORKSPACE_BASE/origin"
     "-w" "$WORKSPACE_BASE/current"
 )
 
