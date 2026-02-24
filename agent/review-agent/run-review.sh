@@ -1,15 +1,41 @@
 #!/bin/bash
 set -e
 
+# Parse arguments
+CUSTOM_NAME=""
+POSITIONAL_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -n|--name)
+            CUSTOM_NAME="$2"
+            shift 2
+            ;;
+        *)
+            POSITIONAL_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Restore positional arguments
+set -- "${POSITIONAL_ARGS[@]}"
+
 # Check arguments
 if [ $# -ne 2 ]; then
-    echo "Usage: $0 <feature-branch> <trunk-branch>" >&2
+    echo "Usage: $0 [-n|--name <name>] <feature-branch> <trunk-branch>" >&2
     exit 1
 fi
 
 FEATURE_BRANCH="$1"
 TRUNK_BRANCH="$2"
-export AGENT_NAME="review_$RANDOM"
+
+# Set agent name: use custom name if provided, otherwise random
+if [ -n "$CUSTOM_NAME" ]; then
+    export AGENT_NAME="review_$CUSTOM_NAME"
+else
+    export AGENT_NAME="review_$RANDOM"
+fi
 CURRENT_DIR="$(pwd)"
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 TEMPLATE_FILE="/home/zet/.config/claude/templates/review-template.md"
@@ -68,7 +94,7 @@ envsubst '$TRUNK_BRANCH $FEATURE_BRANCH $DIFF_FILE_PATH' < "$TEMPLATE_FILE" > "$
 echo "Task file created: $TASK_FILE"
 echo ""
 
-# Call upstream agent
+# Call upstream agent (AGENT_NAME is already set as env var, run-agent.sh will use it)
 UPSTREAM_AGENT="$SCRIPT_DIR/../run-agent.sh"
 if [ ! -x "$UPSTREAM_AGENT" ]; then
     echo "Error: Upstream run-agent.sh not found or not executable: $UPSTREAM_AGENT" >&2

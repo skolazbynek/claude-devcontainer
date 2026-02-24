@@ -1,6 +1,11 @@
 #!/bin/bash
 
-BOOKMARK="cld_$RANDOM"
+# Use provided workspace name or generate random one
+if [ -n "$WORKSPACE_NAME" ]; then
+    BOOKMARK="cld_$WORKSPACE_NAME"
+else
+    BOOKMARK="cld_$RANDOM"
+fi
 
 # /workspace/origin is guaranteed to be the jj root by run-claude.sh
 ORIGIN_DIR="/workspace/origin"

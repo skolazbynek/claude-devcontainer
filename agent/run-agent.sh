@@ -3,12 +3,38 @@ set -e
 
 IMAGE_NAME="claude-agent:latest"
 CONTAINER_USER="claude"
-AGENT_NAME="${AGENT_NAME:-agent_$RANDOM}"
+
+# Parse arguments
+CUSTOM_NAME=""
+POSITIONAL_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -n|--name)
+            CUSTOM_NAME="$2"
+            shift 2
+            ;;
+        *)
+            POSITIONAL_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Restore positional arguments
+set -- "${POSITIONAL_ARGS[@]}"
 
 # Check arguments
 if [ $# -lt 1 ]; then
-    echo "Usage: $0 <task-file>" >&2
+    echo "Usage: $0 [-n|--name <name>] <task-file>" >&2
     exit 1
+fi
+
+# Set agent name: use custom name if provided, otherwise fall back to env var or random
+if [ -n "$CUSTOM_NAME" ]; then
+    AGENT_NAME="agent_$CUSTOM_NAME"
+else
+    AGENT_NAME="${AGENT_NAME:-agent_$RANDOM}"
 fi
 
 TASK_FILE="$1"

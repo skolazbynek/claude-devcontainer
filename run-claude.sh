@@ -117,12 +117,35 @@ DOCKER_ARGS+=(
     "-w" "$WORKSPACE_BASE/current"
 )
 
+# Parse workspace name from arguments
+WORKSPACE_NAME=""
+CLAUDE_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -n|--name)
+            WORKSPACE_NAME="$2"
+            shift 2
+            ;;
+        *)
+            CLAUDE_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Add workspace name if provided
+if [ -n "$WORKSPACE_NAME" ]; then
+    DOCKER_ARGS+=("-e" "WORKSPACE_NAME=$WORKSPACE_NAME")
+    log_info "Using workspace name: $WORKSPACE_NAME"
+fi
+
 # Add image name
 DOCKER_ARGS+=("$IMAGE_NAME")
 
-# Pass through any additional arguments to Claude
-if [ $# -gt 0 ]; then
-    DOCKER_ARGS+=("$@")
+# Pass through any remaining arguments to Claude
+if [ ${#CLAUDE_ARGS[@]} -gt 0 ]; then
+    DOCKER_ARGS+=("${CLAUDE_ARGS[@]}")
 fi
 
 # Run the container
