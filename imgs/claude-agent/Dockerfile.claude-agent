@@ -1,4 +1,4 @@
-FROM claude-base:latest AS base
+FROM claude-devcontainer:latest as base
 
 USER root
 
@@ -9,7 +9,7 @@ RUN mkdir -p /workspace/output /config && \
 RUN apt-get update && apt-get install -y jq
 
 # Copy agent orchestrator script
-COPY agent_orchestrator.sh /workspace/agent
+COPY entrypoint-claude-agent.sh /workspace/agent
 RUN chmod +x /workspace/agent && chown claude:claude /workspace/agent
 
 USER claude

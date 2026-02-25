@@ -2,7 +2,7 @@
 set -e
 
 # Configuration
-IMAGE_NAME="claude-code-safe"
+IMAGE_NAME="claude-devcontainer:latest"
 CONTAINER_USER="claude"
 WORKSPACE_BASE="/workspace"
 
@@ -34,7 +34,7 @@ fi
 # Check if image exists, if not build it
 if [[ "$(docker images -q $IMAGE_NAME 2> /dev/null)" == "" ]]; then
     log_info "Image '$IMAGE_NAME' not found. Building..."
-    docker build -t $IMAGE_NAME .
+    docker build -f imgs/claude-devcontainer/Dockerfile.claude-devcontainer -t $IMAGE_NAME imgs/claude-devcontainer
     log_info "Image built successfully."
 fi
 

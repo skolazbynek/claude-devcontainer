@@ -5,5 +5,9 @@
       "mcp__GitLab__manage_merge_requests",
       "Bash(ls:*)"
     ]
+  },
+  "sandbox": {
+    "enabled": false,
+    "autoAllowBashIfSandboxed": false
   }
 }

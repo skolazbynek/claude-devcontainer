@@ -37,8 +37,7 @@ else
     export AGENT_NAME="review_$RANDOM"
 fi
 CURRENT_DIR="$(pwd)"
-SCRIPT_DIR="$(dirname "$(realpath "$0")")"
-TEMPLATE_FILE="/home/zet/.config/claude/templates/review-template.md"
+TEMPLATE_FILE="imgs/claude-agent-review/review-template.md"
 
 # Find jj repository root
 find_jj_root() {
@@ -94,10 +93,10 @@ envsubst '$TRUNK_BRANCH $FEATURE_BRANCH $DIFF_FILE_PATH' < "$TEMPLATE_FILE" > "$
 echo "Task file created: $TASK_FILE"
 echo ""
 
-# Call upstream agent (AGENT_NAME is already set as env var, run-agent.sh will use it)
-UPSTREAM_AGENT="$SCRIPT_DIR/../run-agent.sh"
+# Call upstream agent (AGENT_NAME is already set as env var, run-claude-agent.sh will use it)
+UPSTREAM_AGENT="scripts/run-claude-agent.sh"
 if [ ! -x "$UPSTREAM_AGENT" ]; then
-    echo "Error: Upstream run-agent.sh not found or not executable: $UPSTREAM_AGENT" >&2
+    echo "Error: Upstream run-claude-agent.sh not found or not executable: $UPSTREAM_AGENT" >&2
     exit 1
 fi
 

@@ -72,7 +72,7 @@ fi
 # Build Docker image if needed
 if [ -z "$(docker images -q $IMAGE_NAME 2>/dev/null)" ]; then
     echo "Building Docker image..."
-    docker build -f Dockerfile.agent -t $IMAGE_NAME .
+    docker build -f imgs/claude-agent/Dockerfile.claude-agent -t $IMAGE_NAME imgs/claude-agent
     echo ""
 fi
 

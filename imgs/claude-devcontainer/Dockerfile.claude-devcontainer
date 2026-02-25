@@ -6,12 +6,15 @@ RUN useradd -m -u 1000 -s /bin/bash claude && \
     chown -R claude:claude /workspace
 
 # Install essential tools (as root)
+# bubblewrap, socat are for claude sandbox mode
 RUN apt-get update && apt-get install -y \
     git \
     ca-certificates \
     python3 \
     python3-pip \
     curl \
+    bubblewrap \
+    socat \
     && rm -rf /var/lib/apt/lists/*
 
 USER claude
@@ -47,7 +50,7 @@ ENV PATH="/home/claude/.local/bin:${PATH}"
 WORKDIR /workspace
 
 USER root
-COPY container_run.sh ./container_run.sh
+COPY entrypoint-claude-devcontainer.sh ./container_run.sh
 RUN chmod +x ./container_run.sh && chown claude:claude ./container_run.sh
 
 USER claude
