@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
+source /workspace/container-init.sh
 
+AGENT_NAME="${SESSION_NAME:?SESSION_NAME must be set}"
 INSTRUCTION_FILE="${INSTRUCTION_FILE:-/config/task.md}"
 WORKSPACE_ORIGIN="/workspace/origin"
 WORKSPACE_CURRENT="/workspace/current"

@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     bubblewrap \
     socat \
+    default-mysql-client-core \
     && rm -rf /var/lib/apt/lists/*
 
 USER claude
@@ -50,8 +51,10 @@ ENV PATH="/home/claude/.local/bin:${PATH}"
 WORKDIR /workspace
 
 USER root
-COPY entrypoint-claude-devcontainer.sh ./container_run.sh
-RUN chmod +x ./container_run.sh && chown claude:claude ./container_run.sh
+COPY container-init.sh entrypoint-claude-devcontainer.sh ./
+RUN mv entrypoint-claude-devcontainer.sh container_run.sh && \
+    chmod +x container_run.sh container-init.sh && \
+    chown claude:claude container_run.sh container-init.sh
 
 USER claude
 

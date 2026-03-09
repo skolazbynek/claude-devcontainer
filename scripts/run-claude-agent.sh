@@ -1,108 +1,62 @@
 #!/bin/bash
 set -e
 
+SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
+source "$SCRIPT_DIR/lib/docker-common.sh"
+
 IMAGE_NAME="claude-agent:latest"
-CONTAINER_USER="claude"
 
-# Parse arguments
-CUSTOM_NAME=""
-POSITIONAL_ARGS=()
+parse_name_arg "$@"
+set -- "${REMAINING_ARGS[@]}"
 
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        -n|--name)
-            CUSTOM_NAME="$2"
-            shift 2
-            ;;
-        *)
-            POSITIONAL_ARGS+=("$1")
-            shift
-            ;;
-    esac
-done
-
-# Restore positional arguments
-set -- "${POSITIONAL_ARGS[@]}"
-
-# Check arguments
 if [ $# -lt 1 ]; then
     echo "Usage: $0 [-n|--name <name>] <task-file>" >&2
     exit 1
 fi
 
-# Set agent name: use custom name if provided, otherwise fall back to env var or random
-if [ -n "$CUSTOM_NAME" ]; then
-    AGENT_NAME="agent_$CUSTOM_NAME"
-else
-    AGENT_NAME="${AGENT_NAME:-agent_$RANDOM}"
-fi
+# SESSION_NAME may be pre-set by a calling script (e.g. review agent)
+SESSION_NAME="${SESSION_NAME:-$(build_session_name "agent" "$CUSTOM_NAME")}"
 
 TASK_FILE="$1"
-CURRENT_DIR="$(pwd)"
 
-# Validate task file exists
 if [ ! -f "$TASK_FILE" ]; then
     echo "Error: Task file not found: $TASK_FILE" >&2
     exit 1
 fi
 
-# Convert to absolute path
 TASK_FILE=$(realpath "$TASK_FILE")
+JJ_ROOT=$(require_jj_root)
 
-# Find jj repository root
-find_jj_root() {
-    local dir="$1"
-    while [ "$dir" != "/" ]; do
-        if [ -d "$dir/.jj" ]; then
-            echo "$dir"
-            return 0
-        fi
-        dir="$(dirname "$dir")"
-    done
-    return 1
-}
+require_docker
+ensure_image "$IMAGE_NAME" "imgs/claude-agent/Dockerfile.claude-agent" "imgs/claude-agent"
+load_dotenv
 
-JJ_ROOT=$(find_jj_root "$CURRENT_DIR")
+# Build docker args
+DOCKER_ARGS=(
+    "--detach"
+    "--name" "$SESSION_NAME"
+)
+build_base_args DOCKER_ARGS
+build_workspace_args DOCKER_ARGS "$JJ_ROOT"
+build_claude_config_args DOCKER_ARGS
+build_mysql_args DOCKER_ARGS
 
-if [ -z "$JJ_ROOT" ]; then
-    echo "Error: No jj repository found" >&2
-    exit 1
-fi
+build_session_args DOCKER_ARGS "$SESSION_NAME"
 
-# Build Docker image if needed
-if [ -z "$(docker images -q $IMAGE_NAME 2>/dev/null)" ]; then
-    echo "Building Docker image..."
-    docker build -f imgs/claude-agent/Dockerfile.claude-agent -t $IMAGE_NAME imgs/claude-agent
-    echo ""
-fi
+DOCKER_ARGS+=(
+    "-e" "INSTRUCTION_FILE=/config/task.md"
+    "-v" "$TASK_FILE:/config/task.md:ro"
+)
 
-# Run agent in background
+DOCKER_ARGS+=("$IMAGE_NAME")
+
 echo "Starting agent in background..."
-echo "Agent name: $AGENT_NAME"
+echo "Agent name: $SESSION_NAME"
 echo "Task file: $TASK_FILE"
 echo "Repository: $JJ_ROOT"
 echo ""
 
-CONTAINER_ID=$(docker run \
-    --rm \
-    --detach \
-    --cap-drop=ALL \
-    --security-opt=no-new-privileges \
-    --cpus=2.0 \
-    --memory=4g \
-    --user "$(id -u):$(id -g)" \
-    --name "$AGENT_NAME" \
-    -e "HOME=/home/$CONTAINER_USER" \
-    -e "INSTRUCTION_FILE=/config/task.md" \
-    -e "AGENT_NAME=$AGENT_NAME" \
-    -e "NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt" \
-    -v "$JJ_ROOT:/workspace/origin:rw" \
-    -v "$TASK_FILE:/config/task.md:ro" \
-    -v "$HOME/.claude:/home/$CONTAINER_USER/.claude:rw" \
-    -v "$HOME/.claude.json:/home/$CONTAINER_USER/.claude.json:rw" \
-    -v "$HOME/.config:/home/$CONTAINER_USER/.config" \
-    -v "/etc/ssl/certs:/etc/ssl/certs:ro" \
-    "$IMAGE_NAME")
+CONTAINER_ID=$(docker run "${DOCKER_ARGS[@]}")
 
 if [ -z "$CONTAINER_ID" ]; then
     echo "Error: Failed to start container" >&2
@@ -119,16 +73,16 @@ echo "Check if running:"
 echo "  docker ps --filter id=$CONTAINER_ID"
 echo ""
 echo "Follow progress (logs):"
-echo "  tail -f $JJ_ROOT/agent-output-$AGENT_NAME/agent.log"
+echo "  tail -f $JJ_ROOT/agent-output-$SESSION_NAME/agent.log"
 echo ""
 echo "Wait for completion:"
 echo "  docker wait $CONTAINER_ID"
 echo ""
 echo "After completion, view results:"
-echo "  jj log -r $AGENT_NAME"
-echo "  jj diff -r $AGENT_NAME"
-echo "  cat $JJ_ROOT/agent-output-$AGENT_NAME/summary.json"
+echo "  jj log -r $SESSION_NAME"
+echo "  jj diff -r $SESSION_NAME"
+echo "  cat $JJ_ROOT/agent-output-$SESSION_NAME/summary.json"
 echo ""
 echo "Merge changes:"
-echo "  jj squash --from $AGENT_NAME"
+echo "  jj squash --from $SESSION_NAME"
 echo ""

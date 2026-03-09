@@ -1,154 +1,51 @@
 #!/bin/bash
 set -e
 
-# Configuration
+SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
+source "$SCRIPT_DIR/lib/docker-common.sh"
+
 IMAGE_NAME="claude-devcontainer:latest"
-CONTAINER_USER="claude"
-WORKSPACE_BASE="/workspace"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+require_docker
+ensure_image "$IMAGE_NAME" "imgs/claude-devcontainer/Dockerfile.claude-devcontainer" "imgs/claude-devcontainer"
+load_dotenv
 
-# Helper functions
-log_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
-}
+JJ_ROOT=$(require_jj_root)
 
-log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
-}
+# Build docker args
+DOCKER_ARGS=("-it")
+build_base_args DOCKER_ARGS
+build_workspace_args DOCKER_ARGS "$JJ_ROOT"
+build_claude_config_args DOCKER_ARGS
+build_mysql_args DOCKER_ARGS
 
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# Check if Docker is installed
-if ! command -v docker &> /dev/null; then
-    log_error "Docker is not installed. Please install Docker first."
-    exit 1
-fi
-
-# Check if image exists, if not build it
-if [[ "$(docker images -q $IMAGE_NAME 2> /dev/null)" == "" ]]; then
-    log_info "Image '$IMAGE_NAME' not found. Building..."
-    docker build -f imgs/claude-devcontainer/Dockerfile.claude-devcontainer -t $IMAGE_NAME imgs/claude-devcontainer
-    log_info "Image built successfully."
-fi
-
-# Load environment variables from .env if it exists (for optional CLAUDE_REPOS config)
-if [ -f .env ]; then
-    export $(grep -v '^#' .env | xargs 2>/dev/null)
-fi
-
-# Build docker run command with base options
-DOCKER_ARGS=(
-    "-it"
-    "--rm"
-    "--cap-drop=ALL"	# security
-    "--security-opt=no-new-privileges"	# security
-    "--cpus=2.0"
-    "--memory=4g"
-    "--user" "$(id -u):$(id -g)"
-    "-e" "HOME=/home/$CONTAINER_USER"	# env $HOME
-)
-
-# Hardcoded list of paths to mount from host home directory
-# Each path will be mounted from ~/.{path} on host to ~/.{path} on container
-# Symlinks will be resolved before mounting
-MOUNT_PATHS=(
-    ".claude"
-    ".claude.json"
+# Mount additional host paths (neovim, gitconfig, bashrc)
+EXTRA_MOUNT_PATHS=(
     ".gitconfig"
-    # specify .config/nvim to resolve symlink
     ".config/nvim"
     ".cache/nvim"
-    ".config"
     ".local/share/nvim"
     ".local/state/nvim"
     ".bashrc"
 )
 
-# Iterate over mount paths and add them to docker args
-log_info "Mounting configured paths from host to container..."
-for rel_path in "${MOUNT_PATHS[@]}"; do
+log_info "Mounting extra host paths..."
+for rel_path in "${EXTRA_MOUNT_PATHS[@]}"; do
     host_path="$HOME/$rel_path"
-    container_path="/home/$CONTAINER_USER/$rel_path"
-
-    # Check if path exists
     if [ -e "$host_path" ]; then
-        # Resolve symlinks to get actual path
-        resolved_path=$(readlink -f "$host_path" 2>/dev/null || realpath "$host_path" 2>/dev/null || echo "$host_path")
-
-        DOCKER_ARGS+=("-v" "$resolved_path:$container_path")
-        log_info "  Mounted: $rel_path -> $resolved_path"
+        resolved_path=$(readlink -f "$host_path" 2>/dev/null || echo "$host_path")
+        DOCKER_ARGS+=("-v" "$resolved_path:$CONTAINER_HOME/$rel_path")
+        log_info "  Mounted: $rel_path"
     else
         log_warn "  Skipped: $rel_path (not found)"
     fi
 done
 
-# Find jj repository root
-find_jj_root() {
-    local dir="$1"
-    while [ "$dir" != "/" ]; do
-        if [ -d "$dir/.jj" ]; then
-            echo "$dir"
-            return 0
-        fi
-        dir="$(dirname "$dir")"
-    done
-    return 1
-}
+parse_name_arg "$@"
+build_session_args DOCKER_ARGS "$(build_session_name "cld" "$CUSTOM_NAME")"
 
-CURRENT_DIR=$(pwd)
-JJ_ROOT=$(find_jj_root "$CURRENT_DIR") || true
+DOCKER_ARGS+=("$IMAGE_NAME" "${REMAINING_ARGS[@]}")
 
-if [ -n "$JJ_ROOT" ]; then
-    MOUNT_DIR="$JJ_ROOT"
-else
-    MOUNT_DIR="$CURRENT_DIR"
-fi
-
-DOCKER_ARGS+=(
-    "-v" "/etc/ssl/certs:/etc/ssl/certs"
-    "-v" "$MOUNT_DIR:$WORKSPACE_BASE/origin"
-    "-w" "$WORKSPACE_BASE/current"
-)
-
-# Parse workspace name from arguments
-WORKSPACE_NAME=""
-CLAUDE_ARGS=()
-
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        -n|--name)
-            WORKSPACE_NAME="$2"
-            shift 2
-            ;;
-        *)
-            CLAUDE_ARGS+=("$1")
-            shift
-            ;;
-    esac
-done
-
-# Add workspace name if provided
-if [ -n "$WORKSPACE_NAME" ]; then
-    DOCKER_ARGS+=("-e" "WORKSPACE_NAME=$WORKSPACE_NAME")
-    log_info "Using workspace name: $WORKSPACE_NAME"
-fi
-
-# Add image name
-DOCKER_ARGS+=("$IMAGE_NAME")
-
-# Pass through any remaining arguments to Claude
-if [ ${#CLAUDE_ARGS[@]} -gt 0 ]; then
-    DOCKER_ARGS+=("${CLAUDE_ARGS[@]}")
-fi
-
-# Run the container
 log_info "Starting Claude Code in container..."
 log_info "Working directory: $WORKSPACE_BASE/current"
 echo ""

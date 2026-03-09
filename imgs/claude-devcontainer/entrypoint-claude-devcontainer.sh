@@ -1,11 +1,7 @@
 #!/bin/bash
+source /workspace/container-init.sh
 
-# Use provided workspace name or generate random one
-if [ -n "$WORKSPACE_NAME" ]; then
-    BOOKMARK="cld_$WORKSPACE_NAME"
-else
-    BOOKMARK="cld_$RANDOM"
-fi
+BOOKMARK="${SESSION_NAME:?SESSION_NAME must be set}"
 
 # /workspace/origin is guaranteed to be the jj root by run-claude.sh
 ORIGIN_DIR="/workspace/origin"
