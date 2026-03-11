@@ -2,6 +2,7 @@
 set -e
 
 SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
+CLD_ROOT="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/lib/docker-common.sh"
 
 parse_name_arg "$@"
@@ -16,7 +17,7 @@ FEATURE_BRANCH="$1"
 TRUNK_BRANCH="$2"
 
 export SESSION_NAME=$(build_session_name "review" "$CUSTOM_NAME")
-TEMPLATE_FILE="imgs/claude-agent-review/review-template.md"
+TEMPLATE_FILE="$CLD_ROOT/imgs/claude-agent-review/review-template.md"
 
 JJ_ROOT=$(require_jj_root)
 
@@ -55,7 +56,7 @@ echo "Task file created: $TASK_FILE"
 echo ""
 
 # Call upstream agent (SESSION_NAME is exported, run-claude-agent.sh will pick it up)
-UPSTREAM_AGENT="scripts/run-claude-agent.sh"
+UPSTREAM_AGENT="$SCRIPT_DIR/run-claude-agent.sh"
 if [ ! -x "$UPSTREAM_AGENT" ]; then
     echo "Error: Upstream run-claude-agent.sh not found or not executable: $UPSTREAM_AGENT" >&2
     exit 1

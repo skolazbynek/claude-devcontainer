@@ -1,0 +1,14 @@
+[tool.poetry]
+name = "cld"
+version = "0.1.0"
+description = "Tooling for running Claude Code in Docker containers with jj workspace isolation"
+authors = []
+packages = [{include = "scripts/mcp"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+mcp = {version = "^1.0", extras = ["cli"]}
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

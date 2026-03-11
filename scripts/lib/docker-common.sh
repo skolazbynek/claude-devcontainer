@@ -78,8 +78,35 @@ load_dotenv() {
     fi
 }
 
+# --- Path translation ---
+# When running inside a container (HOST_PROJECT_DIR / HOST_HOME set),
+# docker volume mounts must reference host paths since the daemon runs on the host.
+
+to_host_path() {
+    local path="$1"
+    if [ -n "${HOST_PROJECT_DIR:-}" ]; then
+        path="${path/#\/workspace\/current/$HOST_PROJECT_DIR}"
+        path="${path/#\/workspace\/origin/$HOST_PROJECT_DIR}"
+    fi
+    if [ -n "${HOST_HOME:-}" ]; then
+        path="${path/#$CONTAINER_HOME/$HOST_HOME}"
+    fi
+    echo "$path"
+}
+
 # --- Docker arg builders ---
-# All take a nameref to the caller's array as first argument.
+
+# Mount a path relative to $HOME into the container. Returns 1 if source doesn't exist.
+mount_home_path() {
+    local -n _args=$1
+    local rel_path="$2"
+    local target="$3"
+    local host_path="$HOME/$rel_path"
+    [ -e "$host_path" ] || return 1
+    local resolved
+    resolved=$(readlink -f "$host_path" 2>/dev/null || echo "$host_path")
+    _args+=("-v" "$resolved:$target")
+}
 
 build_base_args() {
     local -n _args=$1
@@ -97,9 +124,11 @@ build_base_args() {
 build_workspace_args() {
     local -n _args=$1
     local mount_dir="$2"
+    local host_mount_dir
+    host_mount_dir=$(to_host_path "$mount_dir")
     _args+=(
         "-v" "/etc/ssl/certs:/etc/ssl/certs:ro"
-        "-v" "$mount_dir:$WORKSPACE_BASE/origin"
+        "-v" "$host_mount_dir:$WORKSPACE_BASE/origin"
         "-w" "$WORKSPACE_BASE/current"
         "-e" "NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt"
     )
@@ -107,11 +136,32 @@ build_workspace_args() {
 
 build_claude_config_args() {
     local -n _args=$1
+    local host_home
+    host_home=$(to_host_path "$HOME")
     _args+=(
-        "-v" "$HOME/.claude:$CONTAINER_HOME/.claude:rw"
-        "-v" "$HOME/.claude.json:$CONTAINER_HOME/.claude.json:rw"
-        "-v" "$HOME/.config:$CONTAINER_HOME/.config"
+        "-v" "$host_home/.claude:$CONTAINER_HOME/.claude:rw"
+        "-v" "$host_home/.claude.json:/tmp/host-claude.json:ro"
+        "-v" "$host_home/.config:$CONTAINER_HOME/.config:ro"
     )
+}
+
+build_docker_socket_args() {
+    local -n _args=$1
+    local jj_root="$2"
+    local docker_sock="/var/run/docker.sock"
+    if [ -S "$docker_sock" ]; then
+        local docker_gid
+        docker_gid=$(stat -c '%g' "$docker_sock")
+        _args+=(
+            "-v" "$docker_sock:$docker_sock"
+            "--group-add" "$docker_gid"
+            "-e" "HOST_PROJECT_DIR=$jj_root"
+            "-e" "HOST_HOME=$HOME"
+        )
+        log_info "Docker socket mounted (orchestrator support)"
+    else
+        log_warn "Docker socket not found, orchestrator agent lifecycle tools unavailable"
+    fi
 }
 
 build_session_args() {

@@ -2,6 +2,7 @@
 set -e
 
 SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
+CLD_ROOT="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/lib/docker-common.sh"
 
 IMAGE_NAME="claude-agent:latest"
@@ -28,7 +29,7 @@ TASK_FILE=$(realpath "$TASK_FILE")
 JJ_ROOT=$(require_jj_root)
 
 require_docker
-ensure_image "$IMAGE_NAME" "imgs/claude-agent/Dockerfile.claude-agent" "imgs/claude-agent"
+ensure_image "$IMAGE_NAME" "$CLD_ROOT/imgs/claude-agent/Dockerfile.claude-agent" "$CLD_ROOT/imgs/claude-agent"
 load_dotenv
 
 # Build docker args
@@ -39,13 +40,15 @@ DOCKER_ARGS=(
 build_base_args DOCKER_ARGS
 build_workspace_args DOCKER_ARGS "$JJ_ROOT"
 build_claude_config_args DOCKER_ARGS
+build_docker_socket_args DOCKER_ARGS "$JJ_ROOT"
 build_mysql_args DOCKER_ARGS
 
 build_session_args DOCKER_ARGS "$SESSION_NAME"
 
+HOST_TASK_FILE=$(to_host_path "$TASK_FILE")
 DOCKER_ARGS+=(
     "-e" "INSTRUCTION_FILE=/config/task.md"
-    "-v" "$TASK_FILE:/config/task.md:ro"
+    "-v" "$HOST_TASK_FILE:/config/task.md:ro"
 )
 
 DOCKER_ARGS+=("$IMAGE_NAME")

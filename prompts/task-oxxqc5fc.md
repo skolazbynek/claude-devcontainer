@@ -1,0 +1,1 @@
+Create a file called hello-from-subagent.txt with the content 'Hello from sub-agent!' and nothing else.

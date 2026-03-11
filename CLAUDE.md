@@ -16,6 +16,7 @@ Tooling for running Claude Code in Docker containers with jujutsu (jj) workspace
 ```
 scripts/
   lib/docker-common.sh        -- Shared library (arg builders, utilities, logging)
+  mcp/orchestrator.py          -- MCP server for orchestrating Docker agents
   run-claude-devcontainer.sh   -- Interactive launcher
   run-claude-agent.sh          -- Agent launcher
   run-claude-agent-review.sh   -- Review agent (delegates to agent launcher)
@@ -42,7 +43,7 @@ prompts/                       -- Reusable task prompts for agents
 
 ```bash
 # Build images (devcontainer first)
-docker build -f imgs/claude-devcontainer/Dockerfile.claude-devcontainer -t claude-devcontainer:latest imgs/claude-devcontainer
+docker build -f imgs/claude-devcontainer/Dockerfile.claude-devcontainer -t claude-devcontainer:latest .
 docker build -f imgs/claude-agent/Dockerfile.claude-agent -t claude-agent:latest imgs/claude-agent
 
 # Interactive devcontainer
@@ -75,3 +76,18 @@ Inspect: `jj log -r <name>`, `jj diff -r <name>`. Merge: `jj squash --from <name
 - All scripts require a **jj repository** (not git). They walk up from cwd to find `.jj/`.
 - Containers run as host UID/GID with security hardening (cap-drop ALL, no-new-privileges, resource limits).
 - The agent entrypoint merges global MCP server config from `~/.claude.json` into project scope.
+
+## MCP Orchestrator
+
+Python MCP server (`scripts/mcp/orchestrator.py`) that gives Claude Code the ability to launch and manage Docker agents. Uses poetry for dependency management.
+
+**Register:** `claude mcp add orchestrator -- poetry run python scripts/mcp/orchestrator.py`
+
+**Tools provided:**
+- `launch_agent` -- launch autonomous agent (task file or inline prompt)
+- `list_agents`, `check_status`, `stop_agent` -- container lifecycle
+- `get_results`, `get_log`, `get_diff` -- inspect agent output
+- `list_prompts`, `read_prompt`, `save_prompt` -- manage task prompts
+- `jj_log`, `jj_bookmark_list`, `jj_new`, `jj_commit`, `jj_describe`, `jj_diff` -- jujutsu operations
+
+**Note:** No automatic squash/merge into external branches. The orchestrator works within its own jj changes only.

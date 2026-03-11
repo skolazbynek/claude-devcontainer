@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     bubblewrap \
     socat \
+    jq \
     default-mysql-client-core \
     && rm -rf /var/lib/apt/lists/*
 
@@ -23,7 +24,8 @@ USER claude
 RUN mkdir ~/.tmp && \
     mkdir ~/.opt && \
     mkdir ~/.local && \
-    mkdir ~/.local/bin
+    mkdir ~/.local/bin && \
+    ln -s /usr/bin/python3 ~/.local/bin/python
 
 # Install latest Neovim from GitHub releases
 RUN curl -fsSL https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-linux-x86_64.tar.gz -o ~/.tmp/nvim.tar.gz && \
@@ -37,10 +39,17 @@ RUN curl -fsSL https://github.com/jj-vcs/jj/releases/download/v0.37.0/jj-v0.37.0
     ln -s ~/.opt/jj ~/.local/bin/jj && \
     rm -f ~/.tmp/jj.tar.gz
 
+# Install Docker CLI (static binary, for orchestrator agent management)
+RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz -o ~/.tmp/docker.tgz && \
+    tar -xzf ~/.tmp/docker.tgz --strip-components=1 -C ~/.local/bin docker/docker && \
+    rm -f ~/.tmp/docker.tgz
+
 # Install Poetry (Python package manager)
 RUN curl -sSL https://install.python-poetry.org | POETRY_HOME=~/.opt/poetry python3 - && \
     ln -s ~/.opt/poetry/bin/poetry ~/.local/bin/poetry
 
+# Install MCP server dependencies
+RUN pip install --user --break-system-packages "mcp[cli]>=1.0"
 
 # Install Claude (installs to user directory)
 RUN curl -fsSL https://claude.ai/install.sh | bash
@@ -51,10 +60,18 @@ ENV PATH="/home/claude/.local/bin:${PATH}"
 WORKDIR /workspace
 
 USER root
-COPY container-init.sh entrypoint-claude-devcontainer.sh ./
+
+# Copy container entrypoint scripts (context: repo root)
+COPY imgs/claude-devcontainer/container-init.sh imgs/claude-devcontainer/entrypoint-claude-devcontainer.sh ./
 RUN mv entrypoint-claude-devcontainer.sh container_run.sh && \
     chmod +x container_run.sh container-init.sh && \
     chown claude:claude container_run.sh container-init.sh
+
+# Bake in orchestrator MCP server and launcher scripts
+COPY --chown=claude:claude scripts/ /opt/cld/scripts/
+COPY --chown=claude:claude pyproject.toml /opt/cld/
+COPY --chown=claude:claude prompts/ /opt/cld/prompts/
+RUN chmod +x /opt/cld/scripts/*.sh /opt/cld/scripts/lib/*.sh
 
 USER claude
 
