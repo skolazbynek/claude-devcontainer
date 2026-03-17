@@ -49,7 +49,7 @@ RUN curl -sSL https://install.python-poetry.org | POETRY_HOME=~/.opt/poetry pyth
     ln -s ~/.opt/poetry/bin/poetry ~/.local/bin/poetry
 
 # Install MCP server dependencies
-RUN pip install --user --break-system-packages "mcp[cli]>=1.0"
+RUN pip install --user --break-system-packages "mcp[cli]>=1.0" "typer>=0.9"
 
 # Install Claude (installs to user directory)
 RUN curl -fsSL https://claude.ai/install.sh | bash
@@ -67,11 +67,9 @@ RUN mv entrypoint-claude-devcontainer.sh container_run.sh && \
     chmod +x container_run.sh container-init.sh && \
     chown claude:claude container_run.sh container-init.sh
 
-# Bake in orchestrator MCP server and launcher scripts
-COPY --chown=claude:claude scripts/ /opt/cld/scripts/
-COPY --chown=claude:claude pyproject.toml /opt/cld/
+# Bake in cld package and prompts
+COPY --chown=claude:claude cld/ /opt/cld/cld/
 COPY --chown=claude:claude prompts/ /opt/cld/prompts/
-RUN chmod +x /opt/cld/scripts/*.sh /opt/cld/scripts/lib/*.sh
 
 USER claude
 

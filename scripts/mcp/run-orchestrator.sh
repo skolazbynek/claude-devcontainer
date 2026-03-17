@@ -6,4 +6,4 @@ if [ ! -x "$VENV" ]; then
     echo "Error: venv not found at $VENV. Run 'poetry install' in $CLD_ROOT" >&2
     exit 1
 fi
-exec "$VENV" "$SCRIPT_DIR/orchestrator.py"
+exec "$VENV" -m cld.mcp.orchestrator

@@ -8,47 +8,12 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+from cld.docker import find_jj_root
+
 mcp = FastMCP("claude-orchestrator")
 
 _HOST_VISIBLE_PREFIXES = ("/workspace/origin", "/workspace/current")
-
-
-def _find_jj_root() -> Path:
-    # Inside a container, use the bind-mounted origin (host-visible) dir
-    origin = os.environ.get("WORKSPACE_ORIGIN", "")
-    if origin and (Path(origin) / ".jj").is_dir():
-        return Path(origin)
-    d = Path.cwd()
-    while d != d.parent:
-        if (d / ".jj").is_dir():
-            return d
-        d = d.parent
-    raise RuntimeError("No jj repository found")
-
-
-def _repo_root() -> Path:
-    """Repo root = directory containing the scripts/ dir."""
-    return Path(__file__).resolve().parent.parent.parent
-
-
-def _builtin_prompts_dir() -> Path:
-    return _repo_root() / "prompts"
-
-
-def _workspace_prompts_dir() -> Path:
-    return _find_jj_root() / "prompts"
-
-
-def _scripts_dir() -> Path:
-    return _repo_root() / "scripts"
-
-
-_STRIP_ENV = {"SESSION_NAME", "MYSQL_DEFAULTS_FILE", "INSTRUCTION_FILE", "AGENT_MODEL", "AGENT_REVISION"}
-
-
-def _clean_env() -> dict[str, str]:
-    """Return env dict without vars that would leak the parent container's state."""
-    return {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
+_CLD_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -61,7 +26,7 @@ def _is_host_visible(path: Path) -> bool:
 
 def _stage_to_host(path: Path) -> Path:
     """Copy a non-host-visible file to jj_root so it can be mounted into agent containers."""
-    jj_root = _find_jj_root()
+    jj_root = find_jj_root()
     stage_dir = jj_root / ".agent-tasks"
     stage_dir.mkdir(exist_ok=True)
     staged = tempfile.NamedTemporaryFile(
@@ -91,7 +56,7 @@ def _parse_description(path: Path) -> str:
 
 def _jj_file_show(revset: str, filepath: str) -> str | None:
     """Read a file from a jj revision. Returns content or None."""
-    jj_root = _find_jj_root()
+    jj_root = find_jj_root()
     result = _run(
         ["jj", "file", "show", "-r", revset, filepath],
         cwd=str(jj_root),
@@ -99,6 +64,14 @@ def _jj_file_show(revset: str, filepath: str) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout
+
+
+def _builtin_prompts_dir() -> Path:
+    return _CLD_ROOT / "prompts"
+
+
+def _workspace_prompts_dir() -> Path:
+    return find_jj_root() / "prompts"
 
 
 # --- Agent lifecycle ---
@@ -114,8 +87,11 @@ def launch_agent(task_file: str, name: str = "", model: str = "", revision: str 
     model: claude model to use (e.g. 'opus', 'sonnet'). Defaults to sonnet.
     revision: jj revset to initialize the workspace from. Defaults to current working copy (@).
     """
-    jj_root = _find_jj_root()
+    from cld.agent import launch_agent as _launch_agent
 
+    jj_root = find_jj_root()
+
+    # Handle inline task creation
     if task_file.startswith("inline:"):
         content = task_file[len("inline:"):]
         stage_dir = jj_root / ".agent-tasks"
@@ -134,31 +110,19 @@ def launch_agent(task_file: str, name: str = "", model: str = "", revision: str 
     if not task_path.is_file():
         return {"error": f"Task file not found: {task_path}"}
 
-    # Stage non-host-visible files (e.g. builtin prompts) so the launcher can mount them
+    # Stage non-host-visible files so the launcher can mount them
     if not _is_host_visible(task_path):
         task_path = _stage_to_host(task_path)
 
-    cmd = [str(_scripts_dir() / "run-claude-agent.sh")]
-    if name:
-        cmd += ["-n", name]
-    if model:
-        cmd += ["-m", model]
-    if revision:
-        cmd += ["-r", revision]
-    cmd.append(str(task_path))
-
-    result = _run(cmd, cwd=str(jj_root), env=_clean_env())
-
-    if result.returncode != 0:
-        return {"error": result.stderr or result.stdout, "exit_code": result.returncode}
-
-    info = {"stdout": result.stdout.strip()}
-    for line in result.stdout.splitlines():
-        if line.startswith("Container ID:"):
-            info["container_id"] = line.split(":", 1)[1].strip()
-        if line.startswith("Agent name:"):
-            info["session_name"] = line.split(":", 1)[1].strip()
-    return info
+    try:
+        return _launch_agent(
+            task_file=task_path,
+            name=name,
+            model=model,
+            revision=revision,
+        )
+    except SystemExit as e:
+        return {"error": "Agent launch failed", "exit_code": e.code}
 
 
 @mcp.tool()
@@ -191,10 +155,9 @@ def check_status(session_name: str, include_result: bool = False) -> dict:
     After completion: container is gone (--rm), reads summary from jj bookmark.
     Set include_result=True to also return result.json (can be large).
     """
-    jj_root = _find_jj_root()
+    jj_root = find_jj_root()
     info: dict = {"session_name": session_name}
 
-    # Check if container is still running
     result = _run([
         "docker", "ps", "--filter", f"name=^{session_name}$",
         "--format", "{{.Status}}",
@@ -204,7 +167,6 @@ def check_status(session_name: str, include_result: bool = False) -> dict:
         info["container_status"] = result.stdout.strip()
         return info
 
-    # Container gone -- check jj bookmark for results
     result = _run(["jj", "log", "-r", session_name, "--no-graph", "-T", "commit_id"], cwd=str(jj_root))
     if result.returncode != 0:
         info["status"] = "unknown"
@@ -283,7 +245,7 @@ def list_prompts() -> list[dict]:
                     "description": _parse_description(f),
                 })
     except RuntimeError:
-        pass  # no jj root
+        pass
 
     return prompts
 
@@ -326,7 +288,7 @@ def save_prompt(name: str, content: str) -> dict:
 @mcp.tool()
 def jj_log(revset: str = "@", template: str = "") -> str:
     """Run jj log with a revset expression."""
-    jj_root = _find_jj_root()
+    jj_root = find_jj_root()
     cmd = ["jj", "log", "-r", revset]
     if template:
         cmd += ["-T", template]
@@ -339,7 +301,7 @@ def jj_log(revset: str = "@", template: str = "") -> str:
 @mcp.tool()
 def jj_bookmark_list() -> str:
     """List jj bookmarks."""
-    jj_root = _find_jj_root()
+    jj_root = find_jj_root()
     result = _run(["jj", "bookmark", "list"], cwd=str(jj_root))
     return result.stdout if result.returncode == 0 else f"Error: {result.stderr.strip()}"
 
@@ -347,7 +309,7 @@ def jj_bookmark_list() -> str:
 @mcp.tool()
 def jj_new(revset: str = "@", message: str = "") -> str:
     """Create a new jj change. Optionally set a description."""
-    jj_root = _find_jj_root()
+    jj_root = find_jj_root()
     cmd = ["jj", "new", revset]
     if message:
         cmd += ["-m", message]
@@ -360,7 +322,7 @@ def jj_new(revset: str = "@", message: str = "") -> str:
 @mcp.tool()
 def jj_commit(message: str) -> str:
     """Commit the current jj working copy with a message."""
-    jj_root = _find_jj_root()
+    jj_root = find_jj_root()
     result = _run(["jj", "commit", "-m", message], cwd=str(jj_root))
     if result.returncode != 0:
         return f"Error: {result.stderr.strip()}"
@@ -370,7 +332,7 @@ def jj_commit(message: str) -> str:
 @mcp.tool()
 def jj_describe(message: str, revset: str = "@") -> str:
     """Set description on a jj change."""
-    jj_root = _find_jj_root()
+    jj_root = find_jj_root()
     result = _run(["jj", "describe", "-r", revset, "-m", message], cwd=str(jj_root))
     if result.returncode != 0:
         return f"Error: {result.stderr.strip()}"
@@ -380,7 +342,7 @@ def jj_describe(message: str, revset: str = "@") -> str:
 @mcp.tool()
 def jj_diff(revset: str = "@", stat: bool = False) -> str:
     """Show diff for a revision. Use stat=True for summary only."""
-    jj_root = _find_jj_root()
+    jj_root = find_jj_root()
     cmd = ["jj", "diff", "-r", revset]
     if stat:
         cmd.append("--stat")

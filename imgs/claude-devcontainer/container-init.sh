@@ -45,7 +45,7 @@ build_claude_config() {
         jq '.mcpServers.orchestrator = {
             "type": "stdio",
             "command": "python3",
-            "args": ["/opt/cld/scripts/mcp/orchestrator.py"]
+            "args": ["/opt/cld/cld/mcp/orchestrator.py"]
         }' "$HOME/.claude.json" > /tmp/claude-json-tmp && \
             mv /tmp/claude-json-tmp "$HOME/.claude.json"
         echo "Orchestrator MCP rewritten for container"
