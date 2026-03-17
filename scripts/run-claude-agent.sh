@@ -11,21 +11,35 @@ parse_name_arg "$@"
 set -- "${REMAINING_ARGS[@]}"
 
 if [ $# -lt 1 ]; then
-    echo "Usage: $0 [-n|--name <name>] <task-file>" >&2
+    echo "Usage: $0 [-n|--name <name>] [-m|--model <model>] [-r|--revision <revset>] <task-file | -p prompt>" >&2
     exit 1
 fi
 
 # SESSION_NAME may be pre-set by a calling script (e.g. review agent)
 SESSION_NAME="${SESSION_NAME:-$(build_session_name "agent" "$CUSTOM_NAME")}"
 
-TASK_FILE="$1"
+INLINE_PROMPT=""
+POSITIONAL_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -p) shift; INLINE_PROMPT="$*"; break ;;
+        *) POSITIONAL_ARGS+=("$1"); shift ;;
+    esac
+done
 
-if [ ! -f "$TASK_FILE" ]; then
-    echo "Error: Task file not found: $TASK_FILE" >&2
+if [ ${#POSITIONAL_ARGS[@]} -gt 0 ] && [ -f "${POSITIONAL_ARGS[0]}" ]; then
+    TASK_FILE=$(mktemp --suffix=.md)
+    cat "$(realpath "${POSITIONAL_ARGS[0]}")" > "$TASK_FILE"
+    if [ -n "$INLINE_PROMPT" ]; then
+        printf '\n\n## Additional Instructions\n\n%s\n' "$INLINE_PROMPT" >> "$TASK_FILE"
+    fi
+elif [ -n "$INLINE_PROMPT" ]; then
+    TASK_FILE=$(mktemp --suffix=.md)
+    echo "$INLINE_PROMPT" > "$TASK_FILE"
+else
+    echo "Error: No task file or prompt provided" >&2
     exit 1
 fi
-
-TASK_FILE=$(realpath "$TASK_FILE")
 JJ_ROOT=$(require_jj_root)
 
 require_docker
@@ -50,6 +64,14 @@ DOCKER_ARGS+=(
     "-e" "INSTRUCTION_FILE=/config/task.md"
     "-v" "$HOST_TASK_FILE:/config/task.md:ro"
 )
+
+if [ -n "${AGENT_MODEL:-}" ]; then
+    DOCKER_ARGS+=("-e" "AGENT_MODEL=$AGENT_MODEL")
+fi
+
+if [ -n "${AGENT_REVISION:-}" ]; then
+    DOCKER_ARGS+=("-e" "AGENT_REVISION=$AGENT_REVISION")
+fi
 
 DOCKER_ARGS+=("$IMAGE_NAME")
 

@@ -1,1 +1,5 @@
+---
+description: Split pytest output into per-test failure files in ./test_failures/
+---
+
 Parse the file `test_output.txt` and split it into multiple files, each file corresponding to a single failed pytest test. The input file contains full output of a pytest run. Each output file should contain logs from a single failed pytest test. Put all these files into a new folder `./test_failures/`.

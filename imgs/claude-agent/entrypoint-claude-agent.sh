@@ -43,8 +43,10 @@ fi
 # --- Create isolated jj workspace ---
 
 cd "$WORKSPACE_ORIGIN"
-jj workspace add --name "$AGENT_NAME" -r @ "$WORKSPACE_CURRENT" 2>&1
+WORKSPACE_REV="${AGENT_REVISION:-@}"
+jj workspace add --name "$AGENT_NAME" "$WORKSPACE_CURRENT" 2>&1
 cd "$WORKSPACE_CURRENT"
+jj new "$WORKSPACE_REV" 2>&1
 jj bookmark create "$AGENT_NAME" 2>&1
 
 OUTPUT_DIR="$WORKSPACE_CURRENT/agent-output-$AGENT_NAME"
@@ -88,7 +90,11 @@ log "Executing Claude..."
 (while sleep 30; do log "Still running... $(($(date +%s) - START_TIME))s elapsed"; done) &
 PROGRESS_PID=$!
 
+AGENT_MODEL="${AGENT_MODEL:-sonnet}"
+log "Using model: $AGENT_MODEL"
+
 if claude -p "$SYSTEM_PROMPT" \
+    --model "$AGENT_MODEL" \
     --tools "default" \
     --dangerously-skip-permissions \
     --output-format json > "$RESULT_FILE" 2>&1; then

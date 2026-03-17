@@ -1,3 +1,7 @@
+---
+description: Analyze failing pytest logs in ./test_failures/, find root causes, and suggest fixes
+---
+
 # Overview
 
 You are a senior developer. Your task is to find the root cause of failing tests.

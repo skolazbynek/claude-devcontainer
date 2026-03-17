@@ -42,13 +42,17 @@ build_session_name() {
     echo "${prefix}_${2:-$RANDOM}"
 }
 
-# Parse -n|--name from args. Sets CUSTOM_NAME and REMAINING_ARGS.
+# Parse common args from CLI. Sets CUSTOM_NAME, AGENT_MODEL, AGENT_REVISION, and REMAINING_ARGS.
 parse_name_arg() {
     CUSTOM_NAME=""
+    AGENT_MODEL=""
+    AGENT_REVISION=""
     REMAINING_ARGS=()
     while [[ $# -gt 0 ]]; do
         case $1 in
             -n|--name) CUSTOM_NAME="$2"; shift 2 ;;
+            -m|--model) AGENT_MODEL="$2"; shift 2 ;;
+            -r|--revision) AGENT_REVISION="$2"; shift 2 ;;
             *) REMAINING_ARGS+=("$1"); shift ;;
         esac
     done

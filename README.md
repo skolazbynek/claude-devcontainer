@@ -88,14 +88,19 @@ The devcontainer mounts `/var/run/docker.sock` and adds the host docker group GI
 All scripts accept `-n|--name`. Names are prefixed per mode: `cld_`, `agent_`, `review_`. Passed as `SESSION_NAME` env var. Used for jj bookmarks, workspaces, container names, and output directories.
 
 ### Agent Output
-Results are written to `agent-output-<session-name>/` in the workspace: `agent.log`, `result.json`, `summary.json`. Inspect with `jj log -r <name>` and `jj diff -r <name>`. Merge with `jj squash --from <name>`.
+Agent containers are `--rm` (auto-removed on exit). Results are committed to the agent's jj bookmark as `agent-output-<session-name>/` containing `agent.log`, `result.json`, `summary.json`. The orchestrator reads these via `jj file show -r <bookmark>`. Inspect with `jj log -r <name>` and `jj diff -r <name>`. Merge with `jj squash --from <name>`.
 
 ### MCP Orchestrator
-Python MCP server (`scripts/mcp/orchestrator.py`) that gives Claude the ability to manage Docker agents.
+Python MCP server (`scripts/mcp/orchestrator.py`) that gives Claude the ability to manage Docker agents. Baked into the devcontainer image at `/opt/cld/`. Also usable on host from any project.
 
-**Register:** `claude mcp add orchestrator -- poetry run python scripts/mcp/orchestrator.py`
+**Host registration (user-scoped, works from any directory):**
+```bash
+claude mcp add -s user orchestrator -- /path/to/cld/scripts/mcp/run-orchestrator.sh
+```
 
-**Tools:** `launch_agent`, `list_agents`, `check_status`, `stop_agent` (lifecycle), `get_results`, `get_log`, `get_diff` (inspection), `list_prompts`, `read_prompt`, `save_prompt` (prompt management), `jj_log`, `jj_bookmark_list`, `jj_new`, `jj_commit`, `jj_describe`, `jj_diff` (jujutsu operations).
+**Tools:** `launch_agent`, `list_agents`, `check_status`, `stop_agent` (lifecycle), `get_log` (inspection), `list_prompts`, `read_prompt`, `save_prompt` (prompt management), `jj_log`, `jj_bookmark_list`, `jj_new`, `jj_commit`, `jj_describe`, `jj_diff` (jujutsu operations). Use `check_status` with `include_result=True` for full agent output; use `jj_diff` with agent bookmark to review changes.
+
+Builtin prompts (read-only) are baked into the image at `/opt/cld/prompts/`. Workspace prompts are saved to `<jj-root>/prompts/`. When launching an agent with a non-host-visible prompt (e.g. builtin), the orchestrator automatically stages it to `<jj-root>/.agent-tasks/`.
 
 The orchestrator does not auto-merge into external branches. Integration is always manual.
 

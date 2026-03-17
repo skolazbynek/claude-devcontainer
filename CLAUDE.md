@@ -67,7 +67,7 @@ scripts/run-claude-agent-review.sh [-n name] <feature-branch> <trunk-branch>
 
 ## Agent Output
 
-Results in `agent-output-<session-name>/`: `agent.log`, `result.json`, `summary.json`.
+Agent containers are `--rm` (auto-removed on exit). Results are committed to the agent's jj bookmark as `agent-output-<session-name>/`: `agent.log`, `result.json`, `summary.json`. The orchestrator reads these via `jj file show -r <bookmark>`.
 
 Inspect: `jj log -r <name>`, `jj diff -r <name>`. Merge: `jj squash --from <name>`.
 
@@ -79,15 +79,13 @@ Inspect: `jj log -r <name>`, `jj diff -r <name>`. Merge: `jj squash --from <name
 
 ## MCP Orchestrator
 
-Python MCP server (`scripts/mcp/orchestrator.py`) that gives Claude Code the ability to launch and manage Docker agents. Uses poetry for dependency management.
-
-**Register:** `claude mcp add orchestrator -- poetry run python scripts/mcp/orchestrator.py`
+Python MCP server (`scripts/mcp/orchestrator.py`). Baked into the devcontainer at `/opt/cld/`. Also usable on host via `claude mcp add -s user orchestrator -- /path/to/cld/scripts/mcp/run-orchestrator.sh`.
 
 **Tools provided:**
-- `launch_agent` -- launch autonomous agent (task file or inline prompt)
-- `list_agents`, `check_status`, `stop_agent` -- container lifecycle
-- `get_results`, `get_log`, `get_diff` -- inspect agent output
-- `list_prompts`, `read_prompt`, `save_prompt` -- manage task prompts
-- `jj_log`, `jj_bookmark_list`, `jj_new`, `jj_commit`, `jj_describe`, `jj_diff` -- jujutsu operations
+- `launch_agent` -- launch autonomous agent (task file, inline prompt, or builtin prompt -- non-host-visible files are auto-staged)
+- `list_agents`, `check_status`, `stop_agent` -- container lifecycle (`check_status` checks docker while running, jj bookmark + summary after completion; `include_result=True` for full claude output)
+- `get_log` -- tail agent log from jj bookmark
+- `list_prompts`, `read_prompt`, `save_prompt` -- manage task prompts (builtin at `/opt/cld/prompts/` read-only + workspace at `<jj-root>/prompts/` read-write; saves always go to workspace)
+- `jj_log`, `jj_bookmark_list`, `jj_new`, `jj_commit`, `jj_describe`, `jj_diff` -- jujutsu operations (use `jj_diff` with agent bookmark to review changes)
 
 **Note:** No automatic squash/merge into external branches. The orchestrator works within its own jj changes only.
