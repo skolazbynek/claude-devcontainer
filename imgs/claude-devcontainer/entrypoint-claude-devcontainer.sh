@@ -10,8 +10,10 @@ fi
 
 echo "Using jj repository at: $WORKSPACE_ORIGIN"
 
+WORKSPACE_REV="${AGENT_REVISION:-@}"
+
 cd "$WORKSPACE_ORIGIN"
-jj workspace add --name "$BOOKMARK" -r @ "$WORKSPACE_CURRENT"
+jj workspace add --name "$BOOKMARK" -r "$WORKSPACE_REV" "$WORKSPACE_CURRENT"
 
 cd "$WORKSPACE_CURRENT"
 jj bookmark create -r @ "$BOOKMARK"
@@ -24,9 +26,13 @@ if [ -f "$WORKSPACE_CURRENT/pyproject.toml" ] && command -v poetry &>/dev/null; 
     poetry install --no-interaction --quiet -C "$WORKSPACE_CURRENT" 2>/dev/null || true
 fi
 
-# Wrap claude to always pass --dangerously-skip-permissions
+# Wrap claude to always pass --dangerously-skip-permissions (and --model if set)
 CLAUDE_BIN=$(which claude)
-printf '#!/bin/bash\nexec %s --dangerously-skip-permissions "$@"\n' "$CLAUDE_BIN" > /tmp/bin/claude
+CLAUDE_EXTRA_ARGS="--dangerously-skip-permissions"
+if [ -n "${AGENT_MODEL:-}" ]; then
+    CLAUDE_EXTRA_ARGS="$CLAUDE_EXTRA_ARGS --model $AGENT_MODEL"
+fi
+printf '#!/bin/bash\nexec %s %s "$@"\n' "$CLAUDE_BIN" "$CLAUDE_EXTRA_ARGS" > /tmp/bin/claude
 chmod +x /tmp/bin/claude
 
 /bin/bash

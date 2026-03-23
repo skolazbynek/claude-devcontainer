@@ -58,6 +58,8 @@ _DIRECT_RW = [".config/nvim", ".cache/nvim", ".local/share/nvim", ".local/state/
 @app.command()
 def devcontainer(
     name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
+    model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
+    revision: str = typer.Option("", "-r", "--revision", help="jj revset to base workspace on"),
     extra_args: Optional[list[str]] = typer.Argument(None, help="Extra args passed to container"),
 ):
     """Launch an interactive Claude devcontainer."""
@@ -75,6 +77,10 @@ def devcontainer(
     session = build_session_name("cld", name)
 
     args = build_container_args(jj_root, session, interactive=True)
+    if model:
+        args += ["-e", f"AGENT_MODEL={model}"]
+    if revision:
+        args += ["-e", f"AGENT_REVISION={revision}"]
 
     skipped = []
     for rel_path in _DIRECT_RO:

@@ -44,7 +44,7 @@ def find_jj_root(start: Path | None = None) -> Path:
 
 
 def build_session_name(prefix: str, suffix: str = "") -> str:
-    return f"{prefix}_{suffix or random.randint(1000, 99999)}"
+    return f"{prefix}_{suffix or random.randint(10000, 99999)}"
 
 
 def load_dotenv(path: Path | None = None) -> None:
@@ -135,25 +135,26 @@ def build_container_args(
     ]
 
     # Claude session state (required)
-    claude_dir = Path(f"{host_home}/.claude")
-    if not claude_dir.is_dir():
-        log_error(f"{claude_dir} not found -- Claude auth and session state unavailable")
+    # Check local path for existence, but mount using host-translated path
+    local_claude_dir = Path(home) / ".claude"
+    if not local_claude_dir.is_dir():
+        log_error(f"{local_claude_dir} not found -- Claude auth and session state unavailable")
         sys.exit(1)
     args += ["-v", f"{host_home}/.claude:{CONTAINER_HOME}/.claude:rw"]
 
     # Claude config (optional -- host MCP servers won't be available without it)
-    claude_json = Path(f"{host_home}/.claude.json")
-    if claude_json.is_file():
+    local_claude_json = Path(home) / ".claude.json"
+    if local_claude_json.is_file():
         args += ["-v", f"{host_home}/.claude.json:/tmp/host-claude.json:ro"]
     else:
-        log_warn(f"{claude_json} not found -- host MCP servers won't be available in container")
+        log_warn(f"{local_claude_json} not found -- host MCP servers won't be available in container")
 
     # OAuth tokens / config (optional)
-    config_dir = Path(f"{host_home}/.config")
-    if config_dir.is_dir():
+    local_config_dir = Path(home) / ".config"
+    if local_config_dir.is_dir():
         args += ["-v", f"{host_home}/.config:{CONTAINER_HOME}/.config:ro"]
     else:
-        log_warn(f"{config_dir} not found -- OAuth tokens won't be available, Claude may require re-authentication")
+        log_warn(f"{local_config_dir} not found -- OAuth tokens won't be available, Claude may require re-authentication")
 
     # Session
     args += ["-e", f"SESSION_NAME={session_name}"]
@@ -192,11 +193,11 @@ def build_container_args(
 
 def mount_home_path(rel_path: str, target: str) -> list[str]:
     """Mount $HOME/rel_path to target. Returns empty list if source doesn't exist."""
-    host_path = Path.home() / rel_path
-    if not host_path.exists():
+    local_path = Path.home() / rel_path
+    if not local_path.exists():
         return []
-    resolved = str(host_path.resolve())
-    return ["-v", f"{resolved}:{target}"]
+    host_path = _to_host_path(str(local_path.resolve()))
+    return ["-v", f"{host_path}:{target}"]
 
 
 def run_container(args: list[str], image: str, *, detach: bool = False) -> str:

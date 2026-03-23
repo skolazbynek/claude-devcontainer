@@ -24,17 +24,24 @@ AGENT_IMAGE = "claude-agent:latest"
 
 
 def _build_task_file(
-    task_file: Path | None, inline_prompt: str | None,
+    task_file: Path | None, inline_prompt: str | None, tmpdir: Path | None = None,
 ) -> Path:
-    """Build a task file from file, inline prompt, or both. Returns path to temp file."""
+    """Build a task file from file, inline prompt, or both. Returns path to temp file.
+
+    tmpdir: directory for temp files -- must be host-translatable for bind mounts.
+    """
     if task_file and inline_prompt:
-        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False)
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", prefix=".cld-task-", delete=False, dir=tmpdir,
+        )
         tmp.write(task_file.read_text())
         tmp.write(f"\n\n## Additional Instructions\n\n{inline_prompt}\n")
         tmp.close()
         return Path(tmp.name)
     if inline_prompt:
-        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False)
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", prefix=".cld-task-", delete=False, dir=tmpdir,
+        )
         tmp.write(inline_prompt)
         tmp.close()
         return Path(tmp.name)
@@ -56,8 +63,9 @@ def launch_agent(
 
     Returns dict with container_id, session_name, jj_root.
     """
-    jj_root = find_jj_root()
     require_docker()
+    load_dotenv()
+    jj_root = find_jj_root()
 
     cld_root = Path(__file__).resolve().parent.parent
     ensure_image(
@@ -65,10 +73,9 @@ def launch_agent(
         cld_root / "imgs/claude-agent/Dockerfile.claude-agent",
         cld_root / "imgs/claude-agent",
     )
-    load_dotenv()
 
     session = session_name or build_session_name("agent", name)
-    resolved_task = _build_task_file(task_file, inline_prompt)
+    resolved_task = _build_task_file(task_file, inline_prompt, tmpdir=jj_root)
     host_task = _to_host_path(str(resolved_task))
 
     args = ["--name", session]
@@ -91,6 +98,7 @@ def launch_agent(
         ["docker", "run", "--detach"] + args + [AGENT_IMAGE],
         capture_output=True, text=True,
     )
+
     if container_id.returncode != 0:
         log_error(f"Failed to start container: {container_id.stderr.strip()}")
         sys.exit(1)
@@ -160,7 +168,10 @@ def launch_review(
         DIFF_FILE_PATH=f"{WORKSPACE_BASE}/origin/review-diff-{session}.patch",
     )
 
-    task_file = Path(tempfile.mktemp(suffix=".md", prefix=f"review-task-{session}-"))
+    task_file = Path(tempfile.NamedTemporaryFile(
+        mode="w", suffix=".md", prefix=f"review-task-{session}-", delete=False,
+        dir=jj_root,
+    ).name)
     task_file.write_text(task_content)
     log_info(f"Task file created: {task_file}")
     print()
