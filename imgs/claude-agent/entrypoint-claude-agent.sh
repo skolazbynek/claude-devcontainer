@@ -122,7 +122,15 @@ if jj diff --stat 2>&1 | tee -a "$LOG_FILE" | grep -q .; then
     CHANGED_FILES=$(jj diff --stat --no-pager 2>/dev/null | grep '|' | awk '{print $1}' | tr '\n' ', ' | sed 's/,$//' || echo "")
     log "Files modified: $FILE_COUNT ($CHANGED_FILES)"
 
-    if ! jj commit -m "Agent task: $AGENT_NAME" 2>&1 | tee -a "$LOG_FILE"; then
+    # Ask Claude for a descriptive commit message based on what it did
+    DESCRIBE_PROMPT="Look at the current jj diff (run jj diff --stat and jj diff). Write a single short sentence (under 72 chars) describing what was done. Output ONLY the description, nothing else."
+    COMMIT_MSG=$(claude -p "$DESCRIBE_PROMPT" \
+        --model "$AGENT_MODEL" \
+        --dangerously-skip-permissions 2>/dev/null | head -1)
+    COMMIT_MSG="${COMMIT_MSG:-Agent task: $AGENT_NAME}"
+    log "Commit message: $COMMIT_MSG"
+
+    if ! jj commit -m "$COMMIT_MSG" 2>&1 | tee -a "$LOG_FILE"; then
         log_error "Failed to commit changes"
         TASK_STATUS="commit_failed"
         exit 3

@@ -51,9 +51,8 @@ def agent(
 DEVCONTAINER_IMAGE = "claude-devcontainer:latest"
 
 # Host paths to mount read-only (config files)
-_DIRECT_RO = [".gitconfig", ".config/nvim", ".bashrc"]
-# Host paths staged into /tmp/host-files/ (container copies at init so writes don't affect host)
-_STAGED = [".cache/nvim", ".local/share/nvim", ".local/state/nvim"]
+_DIRECT_RO = [".gitconfig", ".bashrc"]
+_DIRECT_RW = [".config/nvim", ".cache/nvim", ".local/share/nvim", ".local/state/nvim"]
 
 
 @app.command()
@@ -85,8 +84,8 @@ def devcontainer(
         else:
             skipped.append(rel_path)
 
-    for rel_path in _STAGED:
-        mnt = mount_home_path(rel_path, f"/tmp/host-files/{rel_path}:ro")
+    for rel_path in _DIRECT_RW:
+        mnt = mount_home_path(rel_path, f"{CONTAINER_HOME}/{rel_path}:rw")
         if mnt:
             args += mnt
         else:

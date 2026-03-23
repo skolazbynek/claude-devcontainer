@@ -51,13 +51,3 @@ build_claude_config() {
         echo "Orchestrator MCP rewritten for container"
     fi
 }
-
-# Copy staged host files into $HOME.
-# Files mounted read-only under /tmp/host-files/ mirror ~/ structure.
-copy_staged_files() {
-    [ -d /tmp/host-files ] || return 0
-    local cwd="$PWD"
-    cd /tmp/host-files
-    find . -mindepth 1 -maxdepth 1 -exec cp -a {} "$HOME/" \;
-    cd "$cwd"
-}

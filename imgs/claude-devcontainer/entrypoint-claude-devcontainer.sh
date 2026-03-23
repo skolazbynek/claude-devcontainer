@@ -17,7 +17,6 @@ cd "$WORKSPACE_CURRENT"
 jj bookmark create -r @ "$BOOKMARK"
 
 build_claude_config
-copy_staged_files
 
 # Install project dependencies (MCP orchestrator, etc.)
 if [ -f "$WORKSPACE_CURRENT/pyproject.toml" ] && command -v poetry &>/dev/null; then
