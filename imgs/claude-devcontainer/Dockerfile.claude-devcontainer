@@ -1,4 +1,4 @@
-FROM debian:bookworm-slim
+FROM python:3.13-slim-bookworm
 
 # Create a non-root user with UID 1000
 RUN useradd -m -u 1000 -s /bin/bash claude && \
@@ -10,13 +10,13 @@ RUN useradd -m -u 1000 -s /bin/bash claude && \
 RUN apt-get update && apt-get install -y \
     git \
     ca-certificates \
-    python3 \
-    python3-pip \
     curl \
     bubblewrap \
     socat \
     jq \
     default-mysql-client-core \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
 USER claude
@@ -25,7 +25,7 @@ RUN mkdir ~/.tmp && \
     mkdir ~/.opt && \
     mkdir ~/.local && \
     mkdir ~/.local/bin && \
-    ln -s /usr/bin/python3 ~/.local/bin/python
+    ln -s /usr/local/bin/python3 ~/.local/bin/python
 
 # Install latest Neovim from GitHub releases
 RUN curl -fsSL https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-linux-x86_64.tar.gz -o ~/.tmp/nvim.tar.gz && \
@@ -49,7 +49,7 @@ RUN curl -sSL https://install.python-poetry.org | POETRY_HOME=~/.opt/poetry pyth
     ln -s ~/.opt/poetry/bin/poetry ~/.local/bin/poetry
 
 # Install MCP server dependencies
-RUN pip install --user --break-system-packages "mcp[cli]>=1.0" "typer>=0.9"
+RUN pip install --user "mcp[cli]>=1.0" "typer>=0.9"
 
 # Install Claude (installs to user directory)
 RUN curl -fsSL https://claude.ai/install.sh | bash

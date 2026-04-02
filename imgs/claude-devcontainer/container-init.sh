@@ -40,14 +40,26 @@ build_claude_config() {
         cp "$host_config" "$HOME/.claude.json"
     fi
 
-    # Rewrite orchestrator MCP to use baked-in server
+    # Rewrite baked-in MCP servers to use container paths
+    local rewrites='{}'
     if jq -e '.mcpServers.orchestrator' "$HOME/.claude.json" &>/dev/null; then
-        jq '.mcpServers.orchestrator = {
+        rewrites=$(echo "$rewrites" | jq '.orchestrator = {
             "type": "stdio",
             "command": "python3",
             "args": ["/opt/cld/cld/mcp/orchestrator.py"]
-        }' "$HOME/.claude.json" > /tmp/claude-json-tmp && \
+        }')
+    fi
+    if jq -e '.mcpServers["graphql-tester"]' "$HOME/.claude.json" &>/dev/null; then
+        rewrites=$(echo "$rewrites" | jq '.["graphql-tester"] = {
+            "type": "stdio",
+            "command": "python3",
+            "args": ["/opt/cld/cld/mcp/graphql.py"]
+        }')
+    fi
+    if [ "$rewrites" != '{}' ]; then
+        jq --argjson r "$rewrites" '.mcpServers += $r' \
+            "$HOME/.claude.json" > /tmp/claude-json-tmp && \
             mv /tmp/claude-json-tmp "$HOME/.claude.json"
-        echo "Orchestrator MCP rewritten for container"
+        echo "MCP servers rewritten for container: $(echo "$rewrites" | jq -r 'keys | join(", ")')"
     fi
 }

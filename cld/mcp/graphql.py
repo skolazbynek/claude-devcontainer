@@ -55,14 +55,15 @@ def _log_reader(state: ServerState) -> None:
         state.log_buffer.append(line.rstrip("\n"))
 
 
-def _health_check(port: int, path: str = "/graphql", timeout: float = 15.0) -> bool:
+def _health_check(port: int, path: str = "/graphql", timeout: float = 30.0) -> bool:
     deadline = time.monotonic() + timeout
-    url = f"http://localhost:{port}{path}"
+    endpoint = f"http://localhost:{port}{path}"
     while time.monotonic() < deadline:
         try:
-            with urlopen(Request(url, method="GET"), timeout=2):
+            result = _gql_request(endpoint, "query { hello }")
+            if "errors" not in result:
                 return True
-        except (URLError, OSError, TimeoutError):
+        except Exception:
             time.sleep(0.3)
     return False
 
@@ -98,14 +99,10 @@ async def _start_server(ctx: Context, state: ServerState, command: str, port: in
     if env:
         merged_env.update(env)
 
-    cmd = command
-    if "--port" not in cmd and "-p" not in cmd:
-        cmd = f"{cmd} --port {port}"
-
     state.log_buffer.clear()
 
     state.proc = subprocess.Popen(
-        cmd,
+        command,
         shell=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -153,8 +150,7 @@ mcp = FastMCP("graphql-tester", lifespan=app_lifespan)
 @mcp.tool()
 async def start_server(
     ctx: Context,
-    command: str = "strawberry server",
-    port: int = 8000,
+    command: str = "poetry run python manage.py",
     workdir: str = ".",
     env: dict[str, str] | None = None,
     health_path: str = "/graphql",
@@ -163,13 +159,12 @@ async def start_server(
     """Start a local GraphQL server as a subprocess.
 
     command: shell command to start the server (default: strawberry server).
-    port: port to listen on. Appended as --port if not already in command.
     workdir: working directory for the server process.
     env: extra environment variables (merged with current env and set_env overrides).
     health_path: path to poll for health check (default: /graphql).
     health_timeout: seconds to wait for the server to become healthy.
     """
-    return await _start_server(ctx, _get_state(ctx), command, port, workdir, env, health_path, health_timeout)
+    return await _start_server(ctx, _get_state(ctx), command, 5000, workdir, env, health_path, health_timeout)
 
 
 @mcp.tool()
@@ -276,12 +271,47 @@ def schema_resource(ctx: Context) -> str:
     return json.dumps(state.cached_schema, indent=2)
 
 
+def _format_type_ref(t: dict | None) -> str:
+    if not t:
+        return "?"
+    if t.get("kind") == "NON_NULL":
+        return _format_type_ref(t.get("ofType")) + "!"
+    if t.get("kind") == "LIST":
+        return "[" + _format_type_ref(t.get("ofType")) + "]"
+    return t.get("name") or "?"
+
+
+def _summarize_schema(raw: dict) -> dict:
+    schema = raw.get("data", raw).get("__schema", {})
+    query_type = (schema.get("queryType") or {}).get("name")
+    mutation_type = (schema.get("mutationType") or {}).get("name")
+
+    summary = {"queries": [], "mutations": []}
+
+    for t in schema.get("types", []):
+        if t["name"].startswith("__"):
+            continue
+        fields = t.get("fields") or []
+        if t["name"] == query_type and fields:
+            summary["queries"] = [
+                f"{f['name']}({', '.join(a['name'] + ': ' + _format_type_ref(a['type']) for a in f.get('args', []))}): {_format_type_ref(f['type'])}"
+                for f in fields
+            ]
+        elif t["name"] == mutation_type and fields:
+            summary["mutations"] = [
+                f"{f['name']}({', '.join(a['name'] + ': ' + _format_type_ref(a['type']) for a in f.get('args', []))}): {_format_type_ref(f['type'])}"
+                for f in fields
+            ]
+
+    return summary
+
+
 @mcp.tool()
 async def introspect(ctx: Context, endpoint: str = "") -> dict:
-    """Run a GraphQL introspection query and return the schema.
+    """Fetch the GraphQL schema and return a compact summary (type names, field signatures).
 
+    Full schema is cached -- use describe_type to get details on a specific type.
     endpoint: GraphQL endpoint URL. Defaults to the local running server.
-              Can point to any external instance (e.g. dev, staging).
     """
     state = _get_state(ctx)
     resolved = _resolve_endpoint(state, endpoint)
@@ -294,8 +324,26 @@ async def introspect(ctx: Context, endpoint: str = "") -> dict:
         raise ToolError(f"Introspection failed ({resolved}): {e}")
 
     state.cached_schema = result
-    await ctx.info("Schema cached and available as graphql://schema resource")
-    return result
+    await ctx.info("Full schema cached. Use describe_type for details on a specific type.")
+    return _summarize_schema(result)
+
+
+@mcp.tool()
+def describe_type(ctx: Context, type_name: str) -> dict:
+    """Return full details for a specific type from the cached schema.
+
+    type_name: exact name of the type (e.g. "User", "CreateUserInput").
+    Requires a prior introspect call.
+    """
+    state = _get_state(ctx)
+    if not state.cached_schema:
+        raise ToolError("No cached schema. Call introspect first.")
+
+    schema = state.cached_schema.get("data", state.cached_schema).get("__schema", {})
+    for t in schema.get("types", []):
+        if t["name"] == type_name:
+            return t
+    raise ToolError(f"Type '{type_name}' not found in cached schema")
 
 
 @mcp.tool()

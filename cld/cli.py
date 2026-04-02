@@ -1,6 +1,7 @@
 """CLI entry point for cld."""
 
 import os
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -19,6 +20,7 @@ from cld.docker import (
     require_docker,
     CONTAINER_HOME,
 )
+from cld.loop import run_loop
 
 app = typer.Typer(add_completion=False)
 
@@ -119,6 +121,50 @@ def review(
 ):
     """Launch a code review agent."""
     launch_review(feature_branch, trunk_branch, name=name, model=model)
+
+
+@app.command()
+def loop(
+    task_file: Optional[str] = typer.Argument(None, help="Path to task markdown file"),
+    name: str = typer.Option("", "-n", "--name", help="Loop session name suffix"),
+    model: str = typer.Option("", "-m", "--model", help="Model for implementer agent"),
+    review_model: str = typer.Option("", "--review-model", help="Model for reviewer agent"),
+    revision: str = typer.Option("", "-r", "--revision", help="Starting jj revision"),
+    max_iterations: int = typer.Option(3, "--max-iterations", help="Maximum iteration count"),
+    prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (alternative to task file)"),
+    approve: bool = typer.Option(False, "--approve", help="Pause after each review for approval"),
+):
+    """Run an automated implement-review loop."""
+    if not task_file and not prompt:
+        typer.echo("Error: Provide a task file, --prompt, or both", err=True)
+        raise typer.Exit(1)
+    task_path = Path(task_file) if task_file else None
+    if task_path and not task_path.is_file():
+        typer.echo(f"Error: Task file not found: {task_file}", err=True)
+        raise typer.Exit(1)
+
+    if prompt:
+        jj_root = find_jj_root()
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", prefix=".cld-loop-task-", delete=False, dir=jj_root,
+        )
+        if task_path:
+            tmp.write(task_path.read_text())
+            tmp.write(f"\n\n## Additional Instructions\n\n{prompt}\n")
+        else:
+            tmp.write(prompt)
+        tmp.close()
+        task_path = Path(tmp.name)
+
+    run_loop(
+        task_path,
+        name=name,
+        model=model,
+        review_model=review_model,
+        revision=revision,
+        max_iterations=max_iterations,
+        approve=approve,
+    )
 
 
 @app.command()

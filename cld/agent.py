@@ -58,6 +58,7 @@ def launch_agent(
     model: str = "",
     revision: str = "",
     session_name: str | None = None,
+    quiet: bool = False,
 ) -> dict:
     """Launch an autonomous Claude agent in a Docker container.
 
@@ -89,10 +90,11 @@ def launch_agent(
     if revision:
         args += ["-e", f"AGENT_REVISION={revision}"]
 
-    log_info("Starting agent in background...")
-    log_info(f"Task: {resolved_task}")
-    log_info(f"Repository: {jj_root}")
-    print()
+    if not quiet:
+        log_info("Starting agent in background...")
+        log_info(f"Task: {resolved_task}")
+        log_info(f"Repository: {jj_root}")
+        print()
 
     container_id = subprocess.run(
         ["docker", "run", "--detach"] + args + [AGENT_IMAGE],
@@ -104,19 +106,21 @@ def launch_agent(
         sys.exit(1)
 
     cid = container_id.stdout.strip()
-    print(f"Container ID: {cid}")
-    print()
-    print("========================================")
-    print("Agent started successfully")
-    print("========================================")
-    print()
-    print(f"Check if running:\n  docker ps --filter id={cid}")
-    print(f"\nFollow progress (logs):\n  tail -f {jj_root}/agent-output-{session}/agent.log")
-    print(f"\nWait for completion:\n  docker wait {cid}")
-    print(f"\nAfter completion, view results:\n  jj log -r {session}\n  jj diff -r {session}")
-    print(f"  cat {jj_root}/agent-output-{session}/summary.json")
-    print(f"\nMerge changes:\n  jj squash --from {session}")
-    print()
+
+    if not quiet:
+        print(f"Container ID: {cid}")
+        print()
+        print("========================================")
+        print("Agent started successfully")
+        print("========================================")
+        print()
+        print(f"Check if running:\n  docker ps --filter id={cid}")
+        print(f"\nFollow progress (logs):\n  tail -f {jj_root}/agent-output-{session}/agent.log")
+        print(f"\nWait for completion:\n  docker wait {cid}")
+        print(f"\nAfter completion, view results:\n  jj log -r {session}\n  jj diff -r {session}")
+        print(f"  cat {jj_root}/agent-output-{session}/summary.json")
+        print(f"\nMerge changes:\n  jj squash --from {session}")
+        print()
 
     return {"container_id": cid, "session_name": session, "jj_root": str(jj_root)}
 
