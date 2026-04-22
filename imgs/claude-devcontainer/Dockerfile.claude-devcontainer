@@ -17,6 +17,12 @@ RUN apt-get update && apt-get install -y \
     default-mysql-client-core \
     nodejs \
     npm \
+    ripgrep \
+    fd-find \
+    build-essential \
+    cmake \
+    unzip \
+    golang-go \
     && rm -rf /var/lib/apt/lists/*
 
 USER claude

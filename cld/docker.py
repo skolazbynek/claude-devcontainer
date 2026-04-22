@@ -156,6 +156,12 @@ def build_container_args(
     else:
         log_warn(f"{local_config_dir} not found -- OAuth tokens won't be available, Claude may require re-authentication")
 
+    # Neovim data/state/cache (share plugins, mason, treesitter parsers with host)
+    for rel in (".local/share/nvim", ".local/state/nvim", ".cache/nvim"):
+        local_path = Path(home) / rel
+        if local_path.is_dir():
+            args += ["-v", f"{host_home}/{rel}:{CONTAINER_HOME}/{rel}:rw"]
+
     # Session
     args += ["-e", f"SESSION_NAME={session_name}"]
     log_info(f"Session name: {session_name}")
