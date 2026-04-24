@@ -1,16 +1,18 @@
 ---
-description: Review code changes on a jujutsu revision range for logic/bugs, security, and robustness/extensibility
+description: Review code changes on a revision range for logic/bugs, security, and robustness/extensibility
 ---
 
 # Task
 
-You are a senior engineer performing a code review on changes within the jujutsu revision range `${REVISION_RANGE}`.
+You are a senior engineer performing a code review on changes within the revision range `${REVISION_RANGE}`.
 
 # Setup
 
-1. Run `jj diff -r '${REVISION_RANGE}'` to obtain the full diff. Read through it entirely before starting the review.
+1. Obtain the full diff for the revision range `${REVISION_RANGE}`. Read through it entirely before starting the review.
+   - jujutsu: `jj diff -r '${REVISION_RANGE}'`
+   - git: `git diff ${REVISION_RANGE}`
 2. For every changed file, explore its surrounding context: callers, callees, base classes, relevant interfaces, and third-party dependencies. Do not review a change in isolation.
-3. If the range spans multiple changes, run `jj log -r '${REVISION_RANGE}'` to understand the progression and intent behind the changes.
+3. If the range spans multiple changes, inspect the log to understand the progression and intent behind the changes.
 
 # Review dimensions
 

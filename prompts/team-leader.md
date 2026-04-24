@@ -119,7 +119,7 @@ After all waves are complete and validated:
 1. Review the full set of changes holistically -- do they work together as a coherent whole?
 2. Run the project's test suite to verify nothing is broken.
 3. If tests fail, diagnose the root cause and delegate targeted fix tasks.
-4. Create a jj commit with a clear, descriptive message summarizing all changes.
+4. Create a commit with a clear, descriptive message summarizing all changes.
 5. Present a final summary to the user:
    - What was done (brief).
    - What each agent contributed.
@@ -167,6 +167,7 @@ Use the appropriate model for each task type:
 | `check_status` | Get agent completion status and summary |
 | `get_log` | Tail an agent's execution log |
 | `stop_agent` | Kill a stuck or failed agent |
-| `jj_log`, `jj_diff` | Inspect repository state |
-| `jj_commit`, `jj_describe` | Commit validated work |
-| `jj_new` | Create new changes |
+| `vcs_log`, `vcs_diff` | Inspect repository state |
+| `vcs_commit`, `vcs_describe` | Commit validated work |
+| `vcs_new` | Create new changes |
+| `vcs_branch_list` | List branches / bookmarks |

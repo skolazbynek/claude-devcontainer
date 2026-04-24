@@ -11,7 +11,7 @@ from cld.docker import (
     build_container_args,
     build_session_name,
     ensure_image,
-    find_jj_root,
+    find_repo_root,
     load_dotenv,
     log_error,
     log_info,
@@ -19,6 +19,7 @@ from cld.docker import (
     _to_host_path,
     WORKSPACE_BASE,
 )
+from cld.vcs import get_backend
 
 AGENT_IMAGE = "claude-agent:latest"
 
@@ -26,9 +27,11 @@ AGENT_IMAGE = "claude-agent:latest"
 def _build_task_file(
     task_file: Path | None, inline_prompt: str | None, tmpdir: Path | None = None,
 ) -> Path:
-    """Build a task file from file, inline prompt, or both. Returns path to temp file.
+    """Combine a task file and/or inline prompt into a single markdown file.
 
-    tmpdir: directory for temp files -- must be host-translatable for bind mounts.
+    If both are given, the inline prompt is appended. Returns the resolved path
+    to the final task file. *tmpdir* controls where temp files are created
+    (must be host-translatable for bind mounts).
     """
     if task_file and inline_prompt:
         tmp = tempfile.NamedTemporaryFile(
@@ -62,11 +65,14 @@ def launch_agent(
 ) -> dict:
     """Launch an autonomous Claude agent in a Docker container.
 
-    Returns dict with container_id, session_name, jj_root.
+    Validates the environment, builds container arguments, mounts the task file,
+    and starts a detached container. Returns a dict with container_id,
+    session_name, and repo_root.
     """
     require_docker()
     load_dotenv()
-    jj_root = find_jj_root()
+    repo_root = find_repo_root()
+    vcs = get_backend()
 
     cld_root = Path(__file__).resolve().parent.parent
     ensure_image(
@@ -76,11 +82,11 @@ def launch_agent(
     )
 
     session = session_name or build_session_name("agent", name)
-    resolved_task = _build_task_file(task_file, inline_prompt, tmpdir=jj_root)
+    resolved_task = _build_task_file(task_file, inline_prompt, tmpdir=repo_root)
     host_task = _to_host_path(str(resolved_task))
 
     args = ["--name", session]
-    args += build_container_args(jj_root, session)
+    args += build_container_args(repo_root, session)
     args += [
         "-e", "INSTRUCTION_FILE=/config/task.md",
         "-v", f"{host_task}:/config/task.md:ro",
@@ -93,7 +99,7 @@ def launch_agent(
     if not quiet:
         log_info("Starting agent in background...")
         log_info(f"Task: {resolved_task}")
-        log_info(f"Repository: {jj_root}")
+        log_info(f"Repository: {repo_root}")
         print()
 
     container_id = subprocess.run(
@@ -108,6 +114,7 @@ def launch_agent(
     cid = container_id.stdout.strip()
 
     if not quiet:
+        vcs_name = vcs.name
         print(f"Container ID: {cid}")
         print()
         print("========================================")
@@ -115,14 +122,19 @@ def launch_agent(
         print("========================================")
         print()
         print(f"Check if running:\n  docker ps --filter id={cid}")
-        print(f"\nFollow progress (logs):\n  tail -f {jj_root}/agent-output-{session}/agent.log")
+        print(f"\nFollow progress (logs):\n  tail -f {repo_root}/agent-output-{session}/agent.log")
         print(f"\nWait for completion:\n  docker wait {cid}")
-        print(f"\nAfter completion, view results:\n  jj log -r {session}\n  jj diff -r {session}")
-        print(f"  cat {jj_root}/agent-output-{session}/summary.json")
-        print(f"\nMerge changes:\n  jj squash --from {session}")
+        if vcs_name == "jj":
+            print(f"\nAfter completion, view results:\n  jj log -r {session}\n  jj diff -r {session}")
+            print(f"  cat {repo_root}/agent-output-{session}/summary.json")
+            print(f"\nMerge changes:\n  jj squash --from {session}")
+        else:
+            print(f"\nAfter completion, view results:\n  git log {session}\n  git diff {session}~1..{session}")
+            print(f"  cat {repo_root}/agent-output-{session}/summary.json")
+            print(f"\nMerge changes:\n  git merge {session}")
         print()
 
-    return {"container_id": cid, "session_name": session, "jj_root": str(jj_root)}
+    return {"container_id": cid, "session_name": session, "repo_root": str(repo_root)}
 
 
 def launch_review(
@@ -131,33 +143,32 @@ def launch_review(
     name: str = "",
     model: str = "",
 ) -> dict:
-    """Generate a diff and launch a review agent."""
-    jj_root = find_jj_root()
+    """Generate a diff between two branches and launch a code review agent.
+
+    Uses the VCS backend to compute the fork point and produce a unified diff,
+    then fills in a review template and delegates to ``launch_agent``.
+    """
+    vcs = get_backend()
+    repo_root = vcs.repo_root
     cld_root = Path(__file__).resolve().parent.parent
 
     session = build_session_name("review", name)
 
-    # Generate diff
-    diff_file = jj_root / f"review-diff-{session}.patch"
-    log_info(f"Generating diff: fork_point({feature_branch} | {trunk_branch}) -> {feature_branch}")
+    # Generate diff from fork point to feature branch
+    diff_file = repo_root / f"review-diff-{session}.patch"
+    log_info(f"Generating diff: fork_point({feature_branch}, {trunk_branch}) -> {feature_branch}")
 
-    result = subprocess.run(
-        [
-            "jj", "diff",
-            "--from", f"fork_point({feature_branch} | {trunk_branch})",
-            "--to", feature_branch,
-            "--git",
-        ],
-        capture_output=True, text=True, cwd=str(jj_root),
-    )
-    if result.returncode != 0:
-        log_error(f"Failed to generate diff: {result.stderr.strip()}")
+    fork = vcs.fork_point(feature_branch, trunk_branch)
+    diff_content = vcs.diff_between(fork, feature_branch)
+
+    if diff_content.startswith("Error:"):
+        log_error(f"Failed to generate diff: {diff_content}")
         sys.exit(1)
-    if not result.stdout.strip():
+    if not diff_content.strip():
         log_error("Generated diff is empty")
         sys.exit(1)
 
-    diff_file.write_text(result.stdout)
+    diff_file.write_text(diff_content)
     log_info(f"Diff saved to: {diff_file}")
 
     # Create task from template
@@ -174,7 +185,7 @@ def launch_review(
 
     task_file = Path(tempfile.NamedTemporaryFile(
         mode="w", suffix=".md", prefix=f"review-task-{session}-", delete=False,
-        dir=jj_root,
+        dir=repo_root,
     ).name)
     task_file.write_text(task_content)
     log_info(f"Task file created: {task_file}")
@@ -188,5 +199,5 @@ def launch_review(
 
 
 def run_headless(args: list[str]) -> None:
-    """Run Claude in headless mode. Replaces current process."""
+    """Run Claude in headless mode with edit permissions. Replaces current process."""
     os.execvp("claude", ["claude", "-p", "--permission-mode", "acceptEdits", *args])

@@ -8,7 +8,8 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from cld.docker import find_jj_root
+from cld.docker import find_repo_root
+from cld.vcs import get_backend
 
 mcp = FastMCP("claude-orchestrator")
 
@@ -17,17 +18,19 @@ _CLD_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+    """Execute an arbitrary shell command and return the result."""
     return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
 
 
 def _is_host_visible(path: Path) -> bool:
+    """Check whether *path* is under a host-visible mount prefix."""
     return any(str(path).startswith(p) for p in _HOST_VISIBLE_PREFIXES)
 
 
 def _stage_to_host(path: Path) -> Path:
-    """Copy a non-host-visible file to jj_root so it can be mounted into agent containers."""
-    jj_root = find_jj_root()
-    stage_dir = jj_root / ".agent-tasks"
+    """Copy a non-host-visible file into the repo root so it can be bind-mounted."""
+    repo_root = find_repo_root()
+    stage_dir = repo_root / ".agent-tasks"
     stage_dir.mkdir(exist_ok=True)
     staged = tempfile.NamedTemporaryFile(
         mode="w", suffix=".md", prefix="task-", dir=stage_dir, delete=False,
@@ -38,7 +41,7 @@ def _stage_to_host(path: Path) -> Path:
 
 
 def _parse_description(path: Path) -> str:
-    """Extract description from markdown frontmatter (--- delimited)."""
+    """Extract a ``description:`` value from YAML frontmatter in a markdown file."""
     try:
         text = path.read_text()
     except OSError:
@@ -54,24 +57,14 @@ def _parse_description(path: Path) -> str:
     return ""
 
 
-def _jj_file_show(revset: str, filepath: str) -> str | None:
-    """Read a file from a jj revision. Returns content or None."""
-    jj_root = find_jj_root()
-    result = _run(
-        ["jj", "file", "show", "-r", revset, filepath],
-        cwd=str(jj_root),
-    )
-    if result.returncode != 0:
-        return None
-    return result.stdout
-
-
 def _builtin_prompts_dir() -> Path:
+    """Return the path to built-in prompt templates shipped with cld."""
     return _CLD_ROOT / "prompts"
 
 
 def _workspace_prompts_dir() -> Path:
-    return find_jj_root() / "prompts"
+    """Return the path to workspace-local prompt templates (inside the repo)."""
+    return find_repo_root() / "prompts"
 
 
 # --- Agent lifecycle ---
@@ -81,20 +74,20 @@ def _workspace_prompts_dir() -> Path:
 def launch_agent(task_file: str, name: str = "", model: str = "", revision: str = "") -> dict:
     """Launch an autonomous Claude agent in a Docker container.
 
-    task_file: path to a markdown task file (absolute or relative to jj root).
+    task_file: path to a markdown task file (absolute or relative to repo root).
                Use 'inline:<text>' to create an ephemeral task file from text.
     name: optional session name suffix. Auto-generated if omitted.
     model: claude model to use (e.g. 'opus', 'sonnet'). Defaults to sonnet.
-    revision: jj revset to initialize the workspace from. Defaults to current working copy (@).
+    revision: revision to initialize the workspace from. Defaults to current working copy.
     """
     from cld.agent import launch_agent as _launch_agent
 
-    jj_root = find_jj_root()
+    repo_root = find_repo_root()
 
     # Handle inline task creation
     if task_file.startswith("inline:"):
         content = task_file[len("inline:"):]
-        stage_dir = jj_root / ".agent-tasks"
+        stage_dir = repo_root / ".agent-tasks"
         stage_dir.mkdir(exist_ok=True)
         tmp = tempfile.NamedTemporaryFile(
             mode="w", suffix=".md", prefix="task-", dir=stage_dir, delete=False,
@@ -105,7 +98,7 @@ def launch_agent(task_file: str, name: str = "", model: str = "", revision: str 
 
     task_path = Path(task_file)
     if not task_path.is_absolute():
-        task_path = jj_root / task_path
+        task_path = repo_root / task_path
 
     if not task_path.is_file():
         return {"error": f"Task file not found: {task_path}"}
@@ -152,10 +145,10 @@ def check_status(session_name: str, include_result: bool = False) -> dict:
     """Check status of an agent by session name.
 
     While running: reports container state.
-    After completion: container is gone (--rm), reads summary from jj bookmark.
+    After completion: container is gone (--rm), reads summary from VCS branch/bookmark.
     Set include_result=True to also return result.json (can be large).
     """
-    jj_root = find_jj_root()
+    vcs = get_backend()
     info: dict = {"session_name": session_name}
 
     result = _run([
@@ -167,18 +160,19 @@ def check_status(session_name: str, include_result: bool = False) -> dict:
         info["container_status"] = result.stdout.strip()
         return info
 
-    result = _run(["jj", "log", "-r", session_name, "--no-graph", "-T", "commit_id"], cwd=str(jj_root))
-    if result.returncode != 0:
+    # Container gone -- check VCS for the agent's branch/bookmark
+    try:
+        commit = vcs.resolve_revision(session_name)
+        info["status"] = "completed"
+        info["commit"] = commit
+    except RuntimeError:
         info["status"] = "unknown"
-        info["error"] = f"No running container or jj bookmark found for '{session_name}'"
+        info["error"] = f"No running container or VCS branch found for '{session_name}'"
         return info
-
-    info["status"] = "completed"
-    info["commit"] = result.stdout.strip().split("\n")[0]
 
     output_prefix = f"agent-output-{session_name}"
 
-    summary_raw = _jj_file_show(session_name, f"{output_prefix}/summary.json")
+    summary_raw = vcs.file_show(session_name, f"{output_prefix}/summary.json")
     if summary_raw:
         try:
             info["summary"] = json.loads(summary_raw)
@@ -186,7 +180,7 @@ def check_status(session_name: str, include_result: bool = False) -> dict:
             info["summary_raw"] = summary_raw[:2000]
 
     if include_result:
-        result_raw = _jj_file_show(session_name, f"{output_prefix}/result.json")
+        result_raw = vcs.file_show(session_name, f"{output_prefix}/result.json")
         if result_raw:
             try:
                 info["result"] = json.loads(result_raw)
@@ -210,10 +204,11 @@ def stop_agent(session_name: str) -> dict:
 
 @mcp.tool()
 def get_log(session_name: str, tail: int = 80) -> str:
-    """Get the tail of an agent's log from its jj bookmark."""
-    content = _jj_file_show(session_name, f"agent-output-{session_name}/agent.log")
+    """Get the tail of an agent's log from its VCS branch/bookmark."""
+    vcs = get_backend()
+    content = vcs.file_show(session_name, f"agent-output-{session_name}/agent.log")
     if content is None:
-        return f"No log found for bookmark '{session_name}'"
+        return f"No log found for branch '{session_name}'"
     lines = content.splitlines()
     return "\n".join(lines[-tail:])
 
@@ -269,7 +264,7 @@ def read_prompt(name: str) -> str:
 
 @mcp.tool()
 def save_prompt(name: str, content: str) -> dict:
-    """Save a task prompt to the workspace prompts directory (jj root).
+    """Save a task prompt to the workspace prompts directory (repo root).
 
     Returns the saved path, which can be passed directly to launch_agent.
     """
@@ -282,74 +277,115 @@ def save_prompt(name: str, content: str) -> dict:
     return {"saved": str(path)}
 
 
-# --- Jujutsu ---
+# --- VCS operations (backend-agnostic) ---
+
+
+@mcp.tool()
+def vcs_log(revset: str = "", template: str = "") -> str:
+    """Show VCS log for a revision expression.
+
+    For jj: revset is a jj revset, template is a jj template string.
+    For git: revset is a git revision spec, template is a --format string.
+    Defaults to current working copy / HEAD.
+    """
+    vcs = get_backend()
+    default_rev = "@" if vcs.name == "jj" else "HEAD"
+    return vcs.log(revset or default_rev, template)
+
+
+@mcp.tool()
+def vcs_branch_list() -> str:
+    """List VCS branches (jj bookmarks or git branches)."""
+    return get_backend().list_branches()
+
+
+@mcp.tool()
+def vcs_new(revset: str = "", message: str = "") -> str:
+    """Create a new VCS change on top of a revision.
+
+    For jj: creates a new empty change. For git: checks out the revision.
+    *message* sets the description on the new change (jj) or is ignored (git).
+    """
+    vcs = get_backend()
+    default_rev = "@" if vcs.name == "jj" else "HEAD"
+    output = vcs.new_change(revset or default_rev)
+    if message and vcs.name == "jj":
+        # In jj, describe the newly created change. In git, there's no
+        # empty change to describe -- the message will go on the next commit.
+        vcs.describe("@", message)
+    return output or "OK"
+
+
+@mcp.tool()
+def vcs_commit(message: str) -> str:
+    """Commit current changes with a message.
+
+    For jj: commits the working copy. For git: stages all changes then commits.
+    """
+    vcs = get_backend()
+    return vcs.commit(message) or "OK"
+
+
+@mcp.tool()
+def vcs_describe(message: str, revset: str = "") -> str:
+    """Set description/message on a VCS change.
+
+    For jj: updates the change description. For git: rewrites the commit message.
+    """
+    vcs = get_backend()
+    default_rev = "@" if vcs.name == "jj" else "HEAD"
+    return vcs.describe(revset or default_rev, message) or "OK"
+
+
+@mcp.tool()
+def vcs_diff(revset: str = "", stat: bool = False) -> str:
+    """Show diff for a revision. Use stat=True for summary only.
+
+    Without revset: shows working copy / uncommitted changes.
+    With revset: shows changes introduced by that revision.
+    """
+    vcs = get_backend()
+    output = vcs.diff(revset, stat=stat)
+    return output[:50000] if output else "(no changes)"
+
+
+# --- Backward-compatible aliases (jj_ prefixed tools still work) ---
 
 
 @mcp.tool()
 def jj_log(revset: str = "@", template: str = "") -> str:
-    """Run jj log with a revset expression."""
-    jj_root = find_jj_root()
-    cmd = ["jj", "log", "-r", revset]
-    if template:
-        cmd += ["-T", template]
-    result = _run(cmd, cwd=str(jj_root))
-    if result.returncode != 0:
-        return f"Error: {result.stderr.strip()}"
-    return result.stdout
+    """[Compatibility] Run jj log with a revset expression. Delegates to vcs_log."""
+    return vcs_log(revset, template)
 
 
 @mcp.tool()
 def jj_bookmark_list() -> str:
-    """List jj bookmarks."""
-    jj_root = find_jj_root()
-    result = _run(["jj", "bookmark", "list"], cwd=str(jj_root))
-    return result.stdout if result.returncode == 0 else f"Error: {result.stderr.strip()}"
+    """[Compatibility] List jj bookmarks. Delegates to vcs_branch_list."""
+    return vcs_branch_list()
 
 
 @mcp.tool()
 def jj_new(revset: str = "@", message: str = "") -> str:
-    """Create a new jj change. Optionally set a description."""
-    jj_root = find_jj_root()
-    cmd = ["jj", "new", revset]
-    if message:
-        cmd += ["-m", message]
-    result = _run(cmd, cwd=str(jj_root))
-    if result.returncode != 0:
-        return f"Error: {result.stderr.strip()}"
-    return result.stdout or "OK"
+    """[Compatibility] Create a new jj change. Delegates to vcs_new."""
+    return vcs_new(revset, message)
 
 
 @mcp.tool()
 def jj_commit(message: str) -> str:
-    """Commit the current jj working copy with a message."""
-    jj_root = find_jj_root()
-    result = _run(["jj", "commit", "-m", message], cwd=str(jj_root))
-    if result.returncode != 0:
-        return f"Error: {result.stderr.strip()}"
-    return result.stdout or "OK"
+    """[Compatibility] Commit the current working copy. Delegates to vcs_commit."""
+    return vcs_commit(message)
 
 
 @mcp.tool()
 def jj_describe(message: str, revset: str = "@") -> str:
-    """Set description on a jj change."""
-    jj_root = find_jj_root()
-    result = _run(["jj", "describe", "-r", revset, "-m", message], cwd=str(jj_root))
-    if result.returncode != 0:
-        return f"Error: {result.stderr.strip()}"
-    return result.stdout or "OK"
+    """[Compatibility] Set description on a change. Delegates to vcs_describe."""
+    return vcs_describe(message, revset)
 
 
 @mcp.tool()
 def jj_diff(revset: str = "@", stat: bool = False) -> str:
-    """Show diff for a revision. Use stat=True for summary only."""
-    jj_root = find_jj_root()
-    cmd = ["jj", "diff", "-r", revset]
-    if stat:
-        cmd.append("--stat")
-    result = _run(cmd, cwd=str(jj_root))
-    if result.returncode != 0:
-        return f"Error: {result.stderr.strip()}"
-    return result.stdout[:50000] if result.stdout else "(no changes)"
+    """[Compatibility] Show diff for a revision. Delegates to vcs_diff."""
+    return vcs_diff(revset, stat)
 
 
 if __name__ == "__main__":

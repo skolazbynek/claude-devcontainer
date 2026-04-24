@@ -11,48 +11,26 @@ from string import Template
 from cld.agent import launch_agent
 from cld.docker import (
     build_session_name,
-    find_jj_root,
+    find_repo_root,
     log_error,
     log_info,
     log_warn,
 )
+from cld.vcs import VcsBackend, get_backend
 
 _POLL_INTERVAL = 30
 _AGENT_TIMEOUT = 1800
 
 
-# --- jj helpers ---
-
-
-def _jj_run(args: list[str], jj_root: Path) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["jj"] + args, capture_output=True, text=True, cwd=str(jj_root),
-    )
-
-
-def _jj_file_show(revset: str, filepath: str, jj_root: Path) -> str | None:
-    result = _jj_run(["file", "show", "-r", revset, filepath], jj_root)
-    if result.returncode != 0:
-        return None
-    return result.stdout
-
-
-def _jj_resolve(revset: str, jj_root: Path) -> str:
-    """Resolve a revset to a concrete commit ID."""
-    result = _jj_run(
-        ["log", "-r", revset, "--no-graph", "-T", "commit_id", "-l", "1"], jj_root,
-    )
-    if result.returncode != 0:
-        log_error(f"Failed to resolve revision '{revset}': {result.stderr.strip()}")
-        sys.exit(1)
-    return result.stdout.strip()
-
-
 # --- Agent polling ---
 
 
-def _wait_for_agent(session_name: str, jj_root: Path) -> dict:
-    """Block until agent container exits, then return its summary."""
+def _wait_for_agent(session_name: str, vcs: VcsBackend) -> dict:
+    """Block until an agent container exits, then read its summary from the VCS.
+
+    Polls Docker for the container every ``_POLL_INTERVAL`` seconds. Once the
+    container disappears, reads ``summary.json`` from the agent's branch.
+    """
     start = time.monotonic()
     while time.monotonic() - start < _AGENT_TIMEOUT:
         result = subprocess.run(
@@ -66,8 +44,8 @@ def _wait_for_agent(session_name: str, jj_root: Path) -> dict:
         subprocess.run(["docker", "stop", session_name], capture_output=True, text=True)
         return {"status": "timeout", "session_name": session_name}
 
-    summary_raw = _jj_file_show(
-        session_name, f"agent-output-{session_name}/summary.json", jj_root,
+    summary_raw = vcs.file_show(
+        session_name, f"agent-output-{session_name}/summary.json",
     )
     if not summary_raw:
         return {"status": "unknown", "error": "No summary.json found"}
@@ -81,6 +59,11 @@ def _wait_for_agent(session_name: str, jj_root: Path) -> dict:
 
 
 def _parse_review_severity(content: str) -> dict:
+    """Parse a markdown review file and count findings by severity level.
+
+    Looks for ``## critical``, ``## major``, ``## minor`` headers and counts
+    ``### `` sub-entries under each.
+    """
     counts = {"critical": 0, "major": 0, "minor": 0}
     current = None
     for line in content.splitlines():
@@ -101,18 +84,16 @@ def _parse_review_severity(content: str) -> dict:
 # --- Change annotation ---
 
 
-def _get_change_description(revset: str, jj_root: Path) -> str:
-    result = _jj_run(["log", "-r", revset, "--no-graph", "-T", "description"], jj_root)
-    if result.returncode != 0:
-        return ""
-    return result.stdout.strip()
-
-
 def _describe_impl_change(
     session_name: str, iteration: int, task_file: Path,
-    review_content: str | None, jj_root: Path,
+    review_content: str | None, vcs: VcsBackend,
 ) -> None:
-    original_msg = _get_change_description(session_name, jj_root)
+    """Annotate an implementation change with loop metadata.
+
+    Prepends ``[loop impl N]`` to the commit message and appends context
+    about the task (iteration 1) or addressed review findings (iteration 2+).
+    """
+    original_msg = vcs.get_description(session_name)
 
     parts = [f"[loop impl {iteration}] {original_msg}"]
 
@@ -126,12 +107,13 @@ def _describe_impl_change(
             f"{severity['critical']} critical, {severity['major']} major"
         )
 
-    _jj_run(["describe", "-r", session_name, "-m", "\n".join(parts)], jj_root)
+    vcs.describe(session_name, "\n".join(parts))
 
 
 def _describe_review_change(
-    session_name: str, iteration: int, severity: dict, jj_root: Path,
+    session_name: str, iteration: int, severity: dict, vcs: VcsBackend,
 ) -> None:
+    """Annotate a review change with severity counts and pass/fail status."""
     is_clean = severity["critical"] == 0 and severity["major"] == 0
     status = "clean" if is_clean else "needs fixes"
 
@@ -141,19 +123,20 @@ def _describe_review_change(
         f"{severity['minor']} minor -- {status}"
     )
 
-    _jj_run(["describe", "-r", session_name, "-m", msg], jj_root)
-
-
-def _delete_bookmark(bookmark: str, jj_root: Path) -> None:
-    _jj_run(["bookmark", "delete", bookmark], jj_root)
+    vcs.describe(session_name, msg)
 
 
 # --- Prompt composition ---
 
 
 def _compose_iter_prompt(
-    task_file: Path, review_content: str | None, iteration: int, jj_root: Path,
+    task_file: Path, review_content: str | None, iteration: int, repo_root: Path,
 ) -> Path:
+    """Build the task prompt for an implementation iteration.
+
+    First iteration: returns the original task file unchanged.
+    Subsequent iterations: combines the task with previous review findings.
+    """
     if iteration == 1 or not review_content:
         return task_file
 
@@ -166,7 +149,7 @@ def _compose_iter_prompt(
     )
     tmp = tempfile.NamedTemporaryFile(
         mode="w", suffix=".md", prefix=f".cld-loop-impl-iter{iteration}-",
-        delete=False, dir=jj_root,
+        delete=False, dir=repo_root,
     )
     tmp.write(combined)
     tmp.close()
@@ -174,21 +157,24 @@ def _compose_iter_prompt(
 
 
 def _compose_review_prompt(
-    start_commit: str, loop_bookmark: str, iteration: int, jj_root: Path,
+    start_commit: str, loop_branch: str, iteration: int, vcs: VcsBackend,
 ) -> Path:
-    diff_result = subprocess.run(
-        ["jj", "diff", "--from", start_commit, "--to", loop_bookmark, "--git"],
-        capture_output=True, text=True, cwd=str(jj_root),
-    )
-    if diff_result.returncode != 0:
-        log_error(f"Failed to generate diff: {diff_result.stderr.strip()}")
+    """Build the task prompt for a review iteration.
+
+    Generates a diff from *start_commit* to the current loop branch tip,
+    saves it as a patch file, and fills in the review template.
+    """
+    repo_root = vcs.repo_root
+    diff_content = vcs.diff_between(start_commit, loop_branch)
+    if diff_content.startswith("Error:"):
+        log_error(f"Failed to generate diff: {diff_content}")
         sys.exit(1)
-    if not diff_result.stdout.strip():
+    if not diff_content.strip():
         log_error("Generated diff is empty -- nothing to review")
         sys.exit(1)
 
-    diff_file = jj_root / f".cld-loop-diff-iter{iteration}.patch"
-    diff_file.write_text(diff_result.stdout)
+    diff_file = repo_root / f".cld-loop-diff-iter{iteration}.patch"
+    diff_file.write_text(diff_content)
 
     cld_root = Path(__file__).resolve().parent.parent
     template_path = cld_root / "prompts/loop-review.md"
@@ -202,7 +188,7 @@ def _compose_review_prompt(
 
     task = tempfile.NamedTemporaryFile(
         mode="w", suffix=".md", prefix=f".cld-loop-review-iter{iteration}-",
-        delete=False, dir=jj_root,
+        delete=False, dir=repo_root,
     )
     task.write(content)
     task.close()
@@ -222,6 +208,7 @@ def _print_phase(iteration: int, max_iter: int, phase: str, session: str) -> Non
 
 
 def _print_iteration_result(iteration: int, max_iter: int, severity: dict) -> None:
+    """Log a one-line summary of review findings and the resulting action."""
     parts = []
     for level in ("critical", "major", "minor"):
         count = severity[level]
@@ -234,19 +221,29 @@ def _print_iteration_result(iteration: int, max_iter: int, severity: dict) -> No
 
 
 def _print_exit_report(
-    loop_bookmark: str, iteration: int, max_iter: int, reason: str,
+    loop_branch: str, iteration: int, max_iter: int, reason: str,
+    vcs: VcsBackend,
 ) -> None:
+    """Print the final summary with VCS-appropriate commands for the user."""
+    vcs_name = vcs.name
     print()
     print("=" * 48)
     print(f"Loop completed: {iteration}/{max_iter} iterations ({reason})")
     print("=" * 48)
     print()
-    print(f"Bookmark:  {loop_bookmark}")
-    print(f"History:   jj log -r '{loop_bookmark}::@'")
-    print(f"Diff:      jj diff -r '{loop_bookmark}'")
-    if iteration > 0:
-        print(f"Review:    jj file show -r '{loop_bookmark}' CODE_REVIEW_iter{iteration}.md")
-    print(f"Merge:     jj squash --from '{loop_bookmark}'")
+    print(f"Branch:    {loop_branch}")
+    if vcs_name == "jj":
+        print(f"History:   jj log -r '{loop_branch}::@'")
+        print(f"Diff:      jj diff -r '{loop_branch}'")
+        if iteration > 0:
+            print(f"Review:    jj file show -r '{loop_branch}' CODE_REVIEW_iter{iteration}.md")
+        print(f"Merge:     jj squash --from '{loop_branch}'")
+    else:
+        print(f"History:   git log {loop_branch}")
+        print(f"Diff:      git diff {loop_branch}~1..{loop_branch}")
+        if iteration > 0:
+            print(f"Review:    git show {loop_branch}:CODE_REVIEW_iter{iteration}.md")
+        print(f"Merge:     git merge {loop_branch}")
     print()
 
 
@@ -254,6 +251,7 @@ def _print_exit_report(
 
 
 def _prompt_user(severity: dict, review_content: str) -> str:
+    """Prompt the user to continue, stop, or view the full review."""
     print()
     print(f"  Critical: {severity['critical']}  Major: {severity['major']}  Minor: {severity['minor']}")
     print()
@@ -272,9 +270,10 @@ def _prompt_user(severity: dict, review_content: str) -> str:
 # --- Cleanup ---
 
 
-def _cleanup_temp_files(jj_root: Path) -> None:
+def _cleanup_temp_files(repo_root: Path) -> None:
+    """Remove temporary files created during loop iterations."""
     for pattern in (".cld-loop-impl-*", ".cld-loop-review-*", ".cld-loop-diff-*"):
-        for f in jj_root.glob(pattern):
+        for f in repo_root.glob(pattern):
             f.unlink(missing_ok=True)
 
 
@@ -291,16 +290,22 @@ def run_loop(
     max_iterations: int = 3,
     approve: bool = False,
 ) -> None:
-    jj_root = find_jj_root()
-    loop_bookmark = build_session_name("loop", name)
-    start_commit = _jj_resolve(revision or "@", jj_root)
+    """Run the automated implement-review loop.
 
-    result = _jj_run(["bookmark", "create", loop_bookmark, "-r", start_commit], jj_root)
-    if result.returncode != 0:
-        log_error(f"Failed to create bookmark: {result.stderr.strip()}")
-        sys.exit(1)
+    Each iteration launches an implementation agent, waits for it, then launches
+    a review agent. If the review is clean (no critical/major findings), the loop
+    stops. Otherwise, review feedback is fed into the next implementation iteration.
+    A VCS branch tracks the accumulated changes across iterations.
+    """
+    vcs = get_backend()
+    repo_root = vcs.repo_root
+    loop_branch = build_session_name("loop", name)
+    default_rev = "@" if vcs.name == "jj" else "HEAD"
+    start_commit = vcs.resolve_revision(revision or default_rev)
 
-    log_info(f"Loop '{loop_bookmark}' started at {start_commit[:12]}")
+    vcs.create_branch(loop_branch, start_commit)
+
+    log_info(f"Loop '{loop_branch}' started at {start_commit[:12]}")
 
     review_content: str | None = None
     final_reason = "max iterations reached"
@@ -311,8 +316,8 @@ def run_loop(
             final_iteration = iteration
 
             # --- IMPLEMENT ---
-            impl_task = _compose_iter_prompt(task_file, review_content, iteration, jj_root)
-            impl_session = f"{loop_bookmark}_impl{iteration}"
+            impl_task = _compose_iter_prompt(task_file, review_content, iteration, repo_root)
+            impl_session = f"{loop_branch}_impl{iteration}"
 
             _print_phase(iteration, max_iterations, "implementing...", impl_session)
             phase_start = time.monotonic()
@@ -320,12 +325,12 @@ def run_loop(
             impl_result = launch_agent(
                 task_file=impl_task,
                 model=model,
-                revision=loop_bookmark,
+                revision=loop_branch,
                 session_name=impl_session,
                 quiet=True,
             )
 
-            impl_summary = _wait_for_agent(impl_result["session_name"], jj_root)
+            impl_summary = _wait_for_agent(impl_result["session_name"], vcs)
             duration = time.monotonic() - phase_start
             log_info(f"[{iteration}/{max_iterations}] implementing... done ({_format_duration(duration)})")
 
@@ -335,13 +340,13 @@ def run_loop(
                 final_reason = f"implementer {impl_status} (iteration {iteration})"
                 break
 
-            _describe_impl_change(impl_session, iteration, task_file, review_content, jj_root)
-            _jj_run(["bookmark", "set", loop_bookmark, "-r", impl_session], jj_root)
-            _delete_bookmark(impl_session, jj_root)
+            _describe_impl_change(impl_session, iteration, task_file, review_content, vcs)
+            vcs.set_branch(loop_branch, impl_session)
+            vcs.delete_branch(impl_session)
 
             # --- REVIEW ---
-            review_task = _compose_review_prompt(start_commit, loop_bookmark, iteration, jj_root)
-            review_session = f"{loop_bookmark}_review{iteration}"
+            review_task = _compose_review_prompt(start_commit, loop_branch, iteration, vcs)
+            review_session = f"{loop_branch}_review{iteration}"
 
             _print_phase(iteration, max_iterations, "reviewing...", review_session)
             phase_start = time.monotonic()
@@ -349,34 +354,34 @@ def run_loop(
             review_result = launch_agent(
                 task_file=review_task,
                 model=review_model,
-                revision=loop_bookmark,
+                revision=loop_branch,
                 session_name=review_session,
                 quiet=True,
             )
 
-            review_summary = _wait_for_agent(review_result["session_name"], jj_root)
+            review_summary = _wait_for_agent(review_result["session_name"], vcs)
             duration = time.monotonic() - phase_start
             log_info(f"[{iteration}/{max_iterations}] reviewing... done ({_format_duration(duration)})")
 
             # --- EVALUATE ---
-            review_content = _jj_file_show(
-                review_session, f"CODE_REVIEW_iter{iteration}.md", jj_root,
+            review_content = vcs.file_show(
+                review_session, f"CODE_REVIEW_iter{iteration}.md",
             )
 
             if not review_content:
                 log_warn("Reviewer produced no review file")
                 if review_summary.get("status") == "success":
-                    _jj_run(["bookmark", "set", loop_bookmark, "-r", review_session], jj_root)
-                _delete_bookmark(review_session, jj_root)
+                    vcs.set_branch(loop_branch, review_session)
+                vcs.delete_branch(review_session)
                 final_reason = f"no review output (iteration {iteration})"
                 break
 
             severity = _parse_review_severity(review_content)
 
-            _describe_review_change(review_session, iteration, severity, jj_root)
+            _describe_review_change(review_session, iteration, severity, vcs)
             if review_summary.get("status") == "success":
-                _jj_run(["bookmark", "set", loop_bookmark, "-r", review_session], jj_root)
-            _delete_bookmark(review_session, jj_root)
+                vcs.set_branch(loop_branch, review_session)
+            vcs.delete_branch(review_session)
 
             _print_iteration_result(iteration, max_iterations, severity)
 
@@ -395,5 +400,5 @@ def run_loop(
         log_warn("Interrupted")
         final_reason = "interrupted"
 
-    _print_exit_report(loop_bookmark, final_iteration, max_iterations, final_reason)
-    _cleanup_temp_files(jj_root)
+    _print_exit_report(loop_branch, final_iteration, max_iterations, final_reason, vcs)
+    _cleanup_temp_files(repo_root)

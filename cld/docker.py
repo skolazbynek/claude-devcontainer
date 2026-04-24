@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from cld.vcs import get_backend
+
 CONTAINER_USER = "claude"
 CONTAINER_HOME = f"/home/{CONTAINER_USER}"
 WORKSPACE_BASE = "/workspace"
@@ -29,25 +31,26 @@ def log_error(msg: str) -> None:
     print(f"{_RED}[ERROR]{_NC} {msg}", file=sys.stderr)
 
 
-def find_jj_root(start: Path | None = None) -> Path:
-    # Inside a container, prefer the bind-mounted origin dir
-    origin = os.environ.get("WORKSPACE_ORIGIN", "")
-    if origin and (Path(origin) / ".jj").is_dir():
-        return Path(origin)
-    d = start or Path.cwd()
-    while d != d.parent:
-        if (d / ".jj").is_dir():
-            return d
-        d = d.parent
-    log_error("No jj repository found")
-    sys.exit(1)
+def find_repo_root(start: Path | None = None) -> Path:
+    """Locate the VCS repository root (jj or git) by walking up from *start*.
+
+    Delegates to the VCS auto-detection layer. Exits on failure.
+    """
+    try:
+        backend = get_backend(start)
+        return backend.repo_root
+    except RuntimeError as e:
+        log_error(str(e))
+        sys.exit(1)
 
 
 def build_session_name(prefix: str, suffix: str = "") -> str:
+    """Generate a session name like ``prefix_suffix`` or ``prefix_<random>``."""
     return f"{prefix}_{suffix or random.randint(10000, 99999)}"
 
 
 def load_dotenv(path: Path | None = None) -> None:
+    """Read a .env file and inject its variables into the current process environment."""
     dotenv = path or Path.cwd() / ".env"
     if not dotenv.is_file():
         return
@@ -61,12 +64,14 @@ def load_dotenv(path: Path | None = None) -> None:
 
 
 def require_docker() -> None:
+    """Verify the ``docker`` CLI is available, exit otherwise."""
     if not shutil.which("docker"):
         log_error("Docker is not installed.")
         sys.exit(1)
 
 
 def ensure_image(image: str, dockerfile: Path, context: Path) -> None:
+    """Build a Docker image if it does not already exist locally."""
     result = subprocess.run(
         ["docker", "images", "-q", image], capture_output=True, text=True,
     )
@@ -81,6 +86,11 @@ def ensure_image(image: str, dockerfile: Path, context: Path) -> None:
 
 
 def _to_host_path(path: str) -> str:
+    """Translate a container-internal path to the corresponding host path.
+
+    Uses HOST_PROJECT_DIR and HOST_HOME env vars set during container launch
+    to map /workspace/* and $HOME paths back to their host-side locations.
+    """
     host_project = os.environ.get("HOST_PROJECT_DIR", "")
     host_home = os.environ.get("HOST_HOME", "")
     if host_project:
@@ -96,15 +106,19 @@ def _to_host_path(path: str) -> str:
 
 
 def build_container_args(
-    jj_root: Path,
+    repo_root: Path,
     session_name: str,
     *,
     interactive: bool = False,
 ) -> list[str]:
-    """Build the complete base docker arg list every launcher needs."""
+    """Build the base ``docker run`` argument list every launcher needs.
+
+    Sets up security constraints, volume mounts (repo, claude config, neovim,
+    docker socket, mysql), and environment variables.
+    """
     home = os.path.expanduser("~")
     host_home = _to_host_path(home)
-    host_jj_root = _to_host_path(str(jj_root))
+    host_repo_root = _to_host_path(str(repo_root))
 
     args: list[str] = []
 
@@ -129,13 +143,12 @@ def build_container_args(
         sys.exit(1)
     args += [
         "-v", "/etc/ssl/certs:/etc/ssl/certs:ro",
-        "-v", f"{host_jj_root}:{WORKSPACE_BASE}/origin",
+        "-v", f"{host_repo_root}:{WORKSPACE_BASE}/origin",
         "-w", f"{WORKSPACE_BASE}/current",
         "-e", "NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt",
     ]
 
     # Claude session state (required)
-    # Check local path for existence, but mount using host-translated path
     local_claude_dir = Path(home) / ".claude"
     if not local_claude_dir.is_dir():
         log_error(f"{local_claude_dir} not found -- Claude auth and session state unavailable")
@@ -173,7 +186,7 @@ def build_container_args(
         args += [
             "-v", f"{docker_sock}:{docker_sock}",
             "--group-add", str(docker_gid),
-            "-e", f"HOST_PROJECT_DIR={jj_root}",
+            "-e", f"HOST_PROJECT_DIR={repo_root}",
             "-e", f"HOST_HOME={home}",
         ]
         log_info("Docker socket mounted (orchestrator support)")

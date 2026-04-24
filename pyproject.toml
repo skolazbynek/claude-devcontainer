@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "cld"
 version = "0.1.0"
-description = "Tooling for running Claude Code in Docker containers with jj workspace isolation"
+description = "Tooling for running Claude Code in Docker containers with VCS workspace isolation (jujutsu or git)"
 authors = []
 packages = [{include = "cld"}]
 

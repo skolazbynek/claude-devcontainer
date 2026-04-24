@@ -1,5 +1,5 @@
 ---
-description: Resolve all jujutsu conflicts in the current working change (@)
+description: Resolve all jujutsu conflicts in the current working change (@). Jujutsu-specific -- not applicable to git repositories.
 ---
 
 # Task

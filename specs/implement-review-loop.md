@@ -1,5 +1,7 @@
 # Spec: Automated Implement-Review Loop
 
+> **Note:** This spec was written when the tool only supported jujutsu. The implementation is now VCS-agnostic (jj or git). References to "jj bookmarks" map to "branches" and "revsets" map to "revisions" in the current codebase. See `cld/vcs/` for the abstraction layer.
+
 ## Overview
 
 A new `cld loop` command that automates the implement-review cycle using independent Docker agents. Given a task, it launches an implementer agent, then a reviewer agent, and iterates until the review is clean or a maximum iteration count is reached -- without human intervention.

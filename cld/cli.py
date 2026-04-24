@@ -12,7 +12,7 @@ from cld.docker import (
     build_container_args,
     build_session_name,
     ensure_image,
-    find_jj_root,
+    find_repo_root,
     load_dotenv,
     log_info,
     log_warn,
@@ -30,7 +30,7 @@ def agent(
     task_file: Optional[str] = typer.Argument(None, help="Path to task markdown file"),
     name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
     model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
-    revision: str = typer.Option("", "-r", "--revision", help="jj revset to base workspace on"),
+    revision: str = typer.Option("", "-r", "--revision", help="Revision to base workspace on"),
     prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (appended to task file if both given)"),
 ):
     """Launch an autonomous Claude agent."""
@@ -61,7 +61,7 @@ _DIRECT_RW = [".config/nvim", ".cache/nvim", ".local/share/nvim", ".local/state/
 def devcontainer(
     name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
     model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
-    revision: str = typer.Option("", "-r", "--revision", help="jj revset to base workspace on"),
+    revision: str = typer.Option("", "-r", "--revision", help="Revision to base workspace on"),
     extra_args: Optional[list[str]] = typer.Argument(None, help="Extra args passed to container"),
 ):
     """Launch an interactive Claude devcontainer."""
@@ -75,10 +75,10 @@ def devcontainer(
     )
     load_dotenv()
 
-    jj_root = find_jj_root()
+    repo_root = find_repo_root()
     session = build_session_name("cld", name)
 
-    args = build_container_args(jj_root, session, interactive=True)
+    args = build_container_args(repo_root, session, interactive=True)
     if model:
         args += ["-e", f"AGENT_MODEL={model}"]
     if revision:
@@ -129,7 +129,7 @@ def loop(
     name: str = typer.Option("", "-n", "--name", help="Loop session name suffix"),
     model: str = typer.Option("", "-m", "--model", help="Model for implementer agent"),
     review_model: str = typer.Option("", "--review-model", help="Model for reviewer agent"),
-    revision: str = typer.Option("", "-r", "--revision", help="Starting jj revision"),
+    revision: str = typer.Option("", "-r", "--revision", help="Starting revision"),
     max_iterations: int = typer.Option(3, "--max-iterations", help="Maximum iteration count"),
     prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (alternative to task file)"),
     approve: bool = typer.Option(False, "--approve", help="Pause after each review for approval"),
@@ -144,9 +144,9 @@ def loop(
         raise typer.Exit(1)
 
     if prompt:
-        jj_root = find_jj_root()
+        repo_root = find_repo_root()
         tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".md", prefix=".cld-loop-task-", delete=False, dir=jj_root,
+            mode="w", suffix=".md", prefix=".cld-loop-task-", delete=False, dir=repo_root,
         )
         if task_path:
             tmp.write(task_path.read_text())

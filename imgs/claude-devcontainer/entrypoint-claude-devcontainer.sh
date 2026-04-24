@@ -1,22 +1,33 @@
 #!/bin/bash
 source /workspace/container-init.sh
+source /workspace/vcs-lib.sh
 
 BOOKMARK="${SESSION_NAME:?SESSION_NAME must be set}"
 
-if [ ! -d "$WORKSPACE_ORIGIN/.jj" ]; then
-    echo "Error: No jj repository found at $WORKSPACE_ORIGIN"
-    exit 1
+# Detect VCS type (jj or git)
+detect_vcs || exit 1
+
+echo "Using $VCS_TYPE repository at: $WORKSPACE_ORIGIN"
+
+WORKSPACE_REV="${AGENT_REVISION:-}"
+if [ -z "$WORKSPACE_REV" ]; then
+    if [ "$VCS_TYPE" = "jj" ]; then
+        WORKSPACE_REV="@"
+    else
+        WORKSPACE_REV="HEAD"
+    fi
 fi
 
-echo "Using jj repository at: $WORKSPACE_ORIGIN"
-
-WORKSPACE_REV="${AGENT_REVISION:-@}"
-
 cd "$WORKSPACE_ORIGIN"
-jj workspace add --name "$BOOKMARK" -r "$WORKSPACE_REV" "$WORKSPACE_CURRENT"
+vcs_create_workspace "$BOOKMARK" "$WORKSPACE_CURRENT" "$WORKSPACE_REV"
 
 cd "$WORKSPACE_CURRENT"
-jj bookmark create -r @ "$BOOKMARK"
+
+# For jj, create a bookmark at the current change.
+# For git, the branch is already created by worktree add.
+if [ "$VCS_TYPE" = "jj" ]; then
+    jj bookmark create -r @ "$BOOKMARK"
+fi
 
 build_claude_config
 
@@ -43,4 +54,4 @@ chmod +x /tmp/bin/claude
 /bin/bash
 
 # Cleanup when shell exits
-jj workspace forget
+vcs_forget_workspace "$BOOKMARK" "$WORKSPACE_CURRENT"

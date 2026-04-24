@@ -14,7 +14,7 @@ Go through the files from input one by one and try to find the root cause of its
 - Analyzing the logs from the input files
 - Checking out the test itself that failed
 - Exploring the codebase relevant to the failing test, based on the test logs
-- Checking code history with jujutsu
+- Checking code history with the available VCS (jujutsu or git)
 
 # Constraints
 - Calls to Diskuze API within test are not mocked by design. Skip such failures, note them in your output summary briefly.
