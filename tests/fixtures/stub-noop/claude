@@ -1,0 +1,4 @@
+#!/bin/bash
+# Stub claude binary that makes NO file changes.
+# Used to test the "no_changes" status path.
+echo '{"type":"result","subtype":"success","cost_usd":0.0,"duration_ms":100,"duration_api_ms":50,"is_error":false,"num_turns":1,"result":"No changes needed","session_id":"stub-session"}'
