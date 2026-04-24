@@ -116,7 +116,7 @@ class JjBackend(VcsBackend):
     def has_changes(self) -> bool:
         """Check whether the jj working copy has uncommitted changes."""
         result = self.run(["diff", "--stat"])
-        return bool(result.stdout.strip())
+        return any("|" in line for line in result.stdout.splitlines())
 
     def diff_stat_summary(self) -> tuple[int, str]:
         """Parse ``jj diff --stat`` output to extract file count and names."""
@@ -152,7 +152,7 @@ class JjBackend(VcsBackend):
 
     def resolve_revision(self, revision: str) -> str:
         """Resolve a jj revset to a concrete commit ID."""
-        result = self.run(["log", "-r", revision, "--no-graph", "-T", "commit_id", "-l", "1"])
+        result = self.run(["log", "-r", revision, "--no-graph", "-T", "commit_id", "-n", "1"])
         if result.returncode != 0:
             raise RuntimeError(f"Failed to resolve revision '{revision}': {result.stderr.strip()}")
         return result.stdout.strip()

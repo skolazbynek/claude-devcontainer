@@ -7,7 +7,7 @@ import pytest
 from cld.docker import (
     _to_host_path,
     build_session_name,
-    find_jj_root,
+    find_repo_root,
     load_dotenv,
     mount_home_path,
 )
@@ -30,13 +30,13 @@ class TestBuildSessionName:
 class TestFindJjRoot:
     def test_finds_in_start_dir(self, tmp_path):
         (tmp_path / ".jj").mkdir()
-        assert find_jj_root(tmp_path) == tmp_path
+        assert find_repo_root(tmp_path) == tmp_path
 
     def test_walks_up_from_nested(self, tmp_path):
         (tmp_path / ".jj").mkdir()
         nested = tmp_path / "a" / "b"
         nested.mkdir(parents=True)
-        assert find_jj_root(nested) == tmp_path
+        assert find_repo_root(nested) == tmp_path
 
     def test_workspace_origin_env_takes_priority(self, tmp_path, monkeypatch):
         origin = tmp_path / "origin"
@@ -44,11 +44,11 @@ class TestFindJjRoot:
         elsewhere = tmp_path / "elsewhere"
         (elsewhere / ".jj").mkdir(parents=True)
         monkeypatch.setenv("WORKSPACE_ORIGIN", str(origin))
-        assert find_jj_root(elsewhere) == origin
+        assert find_repo_root(elsewhere) == origin
 
     def test_exits_when_not_found(self, tmp_path):
         with pytest.raises(SystemExit):
-            find_jj_root(tmp_path)
+            find_repo_root(tmp_path)
 
 
 class TestLoadDotenv:

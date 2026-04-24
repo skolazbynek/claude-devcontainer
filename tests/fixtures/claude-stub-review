@@ -1,0 +1,26 @@
+#!/bin/bash
+# Stub claude binary for review tests.
+# Creates a review markdown file (what the review agent would produce).
+# Looks for OUTPUT_FILE hint in the prompt, falls back to CODE_REVIEW.md.
+
+# Extract iteration number from prompt if present
+ITER=$(echo "$1" | grep -oP 'CODE_REVIEW_iter\K\d+' || echo "1")
+OUTPUT="CODE_REVIEW_iter${ITER}.md"
+
+cat > "$OUTPUT" <<'REVIEW'
+## Critical
+
+## Major
+
+## Minor
+
+### Consider adding input validation
+
+The function accepts user input without sanitization.
+
+## Summary
+
+Code looks good overall. One minor suggestion.
+REVIEW
+
+echo '{"type":"result","subtype":"success","cost_usd":0.0,"duration_ms":100,"duration_api_ms":50,"is_error":false,"num_turns":1,"result":"Review completed by stub","session_id":"stub-session"}'

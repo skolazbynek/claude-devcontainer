@@ -16,6 +16,13 @@ typer = "^0.24.1"
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"
 
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that hit real VCS or filesystem",
+    "docker: tests that require a running Docker daemon",
+    "e2e: full end-to-end tests (slow, require Docker + built images)",
+]
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
