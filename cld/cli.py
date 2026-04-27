@@ -1,6 +1,8 @@
 """CLI entry point for cld."""
 
+import functools
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -14,6 +16,7 @@ from cld.docker import (
     ensure_image,
     find_repo_root,
     load_dotenv,
+    log_error,
     log_info,
     log_warn,
     mount_home_path,
@@ -25,12 +28,38 @@ from cld.loop import run_loop
 app = typer.Typer(add_completion=False)
 
 
+def _handle_errors(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except (RuntimeError, subprocess.CalledProcessError, FileNotFoundError) as e:
+            log_error(str(e))
+            raise typer.Exit(1)
+    return wrapper
+
+
+def _version_callback(value: bool):
+    if value:
+        from cld import __version__
+        typer.echo(f"cld {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: bool = typer.Option(False, "--version", callback=_version_callback, is_eager=True, help="Show version and exit"),
+):
+    pass
+
+
 @app.command()
+@_handle_errors
 def agent(
     task_file: Optional[str] = typer.Argument(None, help="Path to task markdown file"),
     name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
     model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
-    revision: str = typer.Option("", "-r", "--revision", help="Revision to base workspace on"),
+    revision: str = typer.Option("", "-r", "--revision", help="Revision to base workspace on (default: last committed change -- @- for jj, HEAD for git)"),
     prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (appended to task file if both given)"),
 ):
     """Launch an autonomous Claude agent."""
@@ -58,10 +87,11 @@ _DIRECT_RW = [".config/nvim", ".cache/nvim", ".local/share/nvim", ".local/state/
 
 
 @app.command()
+@_handle_errors
 def devcontainer(
     name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
     model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
-    revision: str = typer.Option("", "-r", "--revision", help="Revision to base workspace on"),
+    revision: str = typer.Option("", "-r", "--revision", help="Revision to base workspace on (default: last committed change -- @- for jj, HEAD for git)"),
     extra_args: Optional[list[str]] = typer.Argument(None, help="Extra args passed to container"),
 ):
     """Launch an interactive Claude devcontainer."""
@@ -113,23 +143,34 @@ def devcontainer(
 
 
 @app.command()
+@_handle_errors
 def review(
     feature_branch: str = typer.Argument(help="Feature branch to review"),
-    trunk_branch: str = typer.Argument(help="Trunk branch to diff against"),
+    trunk_branch: Optional[str] = typer.Argument(default=None, help="Trunk branch to diff against (auto-detected if omitted)"),
     name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
     model: str = typer.Option("", "-m", "--model", help="Claude model"),
 ):
     """Launch a code review agent."""
+    if trunk_branch is None:
+        from cld.vcs import get_backend
+        branches = get_backend().list_branches()
+        for candidate in ("main", "master", "trunk"):
+            if candidate in branches:
+                trunk_branch = candidate
+                break
+        if trunk_branch is None:
+            raise RuntimeError("Could not auto-detect trunk branch; none of main/master/trunk found. Pass it explicitly.")
     launch_review(feature_branch, trunk_branch, name=name, model=model)
 
 
 @app.command()
+@_handle_errors
 def loop(
     task_file: Optional[str] = typer.Argument(None, help="Path to task markdown file"),
     name: str = typer.Option("", "-n", "--name", help="Loop session name suffix"),
     model: str = typer.Option("", "-m", "--model", help="Model for implementer agent"),
     review_model: str = typer.Option("", "--review-model", help="Model for reviewer agent"),
-    revision: str = typer.Option("", "-r", "--revision", help="Starting revision"),
+    revision: str = typer.Option("", "-r", "--revision", help="Revision to base workspace on (default: last committed change -- @- for jj, HEAD for git)"),
     max_iterations: int = typer.Option(3, "--max-iterations", help="Maximum iteration count"),
     prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (alternative to task file)"),
     approve: bool = typer.Option(False, "--approve", help="Pause after each review for approval"),
@@ -167,10 +208,21 @@ def loop(
     )
 
 
-@app.command()
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@_handle_errors
 def headless(ctx: typer.Context):
-    """Run Claude in headless mode (passthrough to claude -p)."""
+    """Thin wrapper around `claude -p --permission-mode acceptEdits`. Convenience for one-shot prompts that should be allowed to edit files without per-tool approval."""
     run_headless(ctx.args)
+
+
+@app.command()
+@_handle_errors
+def build(no_cache: bool = typer.Option(False, "--no-cache", help="Force rebuild without cache")):
+    """Build devcontainer and agent images (devcontainer first)."""
+    require_docker()
+    cld_root = Path(__file__).resolve().parent.parent
+    ensure_image(DEVCONTAINER_IMAGE, cld_root / "imgs/claude-devcontainer/Dockerfile.claude-devcontainer", cld_root, force=no_cache)
+    ensure_image(AGENT_IMAGE, cld_root / "imgs/claude-agent/Dockerfile.claude-agent", cld_root / "imgs/claude-agent", force=no_cache)
 
 
 if __name__ == "__main__":
