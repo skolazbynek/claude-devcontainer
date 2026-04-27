@@ -221,9 +221,22 @@ def _print_iteration_result(iteration: int, max_iter: int, severity: dict) -> No
     log_info(f"[{iteration}/{max_iter}] result: {summary} -> {action}")
 
 
+def _read_agent_cost(session: str, vcs: VcsBackend) -> float | None:
+    """Read cost_usd from a completed agent's result.json."""
+    raw = vcs.file_show(session, f"agent-output-{session}/result.json")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        cost = data.get("cost_usd")
+        return float(cost) if cost is not None else None
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
 def _print_exit_report(
     loop_branch: str, iteration: int, max_iter: int, reason: str,
-    vcs: VcsBackend,
+    vcs: VcsBackend, total_cost_usd: float = 0.0,
 ) -> None:
     """Print the final summary with VCS-appropriate commands for the user."""
     vcs_name = vcs.name
@@ -245,6 +258,11 @@ def _print_exit_report(
         if iteration > 0:
             print(f"Review:    git show {loop_branch}:CODE_REVIEW_iter{iteration}.md")
         print(f"Merge:     git merge {loop_branch}")
+    if total_cost_usd > 0:
+        n = iteration if iteration > 0 else max_iter
+        label = "iteration" if n == 1 else "iterations"
+        print()
+        print(f"Total cost: ${total_cost_usd:.4f} over {n} {label}")
     print()
 
 
@@ -323,6 +341,7 @@ def run_loop(
     review_content: str | None = None
     final_reason = "max iterations reached"
     final_iteration = 0
+    total_cost_usd = 0.0
 
     try:
         for iteration in range(1, max_iterations + 1):
@@ -344,6 +363,9 @@ def run_loop(
             )
 
             impl_summary = _wait_for_agent(impl_result["session_name"], vcs, agent_timeout)
+            impl_cost = _read_agent_cost(impl_result["session_name"], vcs)
+            if impl_cost is not None:
+                total_cost_usd += impl_cost
             duration = time.monotonic() - phase_start
             log_info(f"[{iteration}/{max_iterations}] implementing... done ({_format_duration(duration)})")
 
@@ -373,6 +395,9 @@ def run_loop(
             )
 
             review_summary = _wait_for_agent(review_result["session_name"], vcs, agent_timeout)
+            review_cost = _read_agent_cost(review_result["session_name"], vcs)
+            if review_cost is not None:
+                total_cost_usd += review_cost
             duration = time.monotonic() - phase_start
             log_info(f"[{iteration}/{max_iterations}] reviewing... done ({_format_duration(duration)})")
 
@@ -413,5 +438,5 @@ def run_loop(
         log_warn("Interrupted")
         final_reason = "interrupted"
 
-    _print_exit_report(loop_branch, final_iteration, max_iterations, final_reason, vcs)
+    _print_exit_report(loop_branch, final_iteration, max_iterations, final_reason, vcs, total_cost_usd)
     _cleanup_temp_files(repo_root)
