@@ -120,24 +120,45 @@ def launch_agent(task_file: str, name: str = "", model: str = "", revision: str 
 
 @mcp.tool()
 def list_agents() -> list[dict]:
-    """List running Claude agent containers."""
+    """List Claude agents -- running containers and completed-but-not-merged branches.
+
+    Since agent containers run with --rm, completed agents disappear from `docker ps`.
+    This also enumerates VCS branches matching agent_*/review_*/loop_* and merges them in.
+    Each entry is {session_name, status: 'running'|'completed', container_id?, running_for?}.
+    """
     result = _run([
         "docker", "ps",
         "--filter", "ancestor=claude-agent:latest",
         "--format", '{{json .}}',
     ])
-    agents = []
+    agents: dict[str, dict] = {}
     for line in result.stdout.strip().splitlines():
         if not line:
             continue
         data = json.loads(line)
-        agents.append({
+        name = data.get("Names", "")
+        agents[name] = {
+            "session_name": name,
+            "status": "running",
             "container_id": data.get("ID", ""),
-            "name": data.get("Names", ""),
-            "status": data.get("Status", ""),
+            "container_status": data.get("Status", ""),
             "running_for": data.get("RunningFor", ""),
-        })
-    return agents
+        }
+
+    try:
+        branches_raw = get_backend().list_branches()
+    except RuntimeError:
+        branches_raw = ""
+    for line in branches_raw.splitlines():
+        name = line.strip().split()[0] if line.strip() else ""
+        # Strip any trailing ':' or '@' jj decorations
+        name = name.rstrip(":").split("@")[0]
+        if not name or name in agents:
+            continue
+        if any(name.startswith(p) for p in ("agent_", "review_", "loop_")):
+            agents[name] = {"session_name": name, "status": "completed"}
+
+    return list(agents.values())
 
 
 @mcp.tool()
@@ -178,6 +199,12 @@ def check_status(session_name: str, include_result: bool = False) -> dict:
             info["summary"] = json.loads(summary_raw)
         except json.JSONDecodeError:
             info["summary_raw"] = summary_raw[:2000]
+    else:
+        info["status"] = "failed"
+        info["error"] = "summary.json missing -- agent likely failed before commit"
+        failure_raw = vcs.file_show(session_name, f"{output_prefix}/AGENT-FAILURE.md")
+        if failure_raw:
+            info["failure"] = failure_raw[:5000]
 
     if include_result:
         result_raw = vcs.file_show(session_name, f"{output_prefix}/result.json")
@@ -327,9 +354,10 @@ def vcs_commit(message: str) -> str:
 
 
 @mcp.tool()
-def vcs_describe(message: str, revset: str = "") -> str:
+def vcs_describe(revset: str = "", message: str = "") -> str:
     """Set description/message on a VCS change.
 
+    Argument order matches the backend's describe(revision, message).
     For jj: updates the change description. For git: rewrites the commit message.
     """
     vcs = get_backend()
@@ -379,7 +407,7 @@ def jj_commit(message: str) -> str:
 @mcp.tool()
 def jj_describe(message: str, revset: str = "@") -> str:
     """[Compatibility] Set description on a change. Delegates to vcs_describe."""
-    return vcs_describe(message, revset)
+    return vcs_describe(revset, message)
 
 
 @mcp.tool()
