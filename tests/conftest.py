@@ -17,9 +17,14 @@ _LEAKY_VARS = ("WORKSPACE_ORIGIN", "HOST_PROJECT_DIR", "HOST_HOME", "MYSQL_CONFI
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 FIXTURES_DIR = _PROJECT_ROOT / "tests" / "fixtures"
 
-# Paths visible to Docker child containers.
-# In devcontainer: /workspace/origin -> HOST_PROJECT_DIR on the host.
-# On host: project root is already a host path, no translation needed.
+# HOST_PROJECT_DIR detection: E2E tests can run either on the host or inside the
+# devcontainer. When running inside the devcontainer, Docker child containers
+# receive volume mounts using *host* paths, but the container's own filesystem
+# sees the repo at /workspace/origin. HOST_PROJECT_DIR is set by the devcontainer
+# entrypoint to the original host-side project path so that we can translate
+# /workspace/origin/* paths back to host paths before passing them to Docker.
+# When HOST_PROJECT_DIR is absent we are running on the host directly and no
+# translation is needed -- _PROJECT_ROOT is already the correct host path.
 _HOST_PROJECT_DIR = os.environ.get("HOST_PROJECT_DIR", "")
 _DOCKER_ROOT = Path("/workspace/origin") if _HOST_PROJECT_DIR else _PROJECT_ROOT
 _E2E_REPO_BASE = _DOCKER_ROOT / ".test-repos"
