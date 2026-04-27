@@ -85,18 +85,8 @@ else
     VCS_NOTE="Your working directory is isolated in a git worktree. All changes will be committed when you're done."
 fi
 
-SYSTEM_PROMPT="You are an autonomous agent working on a task in complete isolation.
-
-CRITICAL INSTRUCTIONS:
-1. You must complete the task specified in the instructions below
-2. If you encounter errors, try alternative approaches
-3. Do not give up after first failure - iterate and retry with different methods
-4. Try multiple solutions until you succeed or exhaust all reasonable options
-5. Document your attempts and reasoning in comments or commit messages
-6. If you cannot complete the task after multiple attempts, create a file 'AGENT-FAILURE.md' explaining:
-   - What you tried
-   - Why each approach failed
-   - What would be needed to complete the task
+SYSTEM_PROMPT_FILE="${AGENT_SYSTEM_PROMPT_FILE:-/opt/cld/agent-system-prompt.md}"
+SYSTEM_PROMPT="$(cat "$SYSTEM_PROMPT_FILE")
 
 $VCS_NOTE
 
@@ -142,16 +132,24 @@ if vcs_has_changes; then
     CHANGED_FILES=$(vcs_diff_file_names)
     log "Files modified: $FILE_COUNT ($CHANGED_FILES)"
 
-    # Ask Claude for a descriptive commit message based on what it did
-    if [ "$VCS_TYPE" = "jj" ]; then
-        DESCRIBE_PROMPT="Look at the current jj diff (run jj diff --stat and jj diff). Write a single short sentence (under 72 chars) describing what was done. Output ONLY the description, nothing else."
+    if [ "${AGENT_COMMIT_MSG_LLM:-0}" = "1" ]; then
+        if [ "$VCS_TYPE" = "jj" ]; then
+            DESCRIBE_PROMPT="Look at the current jj diff (run jj diff --stat and jj diff). Write a single short sentence (under 72 chars) describing what was done. Output ONLY the description, nothing else."
+        else
+            DESCRIBE_PROMPT="Look at the current git diff (run git diff --stat and git diff). Write a single short sentence (under 72 chars) describing what was done. Output ONLY the description, nothing else."
+        fi
+        COMMIT_MSG=$(claude -p "$DESCRIBE_PROMPT" \
+            --model "$AGENT_MODEL" \
+            --dangerously-skip-permissions 2>/dev/null | head -1)
+        COMMIT_MSG="${COMMIT_MSG:-agent $AGENT_NAME: task}"
     else
-        DESCRIBE_PROMPT="Look at the current git diff (run git diff --stat and git diff). Write a single short sentence (under 72 chars) describing what was done. Output ONLY the description, nothing else."
+        STAT_SUMMARY=$(vcs_diff_stat 2>/dev/null | tail -1)
+        INS=$(echo "$STAT_SUMMARY" | sed -n 's/.*[^0-9]\([0-9]*\) insertion.*/\1/p')
+        DEL=$(echo "$STAT_SUMMARY" | sed -n 's/.*[^0-9]\([0-9]*\) deletion.*/\1/p')
+        INS="${INS:-0}"
+        DEL="${DEL:-0}"
+        COMMIT_MSG="agent $AGENT_NAME: ${FILE_COUNT} files, +${INS}/-${DEL}"
     fi
-    COMMIT_MSG=$(claude -p "$DESCRIBE_PROMPT" \
-        --model "$AGENT_MODEL" \
-        --dangerously-skip-permissions 2>/dev/null | head -1)
-    COMMIT_MSG="${COMMIT_MSG:-Agent task: $AGENT_NAME}"
     log "Commit message: $COMMIT_MSG"
 
     if ! vcs_commit "$COMMIT_MSG" 2>&1 | tee -a "$LOG_FILE"; then
@@ -169,6 +167,15 @@ else
     TASK_STATUS="no_changes"
 fi
 
+# Check for AGENT-FAILURE.md written by the agent
+FAILURE_JSON_STR="null"
+if [ -f "$WORKSPACE_CURRENT/AGENT-FAILURE.md" ]; then
+    log "AGENT-FAILURE.md detected - task failed"
+    FAILURE_JSON_STR=$(jq -Rs . < "$WORKSPACE_CURRENT/AGENT-FAILURE.md")
+    cp "$WORKSPACE_CURRENT/AGENT-FAILURE.md" "$OUTPUT_DIR/AGENT-FAILURE.md" 2>/dev/null || true
+    TASK_STATUS="failed"
+fi
+
 # --- Generate summary ---
 
 cat > "$SUMMARY_FILE" <<EOF
@@ -182,6 +189,7 @@ cat > "$SUMMARY_FILE" <<EOF
   "claude_exit_code": $CLAUDE_EXIT,
   "instruction_file": "$INSTRUCTION_FILE",
   "vcs_type": "$VCS_TYPE",
+  "failure": $FAILURE_JSON_STR,
   "changes": {
     "files_modified": $FILE_COUNT,
     "changed_files": "$CHANGED_FILES"
@@ -197,7 +205,7 @@ EOF
 log "Summary written to $SUMMARY_FILE"
 
 # Squash summary into the agent's commit
-if [ "$TASK_STATUS" = "success" ]; then
+if [ "$TASK_STATUS" = "success" ] || [ "$TASK_STATUS" = "failed" ]; then
     vcs_squash_into_parent 2>&1 | tee -a "$LOG_FILE" || \
         log_error "Failed to include summary in commit (non-fatal)"
 fi

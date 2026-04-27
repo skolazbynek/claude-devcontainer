@@ -12,6 +12,10 @@ RUN apt-get update && apt-get install -y jq
 COPY entrypoint-claude-agent.sh /workspace/agent
 RUN chmod +x /workspace/agent && chown claude:claude /workspace/agent
 
+# Copy agent system prompt (overridable via AGENT_SYSTEM_PROMPT_FILE)
+RUN mkdir -p /opt/cld
+COPY agent-system-prompt.md /opt/cld/agent-system-prompt.md
+
 USER claude
 
 # Set entrypoint to agent orchestrator
