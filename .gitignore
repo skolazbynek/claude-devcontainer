@@ -36,4 +36,4 @@ Thumbs.db
 # Temporary files
 tmp/
 temp/
-.cld-task-*
+.cld/

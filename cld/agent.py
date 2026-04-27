@@ -10,6 +10,7 @@ from string import Template
 from cld.docker import (
     build_container_args,
     build_session_name,
+    cld_tmpdir,
     ensure_image,
     find_repo_root,
     load_dotenv,
@@ -35,7 +36,7 @@ def _build_task_file(
     """
     if task_file and inline_prompt:
         tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".md", prefix=".cld-task-", delete=False, dir=tmpdir,
+            mode="w", suffix=".md", prefix="task-", delete=False, dir=tmpdir,
         )
         tmp.write(task_file.read_text())
         tmp.write(f"\n\n## Additional Instructions\n\n{inline_prompt}\n")
@@ -43,7 +44,7 @@ def _build_task_file(
         return Path(tmp.name)
     if inline_prompt:
         tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".md", prefix=".cld-task-", delete=False, dir=tmpdir,
+            mode="w", suffix=".md", prefix="task-", delete=False, dir=tmpdir,
         )
         tmp.write(inline_prompt)
         tmp.close()
@@ -82,7 +83,7 @@ def launch_agent(
     )
 
     session = session_name or build_session_name("agent", name)
-    resolved_task = _build_task_file(task_file, inline_prompt, tmpdir=repo_root)
+    resolved_task = _build_task_file(task_file, inline_prompt, tmpdir=cld_tmpdir(repo_root))
     host_task = to_host_path(str(resolved_task))
 
     args = ["--name", session]
@@ -155,7 +156,8 @@ def launch_review(
     session = build_session_name("review", name)
 
     # Generate diff from fork point to feature branch
-    diff_file = repo_root / f"review-diff-{session}.patch"
+    tmp = cld_tmpdir(repo_root)
+    diff_file = tmp / f"review-diff-{session}.patch"
     log_info(f"Generating diff: fork_point({feature_branch}, {trunk_branch}) -> {feature_branch}")
 
     fork = vcs.fork_point(feature_branch, trunk_branch)
@@ -180,12 +182,12 @@ def launch_review(
     task_content = Template(template_path.read_text()).safe_substitute(
         TRUNK_BRANCH=trunk_branch,
         FEATURE_BRANCH=feature_branch,
-        DIFF_FILE_PATH=f"{WORKSPACE_BASE}/origin/review-diff-{session}.patch",
+        DIFF_FILE_PATH=f"{WORKSPACE_BASE}/origin/.cld/{diff_file.name}",
     )
 
     task_file = Path(tempfile.NamedTemporaryFile(
         mode="w", suffix=".md", prefix=f"review-task-{session}-", delete=False,
-        dir=repo_root,
+        dir=tmp,
     ).name)
     task_file.write_text(task_content)
     log_info(f"Task file created: {task_file}")

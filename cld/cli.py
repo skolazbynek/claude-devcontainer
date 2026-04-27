@@ -13,6 +13,7 @@ from cld.agent import launch_agent, launch_review, run_headless, AGENT_IMAGE
 from cld.docker import (
     build_container_args,
     build_session_name,
+    cld_tmpdir,
     ensure_image,
     find_repo_root,
     load_dotenv,
@@ -187,7 +188,7 @@ def loop(
     if prompt:
         repo_root = find_repo_root()
         tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".md", prefix=".cld-loop-task-", delete=False, dir=repo_root,
+            mode="w", suffix=".md", prefix="loop-task-", delete=False, dir=cld_tmpdir(repo_root),
         )
         if task_path:
             tmp.write(task_path.read_text())

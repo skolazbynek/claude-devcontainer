@@ -12,6 +12,7 @@ from string import Template
 from cld.agent import launch_agent
 from cld.docker import (
     build_session_name,
+    cld_tmpdir,
     find_repo_root,
     log_error,
     log_info,
@@ -149,8 +150,8 @@ def _compose_iter_prompt(
         f"{review_content}\n"
     )
     tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".md", prefix=f".cld-loop-impl-iter{iteration}-",
-        delete=False, dir=repo_root,
+        mode="w", suffix=".md", prefix=f"loop-impl-iter{iteration}-",
+        delete=False, dir=cld_tmpdir(repo_root),
     )
     tmp.write(combined)
     tmp.close()
@@ -174,7 +175,7 @@ def _compose_review_prompt(
         log_error("Generated diff is empty -- nothing to review")
         sys.exit(1)
 
-    diff_file = repo_root / f".cld-loop-diff-iter{iteration}.patch"
+    diff_file = cld_tmpdir(repo_root) / f"loop-diff-iter{iteration}.patch"
     diff_file.write_text(diff_content)
 
     cld_root = Path(__file__).resolve().parent.parent
@@ -182,14 +183,14 @@ def _compose_review_prompt(
     template = Template(template_path.read_text())
 
     content = template.safe_substitute(
-        DIFF_FILE_PATH=f"/workspace/origin/{diff_file.name}",
+        DIFF_FILE_PATH=f"/workspace/origin/.cld/{diff_file.name}",
         OUTPUT_FILE=f"CODE_REVIEW_iter{iteration}.md",
         ITERATION=str(iteration),
     )
 
     task = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".md", prefix=f".cld-loop-review-iter{iteration}-",
-        delete=False, dir=repo_root,
+        mode="w", suffix=".md", prefix=f"loop-review-iter{iteration}-",
+        delete=False, dir=cld_tmpdir(repo_root),
     )
     task.write(content)
     task.close()
@@ -302,8 +303,11 @@ def _prompt_user(severity: dict, review_content: str) -> tuple[str, str]:
 
 def _cleanup_temp_files(repo_root: Path) -> None:
     """Remove temporary files created during loop iterations."""
-    for pattern in (".cld-loop-impl-*", ".cld-loop-review-*", ".cld-loop-diff-*"):
-        for f in repo_root.glob(pattern):
+    tmp = repo_root / ".cld"
+    if not tmp.is_dir():
+        return
+    for pattern in ("loop-impl-*", "loop-review-*", "loop-diff-*"):
+        for f in tmp.glob(pattern):
             f.unlink(missing_ok=True)
 
 

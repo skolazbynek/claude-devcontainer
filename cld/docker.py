@@ -111,6 +111,13 @@ def ensure_image(
     log_info("Image built successfully.")
 
 
+def cld_tmpdir(repo_root: Path) -> Path:
+    """Return the per-repo temp directory for cld scratch files (creates if missing)."""
+    d = repo_root / ".cld"
+    d.mkdir(exist_ok=True)
+    return d
+
+
 def to_host_path(path: str) -> str:
     """Translate a container-internal path to the corresponding host path.
 
