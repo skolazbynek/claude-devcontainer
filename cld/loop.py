@@ -1,6 +1,7 @@
 """Automated implement-review loop."""
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -25,14 +26,14 @@ _AGENT_TIMEOUT = 1800
 # --- Agent polling ---
 
 
-def _wait_for_agent(session_name: str, vcs: VcsBackend) -> dict:
+def _wait_for_agent(session_name: str, vcs: VcsBackend, agent_timeout: int = _AGENT_TIMEOUT) -> dict:
     """Block until an agent container exits, then read its summary from the VCS.
 
     Polls Docker for the container every ``_POLL_INTERVAL`` seconds. Once the
     container disappears, reads ``summary.json`` from the agent's branch.
     """
     start = time.monotonic()
-    while time.monotonic() - start < _AGENT_TIMEOUT:
+    while time.monotonic() - start < agent_timeout:
         result = subprocess.run(
             ["docker", "ps", "--filter", f"name=^{session_name}$", "--format", "{{.Status}}"],
             capture_output=True, text=True,
@@ -250,20 +251,31 @@ def _print_exit_report(
 # --- Interactive approval ---
 
 
-def _prompt_user(severity: dict, review_content: str) -> str:
-    """Prompt the user to continue, stop, or view the full review."""
+def _prompt_user(severity: dict, review_content: str) -> tuple[str, str]:
+    """Prompt the user to continue, stop, view the full review, or edit the next prompt."""
     print()
     print(f"  Critical: {severity['critical']}  Major: {severity['major']}  Minor: {severity['minor']}")
     print()
     while True:
-        choice = input("  [c]ontinue  [s]top  [v]iew full review: ").strip().lower()
+        choice = input("  [c]ontinue / [s]top / [v]iew diff / [e]dit prompt / [q]uit: ").strip().lower()
         if choice in ("c", "continue"):
-            return "continue"
-        if choice in ("s", "stop"):
-            return "stop"
+            return "continue", review_content
+        if choice in ("s", "stop", "q", "quit"):
+            return "stop", review_content
         if choice in ("v", "view"):
             print()
             print(review_content)
+            print()
+        if choice in ("e", "edit"):
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as tf:
+                tf.write(review_content)
+                tf_path = tf.name
+            editor = os.environ.get("EDITOR", "vi")
+            subprocess.run([editor, tf_path])
+            tf = Path(tf_path)
+            review_content = tf.read_text()
+            tf.unlink(missing_ok=True)
+            print("  Prompt updated.")
             print()
 
 
@@ -289,6 +301,7 @@ def run_loop(
     revision: str = "",
     max_iterations: int = 3,
     approve: bool = False,
+    agent_timeout: int = _AGENT_TIMEOUT,
 ) -> None:
     """Run the automated implement-review loop.
 
@@ -330,7 +343,7 @@ def run_loop(
                 quiet=True,
             )
 
-            impl_summary = _wait_for_agent(impl_result["session_name"], vcs)
+            impl_summary = _wait_for_agent(impl_result["session_name"], vcs, agent_timeout)
             duration = time.monotonic() - phase_start
             log_info(f"[{iteration}/{max_iterations}] implementing... done ({_format_duration(duration)})")
 
@@ -359,7 +372,7 @@ def run_loop(
                 quiet=True,
             )
 
-            review_summary = _wait_for_agent(review_result["session_name"], vcs)
+            review_summary = _wait_for_agent(review_result["session_name"], vcs, agent_timeout)
             duration = time.monotonic() - phase_start
             log_info(f"[{iteration}/{max_iterations}] reviewing... done ({_format_duration(duration)})")
 
@@ -386,7 +399,7 @@ def run_loop(
             _print_iteration_result(iteration, max_iterations, severity)
 
             if approve:
-                action = _prompt_user(severity, review_content)
+                action, review_content = _prompt_user(severity, review_content)
                 if action == "stop":
                     final_reason = "user stopped"
                     break
