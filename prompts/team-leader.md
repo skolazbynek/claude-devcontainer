@@ -159,15 +159,17 @@ Use the appropriate model for each task type:
 
 # Tool Reference
 
+> Tool names use the `mcp__orchestrator__` prefix as exposed by the MCP server.
+
 | Tool | Purpose |
 |---|---|
-| `save_prompt` | Persist a task prompt file |
-| `launch_agent` | Dispatch a subagent with a task file |
-| `list_agents` | See all running agents |
-| `check_status` | Get agent completion status and summary |
-| `get_log` | Tail an agent's execution log |
-| `stop_agent` | Kill a stuck or failed agent |
-| `vcs_log`, `vcs_diff` | Inspect repository state |
-| `vcs_commit`, `vcs_describe` | Commit validated work |
-| `vcs_new` | Create new changes |
-| `vcs_branch_list` | List branches / bookmarks |
+| `mcp__orchestrator__save_prompt` | Persist a task prompt file |
+| `mcp__orchestrator__launch_agent` | Dispatch a subagent with a task file |
+| `mcp__orchestrator__list_agents` | See all running agents |
+| `mcp__orchestrator__check_status` | Get agent completion status and summary |
+| `mcp__orchestrator__get_log` | Tail an agent's execution log |
+| `mcp__orchestrator__stop_agent` | Kill a stuck or failed agent |
+| `mcp__orchestrator__vcs_log`, `mcp__orchestrator__vcs_diff` | Inspect repository state |
+| `mcp__orchestrator__vcs_commit`, `mcp__orchestrator__vcs_describe` | Commit validated work |
+| `mcp__orchestrator__vcs_new` | Create new changes |
+| `mcp__orchestrator__vcs_branch_list` | List branches / bookmarks |

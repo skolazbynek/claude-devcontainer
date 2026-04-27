@@ -17,7 +17,7 @@ Go through the files from input one by one and try to find the root cause of its
 - Checking code history with the available VCS (jujutsu or git)
 
 # Constraints
-- Calls to Diskuze API within test are not mocked by design. Skip such failures, note them in your output summary briefly.
+- Calls to the API under test within test are not mocked by design. Skip such failures, note them in your output summary briefly.
 - Any timeouts are temporary failures, there's no other root cause.
 
 # Expected result

@@ -16,7 +16,7 @@ Requires the cld venv (`poetry install`).
 
 | Tool | Purpose |
 |---|---|
-| `start_server` | Start a GraphQL server subprocess. Default command: `poetry run python manage.py`, port `8000`. Polls health check until ready. |
+| `start_server` | Start a GraphQL server subprocess. Default command: `poetry run python manage.py`, port `5000`. Polls health check until ready. |
 | `stop_server` | Stop the running server. |
 | `restart_server` | Restart with same command/workdir/env from last start. |
 | `server_status` | Check if server is running, get PID/port/endpoint. |
