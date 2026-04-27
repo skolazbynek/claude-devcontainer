@@ -100,7 +100,8 @@ class GitBackend(VcsBackend):
         """
         if not revision:
             return ""
-        return self._run_git(["checkout", revision]).stdout + self._run_git(["checkout", revision]).stderr
+        result = self._run_git(["checkout", revision])
+        return result.stdout + result.stderr
 
     def commit(self, message: str) -> str:
         """Stage all changes and commit.
@@ -156,14 +157,9 @@ class GitBackend(VcsBackend):
         return new_hash
 
     def squash(self, from_rev: str, into_rev: str) -> str:
-        """Squash current HEAD into its parent via soft reset and amend.
-
-        This implements the common case: ``squash @ into @-`` (squash HEAD
-        into its parent). For git this means: reset to parent keeping changes
-        staged, then amend the parent commit.
-        """
-        self._run_git(["add", "-A"])
-        self._run_git(["reset", "--soft", "HEAD~1"])
+        """Squash changes from *from_rev* into *into_rev* via cherry-pick and amend."""
+        self._run_git(["checkout", into_rev])
+        self._run_git(["cherry-pick", "--no-commit", from_rev])
         result = self._run_git(["commit", "--amend", "--no-edit"])
         return result.stdout + result.stderr
 
@@ -178,7 +174,9 @@ class GitBackend(VcsBackend):
         if not revision:
             cmd = ["diff", "HEAD"]
         else:
-            cmd = ["diff", f"{revision}~1..{revision}"]
+            parent_check = self._run_git(["rev-parse", f"{revision}~1"])
+            base = f"{revision}~1" if parent_check.returncode == 0 else "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+            cmd = ["diff", f"{base}..{revision}"]
         if stat:
             cmd.append("--stat")
         result = self._run_git(cmd)
