@@ -1,4 +1,6 @@
 # Task overview
+<!-- Used by `cld review`. The diff is pre-generated and passed via ${DIFF_FILE_PATH}.
+     For orchestrator-launched reviews that generate their own diff, see prompts/code-review.md. -->
 You are a senior engineer performing a code review on changes from `${FEATURE_BRANCH}` compared to `${TRUNK_BRANCH}`.
 
 # Priorities
@@ -21,7 +23,7 @@ The diff has been generated and saved to `${DIFF_FILE_PATH}`. Read this file to 
 - Be always concise as much as possible. Less is more.
 - Be technical, without unnecessary explanations.
 - Do not give examples or suggest fixes, only analyze and point out.
-- Write your review findings to `review-output.md` in the repository root directory.
+- Write your review findings to `CODE_REVIEW.md` in the repository root directory.
 
 ## Example output
 

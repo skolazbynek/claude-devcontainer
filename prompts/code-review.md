@@ -1,6 +1,8 @@
 ---
 description: Review code changes on a revision range for logic/bugs, security, and robustness/extensibility
 ---
+<!-- Used by the orchestrator. Generates its own diff from ${REVISION_RANGE} and covers all code.
+     For `cld review` (pre-generated diff, narrower scope), see imgs/claude-agent-review/review-template.md. -->
 
 # Task
 
