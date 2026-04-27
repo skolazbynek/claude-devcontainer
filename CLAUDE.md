@@ -99,14 +99,9 @@ Inspect with git: `git log <name>`, `git diff <name>~1..<name>`. Merge: `git mer
 
 ## MCP Orchestrator
 
-Python MCP server (`cld/mcp/orchestrator.py`). Baked into the devcontainer at `/opt/cld/`. Also usable on host via `claude mcp add -s user orchestrator -- /path/to/cld/scripts/mcp/run-orchestrator.sh`.
+Python MCP server in `cld/mcp/orchestrator.py`. See README's "MCP Orchestrator" section for the user-facing description and tool list. CLAUDE.md focuses on developer-internal context only.
 
-**Tools provided:**
-- `launch_agent` -- launch autonomous agent (task file, inline prompt, or builtin prompt -- non-host-visible files are auto-staged). Calls `cld.agent.launch_agent()` directly.
-- `list_agents`, `check_status`, `stop_agent` -- container lifecycle (`check_status` checks docker while running, VCS branch + summary after completion; `include_result=True` for full claude output)
-- `get_log` -- tail agent log from VCS branch
-- `list_prompts`, `read_prompt`, `save_prompt` -- manage task prompts (builtin at `/opt/cld/prompts/` read-only + workspace at `<repo-root>/prompts/` read-write; saves always go to workspace)
-- `vcs_log`, `vcs_branch_list`, `vcs_new`, `vcs_commit`, `vcs_describe`, `vcs_diff` -- VCS operations (backend-agnostic)
-- `jj_log`, `jj_bookmark_list`, `jj_new`, `jj_commit`, `jj_describe`, `jj_diff` -- backward-compatible aliases (delegate to vcs_* tools)
-
-**Note:** No automatic squash/merge into external branches. The orchestrator works within its own VCS changes only.
+Internal notes:
+- `launch_agent` calls `cld.agent.launch_agent()` directly (not via subprocess) so it shares image-management, env, and path-translation logic.
+- Non-host-visible task files are staged into `repo_root/.agent-tasks/` so they can be bind-mounted.
+- The orchestrator never squashes or merges into external branches; result aggregation is the caller's job.

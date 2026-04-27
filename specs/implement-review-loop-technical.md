@@ -4,6 +4,8 @@ Reference: [Product Spec](implement-review-loop.md)
 
 > **Note:** This spec was written when the tool only supported jujutsu. The implementation is now VCS-agnostic (jj or git). All direct `jj` calls in `cld/loop.py` have been replaced by `VcsBackend` method calls. See `cld/vcs/` for the abstraction layer.
 
+> **Status (2026-04-27):** Sections describing `--detach` execution, `--keep-bookmarks`, and `cld loop status/list/stop` are **deferred** -- not implemented in 0.1.0. The core `cld loop` plus `--approve` (with `[e]dit prompt`) and configurable timeout are **implemented**.
+
 ---
 
 ## Implementation Plan

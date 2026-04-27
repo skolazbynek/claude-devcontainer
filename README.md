@@ -4,9 +4,12 @@ Run Claude Code in Docker containers with VCS workspace isolation. Supports **ju
 
 ## Prerequisites
 
+- **Linux host** (required: `/etc/ssl/certs` is mandatory; macOS/Windows Docker Desktop layouts may not satisfy this)
 - Docker
 - A **jujutsu** or **git** repository (jj preferred; git used as fallback)
 - Python 3.11+ with [Poetry](https://python-poetry.org/)
+- `claude` CLI on the host (only required for `cld headless`)
+- Optional: `MYSQL_CONFIG` env pointing to a `.cnf` file (vendor-specific; safe to ignore)
 
 ## Setup
 
@@ -14,9 +17,8 @@ Run Claude Code in Docker containers with VCS workspace isolation. Supports **ju
 # Install the CLI
 poetry install
 
-# Build images (devcontainer first -- agent inherits from it)
-docker build -f imgs/claude-devcontainer/Dockerfile.claude-devcontainer -t claude-devcontainer:latest .
-docker build -f imgs/claude-agent/Dockerfile.claude-agent -t claude-agent:latest imgs/claude-agent
+# Build images (one command builds both, devcontainer first)
+cld build [--no-cache]
 ```
 
 All commands must be run from within a VCS repository (jj or git).
@@ -50,7 +52,8 @@ With jujutsu:
 # Launch an agent
 cld agent -n fix-auth task.md
 
-# Check progress
+# Check progress (wait a few seconds first for the file to appear)
+until [ -f "$(jj root)/agent-output-agent_fix-auth/agent.log" ]; do sleep 1; done
 tail -f $(jj root)/agent-output-agent_fix-auth/agent.log
 
 # After completion, inspect and merge
@@ -115,6 +118,32 @@ claude --agent team-orchestrator
 
 Builtin prompts are baked into the image at `/opt/cld/prompts/`. Workspace prompts live at `<repo-root>/prompts/`.
 
+### End-to-end orchestrator flow
+
+```
++-- host -----------------+
+|  cld devcontainer       |
+|        |                |
+|        v                |
+|  +------------------+   |
+|  |  devcontainer    |   |
+|  |  claude --agent  |   |
+|  |  team-orchestr.  |---+ launches sibling agent containers via /var/run/docker.sock
+|  +------------------+   |        |
+|                         |        v
+|                         |  +------------+  +------------+
+|                         |  | agent_a... |  | review_b...| -> commits to its own VCS branch
+|                         |  +------------+  +------------+
++-------------------------+        |                |
+                                   v                v
+                              jj squash --from agent_a   (host user merges results)
+```
+
+1. User starts a devcontainer with `cld devcontainer`.
+2. Inside it, runs `claude --agent team-orchestrator`.
+3. The orchestrator calls `launch_agent` to spawn sibling Docker agents.
+4. Each agent commits results to its own VCS branch; the host user merges them with `jj squash --from <branch>` (or `git merge`).
+
 ## Architecture
 
 ```
@@ -159,9 +188,17 @@ Host `~/.claude.json` is mounted read-only. The entrypoint builds a container-lo
 
 The devcontainer mounts `/var/run/docker.sock` so the orchestrator can launch and manage sibling agent containers. Path translation converts container paths to host paths for volume mounts.
 
-### Security
+### Security model and known gaps
 
-Containers run as host UID/GID with `--cap-drop=ALL`, `--security-opt=no-new-privileges`, resource limits (2 CPU, 4GB RAM). The docker socket mount is the exception.
+Containers run as host UID/GID with `--cap-drop=ALL`, `--security-opt=no-new-privileges`, and resource limits (2 CPU, 4GB RAM).
+
+**Known gaps -- read carefully before shipping anything sensitive into a container:**
+
+- **No outbound network firewall.** Once an agent is running, it can reach any host on the public internet and exfiltrate anything mounted in (`~/.claude` tokens, `~/.claude.json` MCP creds, `~/.config/*` creds, `MYSQL_CONFIG`). Anthropic's reference devcontainer ships an `init-firewall.sh` with default-deny outbound and a small allowlist; cld does not (yet) ship an equivalent.
+- **`/var/run/docker.sock` mount = host root.** When the docker socket is mounted (it is, for the orchestrator), an agent inside can run `docker run -v /:/host --privileged ...` and read or modify anything on the host. This effectively bypasses every other security control. If you don't need the orchestrator, comment out the docker.sock block in `cld/docker.py`.
+- **`~/.claude` is mounted rw.** A malicious agent can both read your OAuth tokens and overwrite session state.
+
+Treat the container as **trusted with your full host environment** until the firewall and a docker-socket proxy land. Use `--dangerously-skip-permissions` accordingly.
 
 ## Environment Variables
 
@@ -174,3 +211,23 @@ Containers run as host UID/GID with `--cap-drop=ALL`, `--security-opt=no-new-pri
 | `HOST_PROJECT_DIR` | Host repo root path (for nested docker path translation) |
 | `HOST_HOME` | Host home directory (for path translation) |
 | `MYSQL_CONFIG` | Host path to `.cnf` file (mounted into container if set) |
+
+## Development
+
+```bash
+poetry install
+
+# Unit tests (no docker, no network)
+poetry run pytest -m "not integration and not docker and not e2e"
+
+# Integration tests
+poetry run pytest -m integration
+
+# Tests that need Docker
+poetry run pytest -m docker
+
+# End-to-end tests (slow, real containers)
+poetry run pytest -m e2e
+```
+
+Test markers are declared in `pyproject.toml`. The `tests/conftest.py` detects when running inside the devcontainer via `HOST_PROJECT_DIR` to translate paths.
