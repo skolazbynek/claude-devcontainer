@@ -16,7 +16,7 @@ from cld.docker import (
     log_error,
     log_info,
     require_docker,
-    _to_host_path,
+    to_host_path,
     WORKSPACE_BASE,
 )
 from cld.vcs import get_backend
@@ -83,7 +83,7 @@ def launch_agent(
 
     session = session_name or build_session_name("agent", name)
     resolved_task = _build_task_file(task_file, inline_prompt, tmpdir=repo_root)
-    host_task = _to_host_path(str(resolved_task))
+    host_task = to_host_path(str(resolved_task))
 
     args = ["--name", session]
     args += build_container_args(repo_root, session)

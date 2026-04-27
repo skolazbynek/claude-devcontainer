@@ -1,7 +1,7 @@
 """Container setup: arg building, image management, path translation."""
 
 import os
-import random
+import secrets
 import shutil
 import subprocess
 import sys
@@ -46,11 +46,15 @@ def find_repo_root(start: Path | None = None) -> Path:
 
 def build_session_name(prefix: str, suffix: str = "") -> str:
     """Generate a session name like ``prefix_suffix`` or ``prefix_<random>``."""
-    return f"{prefix}_{suffix or random.randint(10000, 99999)}"
+    return f"{prefix}_{suffix or secrets.token_hex(3)}"
 
 
 def load_dotenv(path: Path | None = None) -> None:
-    """Read a .env file and inject its variables into the current process environment."""
+    """Read a .env file and inject its variables into the current process environment.
+
+    Limitations: does not handle quoted values, `export ` prefix, or escape sequences.
+    Values are split on the first `=` and stripped of surrounding whitespace only.
+    """
     dotenv = path or Path.cwd() / ".env"
     if not dotenv.is_file():
         return
@@ -70,22 +74,44 @@ def require_docker() -> None:
         sys.exit(1)
 
 
-def ensure_image(image: str, dockerfile: Path, context: Path) -> None:
-    """Build a Docker image if it does not already exist locally."""
+def ensure_image(
+    image: str,
+    dockerfile: Path,
+    context: Path,
+    *,
+    parent_image: tuple[str, Path, Path] | None = None,
+    force: bool = False,
+) -> None:
+    """Build a Docker image if it does not already exist locally.
+
+    Pass parent_image=(name, dockerfile, context) to ensure a base image is built first.
+    Pass force=True to rebuild from scratch with --no-cache.
+    """
     result = subprocess.run(
         ["docker", "images", "-q", image], capture_output=True, text=True,
     )
-    if result.stdout.strip():
+    if result.stdout.strip() and not force:
         return
-    log_info(f"Image '{image}' not found. Building...")
-    subprocess.run(
-        ["docker", "build", "-f", str(dockerfile), "-t", image, str(context)],
-        check=True,
-    )
+    if parent_image:
+        parent_name, parent_dockerfile, parent_context = parent_image
+        parent_result = subprocess.run(
+            ["docker", "images", "-q", parent_name], capture_output=True, text=True,
+        )
+        if not parent_result.stdout.strip():
+            ensure_image(parent_name, parent_dockerfile, parent_context, force=force)
+    if result.stdout.strip():
+        log_info(f"Rebuilding '{image}' (this may take 5+ minutes)...")
+    else:
+        log_info(f"Image '{image}' not found. Building (this may take 5+ minutes on first run)...")
+    cmd = ["docker", "build", "-f", str(dockerfile), "-t", image]
+    if force:
+        cmd.append("--no-cache")
+    cmd.append(str(context))
+    subprocess.run(cmd, check=True)
     log_info("Image built successfully.")
 
 
-def _to_host_path(path: str) -> str:
+def to_host_path(path: str) -> str:
     """Translate a container-internal path to the corresponding host path.
 
     Uses HOST_PROJECT_DIR and HOST_HOME env vars set during container launch
@@ -99,9 +125,8 @@ def _to_host_path(path: str) -> str:
                 path = host_project + path[len(prefix):]
                 break
     if host_home:
-        home = os.path.expanduser("~")
-        if path.startswith(home):
-            path = host_home + path[len(home):]
+        if path.startswith(CONTAINER_HOME):
+            path = host_home + path[len(CONTAINER_HOME):]
     return path
 
 
@@ -117,8 +142,8 @@ def build_container_args(
     docker socket, mysql), and environment variables.
     """
     home = os.path.expanduser("~")
-    host_home = _to_host_path(home)
-    host_repo_root = _to_host_path(str(repo_root))
+    host_home = to_host_path(home)
+    host_repo_root = to_host_path(str(repo_root))
 
     args: list[str] = []
 
@@ -149,6 +174,8 @@ def build_container_args(
     ]
 
     # Claude session state (required)
+    # rw needed for OAuth token refresh and session state writes; tradeoff: agent can both
+    # read OAuth tokens and overwrite session state. Consider ro + tmpfs overlay in the future.
     local_claude_dir = Path(home) / ".claude"
     if not local_claude_dir.is_dir():
         log_error(f"{local_claude_dir} not found -- Claude auth and session state unavailable")
@@ -162,12 +189,13 @@ def build_container_args(
     else:
         log_warn(f"{local_claude_json} not found -- host MCP servers won't be available in container")
 
-    # OAuth tokens / config (optional)
-    local_config_dir = Path(home) / ".config"
-    if local_config_dir.is_dir():
-        args += ["-v", f"{host_home}/.config:{CONTAINER_HOME}/.config:ro"]
-    else:
-        log_warn(f"{local_config_dir} not found -- OAuth tokens won't be available, Claude may require re-authentication")
+    # OAuth tokens / config (allowlist only -- avoid leaking gh/aws/gcloud/etc creds)
+    for config_rel in (".config/anthropic", ".config/claude", ".config/nvim"):
+        local_config_path = Path(home) / config_rel
+        if local_config_path.is_dir():
+            args += ["-v", f"{host_home}/{config_rel}:{CONTAINER_HOME}/{config_rel}:ro"]
+        else:
+            log_warn(f"{local_config_path} not found -- skipping")
 
     # Neovim data/state/cache (share plugins, mason, treesitter parsers with host)
     for rel in (".local/share/nvim", ".local/state/nvim", ".cache/nvim"):
@@ -215,24 +243,5 @@ def mount_home_path(rel_path: str, target: str) -> list[str]:
     local_path = Path.home() / rel_path
     if not local_path.exists():
         return []
-    host_path = _to_host_path(str(local_path.resolve()))
+    host_path = to_host_path(str(local_path.resolve()))
     return ["-v", f"{host_path}:{target}"]
-
-
-def run_container(args: list[str], image: str, *, detach: bool = False) -> str:
-    """Run docker container. Returns container ID when detached, empty string otherwise."""
-    cmd = ["docker", "run"]
-    if detach:
-        cmd.append("--detach")
-    cmd += args
-    cmd.append(image)
-
-    if detach:
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            log_error(f"Failed to start container: {result.stderr.strip()}")
-            sys.exit(1)
-        return result.stdout.strip()
-    else:
-        os.execvp("docker", cmd)
-        return ""  # unreachable
