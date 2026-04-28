@@ -22,6 +22,8 @@ from cld.docker import (
     log_warn,
     mount_home_path,
     require_docker,
+    to_host_path,
+    BASE_IMAGE,
     CONTAINER_HOME,
     DEVCONTAINER_IMAGE,
 )
@@ -81,9 +83,17 @@ def agent(
     )
 
 
-# Host paths to mount read-only (config files)
+# Host paths to mount read-only (config files), devcontainer only.
 _DIRECT_RO = [".gitconfig", ".bashrc"]
-_DIRECT_RW = [".cache/nvim", ".local/share/nvim", ".local/state/nvim"]
+
+# Nvim host dirs mounted RO under /tmp/nvim-host/<sub>; devcontainer entrypoint
+# copies them into $HOME so changes don't persist back to the host.
+_NVIM_HOST_MOUNTS = {
+    ".config/nvim": "config",
+    ".local/share/nvim": "share",
+    ".local/state/nvim": "state",
+    ".cache/nvim": "cache",
+}
 
 
 @app.command()
@@ -102,6 +112,11 @@ def devcontainer(
         DEVCONTAINER_IMAGE,
         cld_root / "imgs/claude-devcontainer/Dockerfile.claude-devcontainer",
         cld_root,
+        parent_image=(
+            BASE_IMAGE,
+            cld_root / "imgs/claude-base/Dockerfile.claude-base",
+            cld_root,
+        ),
     )
     load_dotenv()
 
@@ -122,10 +137,11 @@ def devcontainer(
         else:
             skipped.append(rel_path)
 
-    for rel_path in _DIRECT_RW:
-        mnt = mount_home_path(rel_path, f"{CONTAINER_HOME}/{rel_path}:rw")
-        if mnt:
-            args += mnt
+    for rel_path, sub in _NVIM_HOST_MOUNTS.items():
+        local_path = Path.home() / rel_path
+        if local_path.is_dir():
+            host_path = to_host_path(str(local_path.resolve()))
+            args += ["-v", f"{host_path}:/tmp/nvim-host/{sub}:ro"]
         else:
             skipped.append(rel_path)
 
@@ -216,9 +232,10 @@ def loop(
 @app.command()
 @_handle_errors
 def build(no_cache: bool = typer.Option(False, "--no-cache", help="Force rebuild without cache")):
-    """Build devcontainer and agent images (devcontainer first)."""
+    """Build base, devcontainer, and agent images (base first)."""
     require_docker()
     cld_root = Path(__file__).resolve().parent.parent
+    ensure_image(BASE_IMAGE, cld_root / "imgs/claude-base/Dockerfile.claude-base", cld_root, force=no_cache)
     ensure_image(DEVCONTAINER_IMAGE, cld_root / "imgs/claude-devcontainer/Dockerfile.claude-devcontainer", cld_root, force=no_cache)
     ensure_image(AGENT_IMAGE, cld_root / "imgs/claude-agent/Dockerfile.claude-agent", cld_root / "imgs/claude-agent", force=no_cache)
 

@@ -18,7 +18,7 @@ from cld.docker import (
     log_info,
     require_docker,
     to_host_path,
-    DEVCONTAINER_IMAGE,
+    BASE_IMAGE,
     WORKSPACE_BASE,
 )
 from cld.vcs import get_backend
@@ -82,8 +82,8 @@ def launch_agent(
         cld_root / "imgs/claude-agent/Dockerfile.claude-agent",
         cld_root / "imgs/claude-agent",
         parent_image=(
-            DEVCONTAINER_IMAGE,
-            cld_root / "imgs/claude-devcontainer/Dockerfile.claude-devcontainer",
+            BASE_IMAGE,
+            cld_root / "imgs/claude-base/Dockerfile.claude-base",
             cld_root,
         ),
     )

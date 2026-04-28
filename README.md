@@ -159,18 +159,20 @@ scripts/
   mcp/run-orchestrator.sh          venv wrapper for MCP server
 
 imgs/
-  claude-devcontainer/             Base image (debian, git, jj, neovim, docker cli, poetry, claude)
-    container-init.sh              Shared init (MCP config merge, mysql wrapper)
-    vcs-lib.sh                     Shell VCS abstraction (sourced by both entrypoints)
+  claude-base/                     Common base image (debian, git, jj, docker cli, poetry, claude). No editor, no entrypoint.
+    Dockerfile.claude-base
+  claude-devcontainer/             Devcontainer image (FROM base, adds neovim + classic vim)
+    container-init.sh              Shared init (MCP config merge, mysql wrapper) -- baked into base
+    vcs-lib.sh                     Shell VCS abstraction (sourced by both entrypoints) -- baked into base
     entrypoint-claude-devcontainer.sh
-  claude-agent/                    Agent image (FROM devcontainer, adds jq + agent entrypoint)
+  claude-agent/                    Agent image (FROM base, adds agent entrypoint + system prompt)
     entrypoint-claude-agent.sh
   claude-agent-review/             Review templates
 
 prompts/                           Reusable task prompts for agents
 ```
 
-**Image hierarchy:** `claude-agent` builds FROM `claude-devcontainer`. Always build devcontainer first.
+**Image hierarchy:** `claude-base` is the parent of both `claude-devcontainer` and `claude-agent` (siblings). Always build base first; `cld build` handles all three in order.
 
 ### Workspace isolation
 
@@ -179,6 +181,8 @@ Containers mount the host repo at `/workspace/origin` and create an isolated wor
 ### Host file protection
 
 Host `~/.claude.json` is mounted read-only. The entrypoint builds a container-local copy with MCP servers merged for the container's project path.
+
+The devcontainer mounts host nvim config/data (`~/.config/nvim`, `~/.local/share/nvim`, `~/.local/state/nvim`, `~/.cache/nvim`) read-only under `/tmp/nvim-host/` and copies them into `$HOME` on startup. Changes made inside the container do not persist to the host. The agent image has no editor and does not mount these.
 
 ### Docker socket
 

@@ -12,6 +12,7 @@ from cld.vcs import get_backend
 CONTAINER_USER = "claude"
 CONTAINER_HOME = f"/home/{CONTAINER_USER}"
 WORKSPACE_BASE = "/workspace"
+BASE_IMAGE = "claude-base:latest"
 DEVCONTAINER_IMAGE = "claude-devcontainer:latest"
 
 _RED = "\033[0;31m"
@@ -198,18 +199,14 @@ def build_container_args(
         log_warn(f"{local_claude_json} not found -- host MCP servers won't be available in container")
 
     # OAuth tokens / config (allowlist only -- avoid leaking gh/aws/gcloud/etc creds)
-    for config_rel in (".config/anthropic", ".config/claude", ".config/nvim", ".config/jj"):
+    # Note: nvim config/data is intentionally excluded -- it's devcontainer-only
+    # and handled by the devcontainer command via the RO-copy pattern.
+    for config_rel in (".config/anthropic", ".config/claude", ".config/jj"):
         local_config_path = Path(home) / config_rel
         if local_config_path.is_dir():
             args += ["-v", f"{host_home}/{config_rel}:{CONTAINER_HOME}/{config_rel}:ro"]
         else:
             log_warn(f"{local_config_path} not found -- skipping")
-
-    # Neovim data/state/cache (share plugins, mason, treesitter parsers with host)
-    for rel in (".local/share/nvim", ".local/state/nvim", ".cache/nvim"):
-        local_path = Path(home) / rel
-        if local_path.is_dir():
-            args += ["-v", f"{host_home}/{rel}:{CONTAINER_HOME}/{rel}:rw"]
 
     # Session
     args += ["-e", f"SESSION_NAME={session_name}"]

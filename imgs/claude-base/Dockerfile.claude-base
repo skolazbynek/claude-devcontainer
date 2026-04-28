@@ -1,0 +1,73 @@
+FROM python:3.13-slim-bookworm
+
+# Create a non-root user with UID 1000
+RUN useradd -m -u 1000 -s /bin/bash claude && \
+    mkdir -p /workspace/origin /workspace/current && \
+    chown -R claude:claude /workspace
+
+# Install essential tools (as root)
+# bubblewrap, socat are for claude sandbox mode
+RUN apt-get update && apt-get install -y \
+    git \
+    ca-certificates \
+    curl \
+    bubblewrap \
+    socat \
+    jq \
+    default-mysql-client-core \
+    nodejs \
+    npm \
+    ripgrep \
+    fd-find \
+    build-essential \
+    cmake \
+    unzip \
+    golang-go \
+    && rm -rf /var/lib/apt/lists/*
+
+USER claude
+
+RUN mkdir ~/.tmp && \
+    mkdir ~/.opt && \
+    mkdir ~/.local && \
+    mkdir ~/.local/bin && \
+    ln -s /usr/local/bin/python3 ~/.local/bin/python
+
+# Install jj binary
+RUN curl -fsSL https://github.com/jj-vcs/jj/releases/download/v0.37.0/jj-v0.37.0-x86_64-unknown-linux-musl.tar.gz -o ~/.tmp/jj.tar.gz && \
+    tar -xzf ~/.tmp/jj.tar.gz -C ~/.opt && \
+    ln -s ~/.opt/jj ~/.local/bin/jj && \
+    rm -f ~/.tmp/jj.tar.gz
+
+# Install Docker CLI (static binary, for orchestrator agent management)
+RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz -o ~/.tmp/docker.tgz && \
+    tar -xzf ~/.tmp/docker.tgz --strip-components=1 -C ~/.local/bin docker/docker && \
+    rm -f ~/.tmp/docker.tgz
+
+# Install Poetry (Python package manager)
+RUN curl -sSL https://install.python-poetry.org | POETRY_HOME=~/.opt/poetry python3 - && \
+    ln -s ~/.opt/poetry/bin/poetry ~/.local/bin/poetry
+
+# Install MCP server dependencies
+RUN pip install --user "mcp[cli]>=1.0" "typer>=0.9"
+
+# Install Claude (installs to user directory)
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# Add ~/.local/bin to PATH for claude command
+ENV PATH="/home/claude/.local/bin:${PATH}"
+
+WORKDIR /workspace
+
+USER root
+
+# Copy shared shell helpers (context: repo root)
+COPY imgs/claude-devcontainer/container-init.sh imgs/claude-devcontainer/vcs-lib.sh ./
+RUN chmod +x container-init.sh vcs-lib.sh && \
+    chown claude:claude container-init.sh vcs-lib.sh
+
+# Bake in cld package and prompts
+COPY --chown=claude:claude cld/ /opt/cld/cld/
+COPY --chown=claude:claude prompts/ /opt/cld/prompts/
+
+USER claude

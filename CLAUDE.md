@@ -28,15 +28,16 @@ cld/                             -- Python package (host-side CLI + shared logic
 scripts/
   mcp/run-orchestrator.sh        -- Thin venv wrapper for MCP server
 imgs/
-  claude-devcontainer/           -- Base image (debian, git, jj, neovim, poetry, mysql client, claude)
-    container-init.sh            -- Shared container init (sourced by both entrypoints)
-    vcs-lib.sh                   -- Shell-level VCS abstraction (sourced by both entrypoints)
-  claude-agent/                  -- Agent image (FROM devcontainer, adds jq + agent entrypoint)
+  claude-base/                   -- Common base image (debian, git, jj, poetry, docker CLI, mysql client, claude). No editor, no entrypoint.
+  claude-devcontainer/           -- Devcontainer image (FROM base, adds neovim + vim + entrypoint)
+    container-init.sh            -- Shared container init (sourced by both entrypoints, baked into base)
+    vcs-lib.sh                   -- Shell-level VCS abstraction (sourced by both entrypoints, baked into base)
+  claude-agent/                  -- Agent image (FROM base, adds agent entrypoint + system prompt)
   claude-agent-review/           -- Review templates (review-template.md, fix-mr.md)
 prompts/                         -- Reusable task prompts for agents
 ```
 
-**Image hierarchy:** `claude-agent` builds FROM `claude-devcontainer`. Build devcontainer first.
+**Image hierarchy:** `claude-base` is the parent of both `claude-devcontainer` and `claude-agent` (siblings). Build base first.
 
 **Shared logic lives in three places:**
 - Host side: `cld/docker.py` -- imported by all commands. Provides `build_container_args`, `find_repo_root`, `ensure_image`, `build_session_name`, logging.
@@ -55,7 +56,8 @@ prompts/                         -- Reusable task prompts for agents
 ## Key Commands
 
 ```bash
-# Build images (devcontainer first)
+# Build images (base first; cld build does this automatically)
+docker build -f imgs/claude-base/Dockerfile.claude-base -t claude-base:latest .
 docker build -f imgs/claude-devcontainer/Dockerfile.claude-devcontainer -t claude-devcontainer:latest .
 docker build -f imgs/claude-agent/Dockerfile.claude-agent -t claude-agent:latest imgs/claude-agent
 
