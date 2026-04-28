@@ -9,7 +9,7 @@ from typing import Optional
 
 import typer
 
-from cld.agent import launch_agent, launch_review, run_headless, AGENT_IMAGE
+from cld.agent import launch_agent, launch_review, AGENT_IMAGE
 from cld.docker import (
     build_container_args,
     build_session_name,
@@ -211,13 +211,6 @@ def loop(
         max_iterations=max_iterations,
         approve=approve,
     )
-
-
-@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-@_handle_errors
-def headless(ctx: typer.Context):
-    """Thin wrapper around `claude -p --permission-mode acceptEdits`. Convenience for one-shot prompts that should be allowed to edit files without per-tool approval."""
-    run_headless(ctx.args)
 
 
 @app.command()

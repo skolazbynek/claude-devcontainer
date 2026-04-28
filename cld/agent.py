@@ -1,4 +1,4 @@
-"""Agent, review, and headless launch logic."""
+"""Agent and review launch logic."""
 
 import os
 import subprocess
@@ -204,8 +204,3 @@ def launch_review(
         model=model,
         session_name=session,
     )
-
-
-def run_headless(args: list[str]) -> None:
-    """Run Claude in headless mode with edit permissions. Replaces current process."""
-    os.execvp("claude", ["claude", "-p", "--permission-mode", "acceptEdits", *args])

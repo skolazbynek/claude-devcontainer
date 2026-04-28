@@ -5,9 +5,9 @@
 `cld` — Python CLI (typer) for running Claude Code in Docker containers with
 jujutsu (jj) workspace isolation. Modules:
 
-- `cld/cli.py` — typer app (`agent`, `devcontainer`, `review`, `loop`, `headless`)
+- `cld/cli.py` — typer app (`agent`, `devcontainer`, `review`, `loop`)
 - `cld/docker.py` — container arg building, image management, path translation
-- `cld/agent.py` — `launch_agent`, `launch_review`, `run_headless`
+- `cld/agent.py` — `launch_agent`, `launch_review`
 - `cld/loop.py` — automated implement-review loop
 - `cld/mcp/orchestrator.py` — MCP server exposing agent/jj tools
 
@@ -76,7 +76,7 @@ No environment setup required. Tests use `tmp_path` for filesystem and
 Deliberate omissions — adding these later is fine if requirements appear:
 
 - `ensure_image`, `require_docker`, `run_container` — subprocess to Docker
-- `launch_agent`, `launch_review`, `run_headless` — end-to-end container launch
+- `launch_agent`, `launch_review` — end-to-end container launch
 - `run_loop` orchestration — `time.sleep` + `docker ps` polling
 - All `mcp.orchestrator` tools that shell out to `jj` or `docker`
 - `build_container_args` — doable but fragile (patches on `Path.is_dir`,

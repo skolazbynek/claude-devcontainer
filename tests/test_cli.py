@@ -39,24 +39,6 @@ class TestVersion:
         assert "cld " in result.output
 
 
-class TestHeadlessCommand:
-    def test_headless_accepts_extra_flags(self, monkeypatch):
-        captured: list = []
-
-        def fake_execvp(prog, args):
-            captured.append((prog, args))
-            raise SystemExit(0)
-
-        monkeypatch.setattr("cld.agent.os.execvp", fake_execvp)
-        result = runner.invoke(app, ["headless", "-p", "hello"])
-        assert result.exit_code == 0
-        assert captured, "execvp not called"
-        prog, args = captured[0]
-        assert prog == "claude"
-        assert "-p" in args
-        assert "hello" in args
-        assert "--permission-mode" in args
-
 
 class TestReviewCommand:
     def test_review_requires_feature_branch(self):

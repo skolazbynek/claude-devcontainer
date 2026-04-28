@@ -9,7 +9,6 @@ Tooling for running Claude Code in Docker containers with VCS workspace isolatio
 - **Devcontainer** (`cld devcontainer`) -- Interactive session with neovim, jj/git, poetry. Drops into bash with `--dangerously-skip-permissions`.
 - **Agent** (`cld agent`) -- Headless autonomous agent. Takes a task file and/or inline prompt, runs detached, commits results to a VCS branch.
 - **Agent Review** (`cld review`) -- Generates a diff between branches and runs a code review via the agent pipeline.
-- **Headless** (`cld headless`) -- Thin wrapper: `claude -p --permission-mode acceptEdits`.
 
 ## Architecture
 
@@ -17,7 +16,7 @@ Tooling for running Claude Code in Docker containers with VCS workspace isolatio
 cld/                             -- Python package (host-side CLI + shared logic)
   cli.py                         -- typer app, all subcommands
   docker.py                      -- container setup: arg building, image management, path translation
-  agent.py                       -- agent/review/headless launch logic
+  agent.py                       -- agent/review launch logic
   loop.py                        -- automated implement-review loop
   vcs/                           -- VCS abstraction layer
     base.py                      -- abstract VcsBackend interface
@@ -69,8 +68,6 @@ cld agent [-n name] [-m model] [-r revision] [-p prompt] [task-file.md]
 # Code review agent
 cld review [-n name] [-m model] <feature-branch> <trunk-branch>
 
-# Headless
-cld headless [args...]
 ```
 
 ## Env Vars

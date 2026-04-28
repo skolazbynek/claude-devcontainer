@@ -36,7 +36,7 @@ if command -v poetry &>/dev/null; then
     while IFS= read -r pyproject; do
         project_dir=$(dirname "$pyproject")
         echo "[INFO] Installing poetry packages in $project_dir"
-        (cd "$project_dir" && poetry install --no-interaction -q 2>&1 >/dev/null) || \
+        (cd "$project_dir" && poetry install --no-interaction -q >/dev/null 2>&1) || \
             echo "[WARN] poetry install failed in $project_dir (continuing)"
     done < <(find "$WORKSPACE_CURRENT" -maxdepth 3 -name pyproject.toml \
         -not -path '*/.*' -not -path '*/node_modules/*' -not -path '*/.venv/*' 2>/dev/null)

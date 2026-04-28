@@ -8,7 +8,6 @@ Run Claude Code in Docker containers with VCS workspace isolation. Supports **ju
 - Docker
 - A **jujutsu** or **git** repository (jj preferred; git used as fallback)
 - Python 3.11+ with [Poetry](https://python-poetry.org/)
-- `claude` CLI on the host (only required for `cld headless`)
 - Optional: `MYSQL_CONFIG` env pointing to a `.cnf` file (vendor-specific; safe to ignore)
 
 ## Setup
@@ -39,9 +38,6 @@ cld review [-n name] [-m model] <feature-branch> <trunk-branch>
 
 # Implement-review loop (automated iterate until clean review)
 cld loop [-n name] [-m model] [--max-iterations 3] task.md
-
-# Headless mode (passthrough to claude -p --permission-mode acceptEdits)
-cld headless [args...]
 ```
 
 ### Agent workflow
@@ -150,7 +146,7 @@ Builtin prompts are baked into the image at `/opt/cld/prompts/`. Workspace promp
 cld/                               Python package (CLI + shared logic)
   cli.py                           typer app with all subcommands
   docker.py                        container arg building, image management, path translation
-  agent.py                         agent, review, and headless launch logic
+  agent.py                         agent and review launch logic
   loop.py                          automated implement-review loop
   vcs/                             VCS abstraction layer
     base.py                        abstract VcsBackend interface
