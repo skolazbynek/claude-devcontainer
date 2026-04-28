@@ -12,6 +12,7 @@ from cld.vcs import get_backend
 CONTAINER_USER = "claude"
 CONTAINER_HOME = f"/home/{CONTAINER_USER}"
 WORKSPACE_BASE = "/workspace"
+DEVCONTAINER_IMAGE = "claude-devcontainer:latest"
 
 _RED = "\033[0;31m"
 _GREEN = "\033[0;32m"
@@ -197,7 +198,7 @@ def build_container_args(
         log_warn(f"{local_claude_json} not found -- host MCP servers won't be available in container")
 
     # OAuth tokens / config (allowlist only -- avoid leaking gh/aws/gcloud/etc creds)
-    for config_rel in (".config/anthropic", ".config/claude", ".config/nvim"):
+    for config_rel in (".config/anthropic", ".config/claude", ".config/nvim", ".config/jj"):
         local_config_path = Path(home) / config_rel
         if local_config_path.is_dir():
             args += ["-v", f"{host_home}/{config_rel}:{CONTAINER_HOME}/{config_rel}:ro"]

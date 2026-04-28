@@ -158,9 +158,12 @@ class GitBackend(VcsBackend):
 
     def squash(self, from_rev: str, into_rev: str) -> str:
         """Squash changes from *from_rev* into *into_rev* via cherry-pick and amend."""
+        original = self._run_git(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
         self._run_git(["checkout", into_rev])
         self._run_git(["cherry-pick", "--no-commit", from_rev])
         result = self._run_git(["commit", "--amend", "--no-edit"])
+        if original and original != "HEAD":
+            self._run_git(["checkout", original])
         return result.stdout + result.stderr
 
     # -- diff -----------------------------------------------------------------

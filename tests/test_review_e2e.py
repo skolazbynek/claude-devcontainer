@@ -174,7 +174,7 @@ class TestReviewLaunchIntegration:
         assert "feature" in task_content or "trunk" in task_content
 
         # Verify diff file was created
-        diff_files = list(vcs.repo_root.glob("review-diff-*.patch"))
+        diff_files = list(vcs.repo_root.glob(".cld/review-diff-*.patch"))
         assert len(diff_files) >= 1
         diff_content = diff_files[0].read_text()
         assert "new_feature.py" in diff_content

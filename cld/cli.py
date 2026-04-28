@@ -23,10 +23,11 @@ from cld.docker import (
     mount_home_path,
     require_docker,
     CONTAINER_HOME,
+    DEVCONTAINER_IMAGE,
 )
 from cld.loop import run_loop
 
-app = typer.Typer(add_completion=False)
+app = typer.Typer()
 
 
 def _handle_errors(func):
@@ -80,11 +81,9 @@ def agent(
     )
 
 
-DEVCONTAINER_IMAGE = "claude-devcontainer:latest"
-
 # Host paths to mount read-only (config files)
 _DIRECT_RO = [".gitconfig", ".bashrc"]
-_DIRECT_RW = [".config/nvim", ".cache/nvim", ".local/share/nvim", ".local/state/nvim"]
+_DIRECT_RW = [".cache/nvim", ".local/share/nvim", ".local/state/nvim"]
 
 
 @app.command()
@@ -155,8 +154,13 @@ def review(
     if trunk_branch is None:
         from cld.vcs import get_backend
         branches = get_backend().list_branches()
+        branch_names = {
+            line.strip().lstrip("* ").split(":")[0].split()[0]
+            for line in branches.splitlines()
+            if line.strip()
+        }
         for candidate in ("main", "master", "trunk"):
-            if candidate in branches:
+            if candidate in branch_names:
                 trunk_branch = candidate
                 break
         if trunk_branch is None:

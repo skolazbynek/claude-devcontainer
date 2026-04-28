@@ -290,7 +290,13 @@ def _prompt_user(severity: dict, review_content: str) -> tuple[str, str]:
                 tf.write(review_content)
                 tf_path = tf.name
             editor = os.environ.get("EDITOR", "vi")
-            subprocess.run([editor, tf_path])
+            try:
+                subprocess.run([editor, tf_path])
+            except FileNotFoundError:
+                Path(tf_path).unlink(missing_ok=True)
+                print(f"  Editor not found: {editor}")
+                print()
+                continue
             tf = Path(tf_path)
             review_content = tf.read_text()
             tf.unlink(missing_ok=True)
@@ -306,7 +312,7 @@ def _cleanup_temp_files(repo_root: Path) -> None:
     tmp = repo_root / ".cld"
     if not tmp.is_dir():
         return
-    for pattern in ("loop-impl-*", "loop-review-*", "loop-diff-*"):
+    for pattern in ("loop-impl-*", "loop-review-*", "loop-diff-*", "review-diff-*", "review-task-*"):
         for f in tmp.glob(pattern):
             f.unlink(missing_ok=True)
 

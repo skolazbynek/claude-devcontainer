@@ -201,6 +201,7 @@ def check_status(session_name: str, include_result: bool = False) -> dict:
             info["summary_raw"] = summary_raw[:2000]
     else:
         info["status"] = "failed"
+        info.pop("commit", None)
         info["error"] = "summary.json missing -- agent likely failed before commit"
         failure_raw = vcs.file_show(session_name, f"{output_prefix}/AGENT-FAILURE.md")
         if failure_raw:

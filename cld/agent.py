@@ -18,6 +18,7 @@ from cld.docker import (
     log_info,
     require_docker,
     to_host_path,
+    DEVCONTAINER_IMAGE,
     WORKSPACE_BASE,
 )
 from cld.vcs import get_backend
@@ -80,6 +81,11 @@ def launch_agent(
         AGENT_IMAGE,
         cld_root / "imgs/claude-agent/Dockerfile.claude-agent",
         cld_root / "imgs/claude-agent",
+        parent_image=(
+            DEVCONTAINER_IMAGE,
+            cld_root / "imgs/claude-devcontainer/Dockerfile.claude-devcontainer",
+            cld_root,
+        ),
     )
 
     session = session_name or build_session_name("agent", name)
