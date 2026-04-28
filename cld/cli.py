@@ -22,7 +22,6 @@ from cld.docker import (
     log_warn,
     mount_home_path,
     require_docker,
-    to_host_path,
     BASE_IMAGE,
     CONTAINER_HOME,
     DEVCONTAINER_IMAGE,
@@ -138,10 +137,9 @@ def devcontainer(
             skipped.append(rel_path)
 
     for rel_path, sub in _NVIM_HOST_MOUNTS.items():
-        local_path = Path.home() / rel_path
-        if local_path.is_dir():
-            host_path = to_host_path(str(local_path.resolve()))
-            args += ["-v", f"{host_path}:/tmp/nvim-host/{sub}:ro"]
+        mnt = mount_home_path(rel_path, f"/tmp/nvim-host/{sub}:ro")
+        if mnt:
+            args += mnt
         else:
             skipped.append(rel_path)
 

@@ -15,6 +15,11 @@ WORKSPACE_BASE = "/workspace"
 BASE_IMAGE = "claude-base:latest"
 DEVCONTAINER_IMAGE = "claude-devcontainer:latest"
 
+# Host-config dirs mounted RO into every container (devcontainer + agent).
+# Allowlist only -- avoid leaking gh/aws/gcloud/etc creds. Nvim config is
+# devcontainer-only and lives in cli.py via the RO+copy pattern.
+_SHARED_RO_CONFIG_DIRS = (".config/anthropic", ".config/claude", ".config/jj")
+
 _RED = "\033[0;31m"
 _GREEN = "\033[0;32m"
 _YELLOW = "\033[1;33m"
@@ -147,8 +152,9 @@ def build_container_args(
 ) -> list[str]:
     """Build the base ``docker run`` argument list every launcher needs.
 
-    Sets up security constraints, volume mounts (repo, claude config, neovim,
-    docker socket, mysql), and environment variables.
+    Sets up security constraints, volume mounts (repo, claude config,
+    docker socket, mysql), and environment variables. Devcontainer-only
+    mounts (gitconfig, bashrc, nvim) are added by the launcher in cli.py.
     """
     home = os.path.expanduser("~")
     host_home = to_host_path(home)
@@ -198,10 +204,7 @@ def build_container_args(
     else:
         log_warn(f"{local_claude_json} not found -- host MCP servers won't be available in container")
 
-    # OAuth tokens / config (allowlist only -- avoid leaking gh/aws/gcloud/etc creds)
-    # Note: nvim config/data is intentionally excluded -- it's devcontainer-only
-    # and handled by the devcontainer command via the RO-copy pattern.
-    for config_rel in (".config/anthropic", ".config/claude", ".config/jj"):
+    for config_rel in _SHARED_RO_CONFIG_DIRS:
         local_config_path = Path(home) / config_rel
         if local_config_path.is_dir():
             args += ["-v", f"{host_home}/{config_rel}:{CONTAINER_HOME}/{config_rel}:ro"]
