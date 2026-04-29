@@ -56,11 +56,11 @@ vcs_create_workspace "$AGENT_NAME" "$WORKSPACE_CURRENT" "$WORKSPACE_REV" 2>&1
 
 cd "$WORKSPACE_CURRENT"
 
-# For jj, create a new change on top of the revision and a bookmark.
+# For jj, `jj workspace add` already created a fresh working-copy change
+# on top of WORKSPACE_REV; just place the bookmark on it.
 # For git, the worktree already has a branch at the right revision.
 if [ "$VCS_TYPE" = "jj" ]; then
-    jj new "$WORKSPACE_REV" 2>&1
-    jj bookmark create "$AGENT_NAME" 2>&1
+    jj bookmark create -r @ "$AGENT_NAME" 2>&1
 fi
 
 OUTPUT_DIR="$WORKSPACE_CURRENT/agent-output-$AGENT_NAME"

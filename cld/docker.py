@@ -1,10 +1,12 @@
 """Container setup: arg building, image management, path translation."""
 
+import hashlib
 import os
 import secrets
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 
 from cld.config import Config
@@ -64,43 +66,127 @@ def require_docker() -> None:
         sys.exit(1)
 
 
+CONTENT_HASH_LABEL = "org.cld.content-hash"
+
+_HASH_IGNORE_PARTS = {"__pycache__", ".git", ".jj", ".venv", "node_modules"}
+
+
+def _hash_ignored(p: Path) -> bool:
+    return any(part in _HASH_IGNORE_PARTS or part.endswith(".pyc") for part in p.parts)
+
+
+def _hash_walk(p: Path) -> Iterable[Path]:
+    if p.is_file():
+        yield p
+        return
+    for entry in sorted(p.rglob("*")):
+        if entry.is_file() and not _hash_ignored(entry):
+            yield entry
+
+
+def _content_hash(paths: list[Path], parent_hash: str | None) -> str:
+    """Deterministic content hash over the given files/dirs and an optional parent hash."""
+    h = hashlib.sha256()
+    if parent_hash:
+        h.update(b"parent:" + parent_hash.encode() + b"\n")
+    for p in sorted(paths):
+        # Use relpath under p.parent so the path component is stable across machines.
+        for entry in _hash_walk(p):
+            rel = entry.relative_to(p.parent).as_posix()
+            h.update(f"{rel}\0".encode())
+            h.update(entry.read_bytes())
+            h.update(b"\0")
+    return h.hexdigest()[:16]
+
+
+def _image_label(image: str, label: str) -> str:
+    """Read a Docker label off an image. Empty string if image or label is missing."""
+    result = subprocess.run(
+        ["docker", "inspect", "--format", f'{{{{ index .Config.Labels "{label}" }}}}', image],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def base_extra_paths(cld_root: Path) -> list[Path]:
+    return [
+        cld_root / "imgs/claude-devcontainer/container-init.sh",
+        cld_root / "imgs/claude-devcontainer/vcs-lib.sh",
+        cld_root / "cld",
+        cld_root / "prompts",
+    ]
+
+
+def devcontainer_extra_paths(cld_root: Path) -> list[Path]:
+    return [cld_root / "imgs/claude-devcontainer/entrypoint-claude-devcontainer.sh"]
+
+
+def agent_extra_paths(cld_root: Path) -> list[Path]:
+    return [
+        cld_root / "imgs/claude-agent/entrypoint-claude-agent.sh",
+        cld_root / "imgs/claude-agent/agent-system-prompt.md",
+    ]
+
+
 def ensure_image(
     image: str,
     dockerfile: Path,
     context: Path,
     *,
-    parent_image: tuple[str, Path, Path] | None = None,
+    extra_paths: list[Path] | None = None,
+    parent_image: tuple[str, Path, Path, list[Path]] | None = None,
     force: bool = False,
     no_cache: bool = False,
-) -> None:
-    """Build a Docker image if it does not already exist locally.
+) -> str:
+    """Build a Docker image if it's missing or its baked content has drifted from source.
 
-    Pass parent_image=(name, dockerfile, context) to ensure a base image is built first.
-    Pass force=True to build even if the image already exists.
-    Pass no_cache=True to build with --no-cache.
+    Stamps every build with a `CONTENT_HASH_LABEL` Docker label whose value hashes the
+    Dockerfile + every path in `extra_paths` (recursively, sorted, ignoring caches/VCS).
+    Rebuilds when the existing image's label doesn't match the recomputed hash.
+
+    Pass parent_image=(name, dockerfile, context, extra_paths) to ensure a base image
+    is built first; the parent's hash is folded into this image's hash so a base
+    rebuild propagates.
+    Pass force=True to always build. Pass no_cache=True to build with --no-cache.
+    Returns the content hash of the (now-current) image.
     """
-    result = subprocess.run(
-        ["docker", "images", "-q", image], capture_output=True, text=True,
-    )
-    if result.stdout.strip() and not force:
-        return
+    parent_hash: str | None = None
     if parent_image:
-        parent_name, parent_dockerfile, parent_context = parent_image
-        parent_result = subprocess.run(
-            ["docker", "images", "-q", parent_name], capture_output=True, text=True,
+        parent_name, parent_dockerfile, parent_context, parent_extras = parent_image
+        parent_hash = ensure_image(
+            parent_name, parent_dockerfile, parent_context,
+            extra_paths=parent_extras, force=force, no_cache=no_cache,
         )
-        if not parent_result.stdout.strip():
-            ensure_image(parent_name, parent_dockerfile, parent_context, force=force, no_cache=no_cache)
-    if result.stdout.strip():
-        log_info(f"Rebuilding '{image}' (this may take 5+ minutes)...")
+
+    expected = _content_hash([dockerfile] + (extra_paths or []), parent_hash)
+
+    exists = bool(subprocess.run(
+        ["docker", "images", "-q", image], capture_output=True, text=True,
+    ).stdout.strip())
+    existing = _image_label(image, CONTENT_HASH_LABEL) if exists else ""
+
+    if exists and not force and existing == expected:
+        return expected
+
+    if force:
+        log_info(f"Rebuilding '{image}' (forced, hash {expected[:8]})...")
+    elif not exists:
+        log_info(f"Image '{image}' not found. Building (hash {expected[:8]}, may take 5+ minutes)...")
+    elif not existing:
+        log_info(f"Rebuilding '{image}' (no content-hash label; hash {expected[:8]})...")
     else:
-        log_info(f"Image '{image}' not found. Building (this may take 5+ minutes on first run)...")
-    cmd = ["docker", "build", "-f", str(dockerfile), "-t", image]
+        log_info(f"Rebuilding '{image}' (stale: {existing[:8]} -> {expected[:8]})...")
+
+    cmd = ["docker", "build", "-f", str(dockerfile), "-t", image,
+           "--label", f"{CONTENT_HASH_LABEL}={expected}"]
     if no_cache:
         cmd.append("--no-cache")
     cmd.append(str(context))
     subprocess.run(cmd, check=True)
     log_info("Image built successfully.")
+    return expected
 
 
 def cld_tmpdir(repo_root: Path) -> Path:

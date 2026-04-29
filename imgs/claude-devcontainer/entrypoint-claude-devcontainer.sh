@@ -11,7 +11,11 @@ NVIM_HOST_DIR="/tmp/nvim-host"
 if [ -d "$NVIM_HOST_DIR" ]; then
     mkdir -p "$HOME/.config" "$HOME/.local/share" "$HOME/.local/state" "$HOME/.cache"
     [ -d "$NVIM_HOST_DIR/config" ] && cp -aT "$NVIM_HOST_DIR/config" "$HOME/.config/nvim"
-    [ -d "$NVIM_HOST_DIR/share" ]  && cp -aT "$NVIM_HOST_DIR/share"  "$HOME/.local/share/nvim"
+    # share/ is intentionally not copied: it contains host-built artifacts
+    # (Mason LSP venvs with hardcoded host paths, compiled .so parsers, Go
+    # binaries, absolute symlinks). lazy.nvim re-clones plugins from
+    # lazy-lock.json on first launch; Mason / treesitter / dbee reinstall
+    # in-container.
     [ -d "$NVIM_HOST_DIR/state" ]  && cp -aT "$NVIM_HOST_DIR/state"  "$HOME/.local/state/nvim"
     [ -d "$NVIM_HOST_DIR/cache" ]  && cp -aT "$NVIM_HOST_DIR/cache"  "$HOME/.cache/nvim"
 fi

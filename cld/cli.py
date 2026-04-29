@@ -12,9 +12,12 @@ import typer
 from cld.agent import launch_agent, launch_review
 from cld.config import Config
 from cld.docker import (
+    agent_extra_paths,
+    base_extra_paths,
     build_container_args,
     build_session_name,
     cld_tmpdir,
+    devcontainer_extra_paths,
     ensure_image,
     find_repo_root,
     log_error,
@@ -89,7 +92,6 @@ _DIRECT_RO = [".gitconfig", ".bashrc"]
 # copies them into $HOME so changes don't persist back to the host.
 _NVIM_HOST_MOUNTS = {
     ".config/nvim": "config",
-    ".local/share/nvim": "share",
     ".local/state/nvim": "state",
     ".cache/nvim": "cache",
 }
@@ -112,10 +114,12 @@ def devcontainer(
         cfg.devcontainer_image,
         cld_root / "imgs/claude-devcontainer/Dockerfile.claude-devcontainer",
         cld_root,
+        extra_paths=devcontainer_extra_paths(cld_root),
         parent_image=(
             cfg.base_image,
             cld_root / "imgs/claude-base/Dockerfile.claude-base",
             cld_root,
+            base_extra_paths(cld_root),
         ),
     )
 
@@ -237,9 +241,39 @@ def build(no_cache: bool = typer.Option(False, "--no-cache", help="Force rebuild
     require_docker()
     cfg = Config.from_env()
     cld_root = Path(__file__).resolve().parent.parent
-    ensure_image(cfg.base_image, cld_root / "imgs/claude-base/Dockerfile.claude-base", cld_root, force=True, no_cache=no_cache)
-    ensure_image(cfg.devcontainer_image, cld_root / "imgs/claude-devcontainer/Dockerfile.claude-devcontainer", cld_root, force=True, no_cache=no_cache)
-    ensure_image(cfg.agent_image, cld_root / "imgs/claude-agent/Dockerfile.claude-agent", cld_root / "imgs/claude-agent", force=True, no_cache=no_cache)
+    ensure_image(
+        cfg.base_image,
+        cld_root / "imgs/claude-base/Dockerfile.claude-base",
+        cld_root,
+        extra_paths=base_extra_paths(cld_root),
+        force=True, no_cache=no_cache,
+    )
+    ensure_image(
+        cfg.devcontainer_image,
+        cld_root / "imgs/claude-devcontainer/Dockerfile.claude-devcontainer",
+        cld_root,
+        extra_paths=devcontainer_extra_paths(cld_root),
+        parent_image=(
+            cfg.base_image,
+            cld_root / "imgs/claude-base/Dockerfile.claude-base",
+            cld_root,
+            base_extra_paths(cld_root),
+        ),
+        force=True, no_cache=no_cache,
+    )
+    ensure_image(
+        cfg.agent_image,
+        cld_root / "imgs/claude-agent/Dockerfile.claude-agent",
+        cld_root / "imgs/claude-agent",
+        extra_paths=agent_extra_paths(cld_root),
+        parent_image=(
+            cfg.base_image,
+            cld_root / "imgs/claude-base/Dockerfile.claude-base",
+            cld_root,
+            base_extra_paths(cld_root),
+        ),
+        force=True, no_cache=no_cache,
+    )
 
 
 if __name__ == "__main__":

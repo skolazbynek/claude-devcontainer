@@ -9,6 +9,8 @@ from string import Template
 
 from cld.config import Config
 from cld.docker import (
+    agent_extra_paths,
+    base_extra_paths,
     build_container_args,
     build_session_name,
     cld_tmpdir,
@@ -78,10 +80,12 @@ def launch_agent(
         cfg.agent_image,
         cld_root / "imgs/claude-agent/Dockerfile.claude-agent",
         cld_root / "imgs/claude-agent",
+        extra_paths=agent_extra_paths(cld_root),
         parent_image=(
             cfg.base_image,
             cld_root / "imgs/claude-base/Dockerfile.claude-base",
             cld_root,
+            base_extra_paths(cld_root),
         ),
     )
 
