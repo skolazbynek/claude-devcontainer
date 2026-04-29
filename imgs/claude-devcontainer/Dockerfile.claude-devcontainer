@@ -13,6 +13,15 @@ RUN curl -fsSL https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-l
     ln -s ~/.opt/nvim-linux-x86_64/bin/nvim ~/.local/bin/nvim && \
     rm -f ~/.tmp/nvim.tar.gz
 
+# Install tree-sitter CLI (required by nvim-treesitter `main` branch to
+# generate/compile parsers; the legacy bundled parser.c approach is gone).
+# Upstream README warns against the npm package -- use the Rust release binary.
+RUN curl -fsSL https://github.com/tree-sitter/tree-sitter/releases/download/v0.26.1/tree-sitter-linux-x64.gz -o ~/.tmp/tree-sitter.gz && \
+    gunzip ~/.tmp/tree-sitter.gz && \
+    mv ~/.tmp/tree-sitter ~/.opt/tree-sitter && \
+    chmod +x ~/.opt/tree-sitter && \
+    ln -s ~/.opt/tree-sitter ~/.local/bin/tree-sitter
+
 USER root
 
 # Copy devcontainer entrypoint (context: repo root)
