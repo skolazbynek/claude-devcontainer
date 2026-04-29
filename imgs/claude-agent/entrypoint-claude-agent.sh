@@ -73,6 +73,7 @@ log "Agent $AGENT_NAME started (VCS: $VCS_TYPE)"
 
 # --- Configure MCP servers ---
 
+setup_host_configs
 build_claude_config
 
 # --- Execute Claude ---

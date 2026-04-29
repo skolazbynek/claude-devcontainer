@@ -2,6 +2,8 @@
 source /workspace/container-init.sh
 source /workspace/vcs-lib.sh
 
+setup_host_configs
+
 # Copy host nvim config/data into container HOME so nvim can write freely
 # without persisting back to the host. Source dirs are RO-mounted by the
 # devcontainer launcher under /tmp/nvim-host/.

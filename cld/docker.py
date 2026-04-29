@@ -7,17 +7,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+from cld.config import Config
 from cld.vcs import get_backend
 
+# Static structural constants (Dockerfile- and shell-script-coupled, not user-tunable).
 CONTAINER_USER = "claude"
 CONTAINER_HOME = f"/home/{CONTAINER_USER}"
 WORKSPACE_BASE = "/workspace"
-BASE_IMAGE = "claude-base:latest"
-DEVCONTAINER_IMAGE = "claude-devcontainer:latest"
 
-# Host-config dirs mounted RO into every container (devcontainer + agent).
-# Allowlist only -- avoid leaking gh/aws/gcloud/etc creds. Nvim config is
-# devcontainer-only and lives in cli.py via the RO+copy pattern.
+# Host-config dirs staged RO to /tmp/host-config/<rel> in every container.
+# Allowlist only -- avoid leaking gh/aws/gcloud/etc creds.
+# Entrypoint symlinks each into $HOME so Docker never creates $HOME subdirs as root.
+# Nvim is devcontainer-only and lives in cli.py via the RO+copy pattern.
 _SHARED_RO_CONFIG_DIRS = (".config/anthropic", ".config/claude", ".config/jj")
 
 _RED = "\033[0;31m"
@@ -56,24 +57,6 @@ def build_session_name(prefix: str, suffix: str = "") -> str:
     return f"{prefix}_{suffix or secrets.token_hex(3)}"
 
 
-def load_dotenv(path: Path | None = None) -> None:
-    """Read a .env file and inject its variables into the current process environment.
-
-    Limitations: does not handle quoted values, `export ` prefix, or escape sequences.
-    Values are split on the first `=` and stripped of surrounding whitespace only.
-    """
-    dotenv = path or Path.cwd() / ".env"
-    if not dotenv.is_file():
-        return
-    for line in dotenv.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, _, value = line.partition("=")
-        if key:
-            os.environ[key.strip()] = value.strip()
-
-
 def require_docker() -> None:
     """Verify the ``docker`` CLI is available, exit otherwise."""
     if not shutil.which("docker"):
@@ -88,11 +71,13 @@ def ensure_image(
     *,
     parent_image: tuple[str, Path, Path] | None = None,
     force: bool = False,
+    no_cache: bool = False,
 ) -> None:
     """Build a Docker image if it does not already exist locally.
 
     Pass parent_image=(name, dockerfile, context) to ensure a base image is built first.
-    Pass force=True to rebuild from scratch with --no-cache.
+    Pass force=True to build even if the image already exists.
+    Pass no_cache=True to build with --no-cache.
     """
     result = subprocess.run(
         ["docker", "images", "-q", image], capture_output=True, text=True,
@@ -105,13 +90,13 @@ def ensure_image(
             ["docker", "images", "-q", parent_name], capture_output=True, text=True,
         )
         if not parent_result.stdout.strip():
-            ensure_image(parent_name, parent_dockerfile, parent_context, force=force)
+            ensure_image(parent_name, parent_dockerfile, parent_context, force=force, no_cache=no_cache)
     if result.stdout.strip():
         log_info(f"Rebuilding '{image}' (this may take 5+ minutes)...")
     else:
         log_info(f"Image '{image}' not found. Building (this may take 5+ minutes on first run)...")
     cmd = ["docker", "build", "-f", str(dockerfile), "-t", image]
-    if force:
+    if no_cache:
         cmd.append("--no-cache")
     cmd.append(str(context))
     subprocess.run(cmd, check=True)
@@ -125,28 +110,28 @@ def cld_tmpdir(repo_root: Path) -> Path:
     return d
 
 
-def to_host_path(path: str) -> str:
+def to_host_path(path: str, cfg: Config) -> str:
     """Translate a container-internal path to the corresponding host path.
 
-    Uses HOST_PROJECT_DIR and HOST_HOME env vars set during container launch
-    to map /workspace/* and $HOME paths back to their host-side locations.
+    Uses ``cfg.host_project_dir`` / ``cfg.host_home`` (populated from the
+    ``CLD_HOST_PROJECT_DIR`` / ``CLD_HOST_HOME`` env vars set by the host
+    launcher when running inside a container) to map ``/workspace/*`` and
+    ``$HOME`` paths back to their host-side locations. No-op on the host.
     """
-    host_project = os.environ.get("HOST_PROJECT_DIR", "")
-    host_home = os.environ.get("HOST_HOME", "")
-    if host_project:
+    if cfg.host_project_dir:
         for prefix in ("/workspace/current", "/workspace/origin"):
             if path.startswith(prefix):
-                path = host_project + path[len(prefix):]
+                path = cfg.host_project_dir + path[len(prefix):]
                 break
-    if host_home:
-        if path.startswith(CONTAINER_HOME):
-            path = host_home + path[len(CONTAINER_HOME):]
+    if cfg.host_home and path.startswith(CONTAINER_HOME):
+        path = cfg.host_home + path[len(CONTAINER_HOME):]
     return path
 
 
 def build_container_args(
     repo_root: Path,
     session_name: str,
+    cfg: Config,
     *,
     interactive: bool = False,
 ) -> list[str]:
@@ -157,8 +142,8 @@ def build_container_args(
     mounts (gitconfig, bashrc, nvim) are added by the launcher in cli.py.
     """
     home = os.path.expanduser("~")
-    host_home = to_host_path(home)
-    host_repo_root = to_host_path(str(repo_root))
+    host_home = to_host_path(home, cfg)
+    host_repo_root = to_host_path(str(repo_root), cfg)
 
     args: list[str] = []
 
@@ -204,12 +189,16 @@ def build_container_args(
     else:
         log_warn(f"{local_claude_json} not found -- host MCP servers won't be available in container")
 
+    staged_configs = []
     for config_rel in _SHARED_RO_CONFIG_DIRS:
         local_config_path = Path(home) / config_rel
         if local_config_path.is_dir():
-            args += ["-v", f"{host_home}/{config_rel}:{CONTAINER_HOME}/{config_rel}:ro"]
+            args += ["-v", f"{host_home}/{config_rel}:/tmp/host-config/{config_rel}:ro"]
+            staged_configs.append(config_rel)
         else:
             log_warn(f"{local_config_path} not found -- skipping")
+    if staged_configs:
+        args += ["-e", f"HOST_CONFIG_DIRS={':'.join(staged_configs)}"]
 
     # Session
     args += ["-e", f"SESSION_NAME={session_name}"]
@@ -222,17 +211,16 @@ def build_container_args(
         args += [
             "-v", f"{docker_sock}:{docker_sock}",
             "--group-add", str(docker_gid),
-            "-e", f"HOST_PROJECT_DIR={repo_root}",
-            "-e", f"HOST_HOME={home}",
+            "-e", f"CLD_HOST_PROJECT_DIR={repo_root}",
+            "-e", f"CLD_HOST_HOME={home}",
         ]
         log_info("Docker socket mounted (orchestrator support)")
     else:
         log_warn("Docker socket not found, orchestrator agent lifecycle tools unavailable")
 
     # MySQL (conditional)
-    mysql_config = os.environ.get("MYSQL_CONFIG", "")
-    if mysql_config:
-        mysql_path = Path(mysql_config)
+    if cfg.mysql_config:
+        mysql_path = Path(cfg.mysql_config)
         if mysql_path.is_file():
             resolved = str(mysql_path.resolve())
             args += [
@@ -241,15 +229,15 @@ def build_container_args(
             ]
             log_info(f"MySQL config mounted from: {resolved}")
         else:
-            log_warn(f"MYSQL_CONFIG set but file not found: {mysql_config}")
+            log_warn(f"CLD_MYSQL_CONFIG set but file not found: {cfg.mysql_config}")
 
     return args
 
 
-def mount_home_path(rel_path: str, target: str) -> list[str]:
+def mount_home_path(rel_path: str, target: str, cfg: Config) -> list[str]:
     """Mount $HOME/rel_path to target. Returns empty list if source doesn't exist."""
     local_path = Path.home() / rel_path
     if not local_path.exists():
         return []
-    host_path = to_host_path(str(local_path.resolve()))
+    host_path = to_host_path(str(local_path.resolve()), cfg)
     return ["-v", f"{host_path}:{target}"]

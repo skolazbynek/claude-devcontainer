@@ -72,15 +72,34 @@ cld review [-n name] [-m model] <feature-branch> <trunk-branch>
 
 ```
 
-## Env Vars
+## Configuration
 
-| Variable | Where set | Purpose |
+All Python-side runtime tunables live in `cld/config.py:Config` (frozen dataclass). Each Typer command and MCP tool constructs `Config.from_env()` once at entry and passes it explicitly down the call chain (Variant A: explicit DI, no global). `from_env()` also loads `.env` from the cwd before reading env vars.
+
+`CLD_*` env vars (read by `Config.from_env`):
+
+| Var | Default | Purpose |
+|---|---|---|
+| `CLD_BASE_IMAGE` | `claude-base:latest` | Common base Docker image |
+| `CLD_DEVCONTAINER_IMAGE` | `claude-devcontainer:latest` | Devcontainer image |
+| `CLD_AGENT_IMAGE` | `claude-agent:latest` | Agent image |
+| `CLD_MYSQL_CONFIG` | `""` | Path to a `.cnf` file, mounted ro at `/run/secrets/mysql.cnf` |
+| `CLD_HOST_PROJECT_DIR` | `""` | Set by host launcher into containers; lets in-container Python translate `/workspace/*` paths back to host paths for sibling `-v` mounts |
+| `CLD_HOST_HOME` | `""` | Same idea for `$HOME` paths |
+| `CLD_AGENT_TIMEOUT` | `1800` | Loop's per-agent wait timeout (seconds) |
+| `CLD_POLL_INTERVAL` | `30` | Loop's docker-ps poll interval (seconds) |
+| `CLD_DEBUG` | `false` | Diagnostics flag |
+
+Container-side env vars consumed by shell entrypoints (NOT read by Python `Config`; left unprefixed because shell scripts read them by name):
+
+| Var | Where set | Purpose |
 |---|---|---|
 | `SESSION_NAME` | `build_container_args` -> container | Branch/workspace name |
 | `INSTRUCTION_FILE` | agent launch -> container | Task file path |
-| `AGENT_REVISION` | agent launch -> container | Revision for workspace init (default: @ for jj, HEAD for git) |
-| `MYSQL_CONFIG` | Host env / `.env` file | Path to `.cnf` file, mounted ro at `/run/secrets/mysql.cnf` |
+| `AGENT_MODEL` / `AGENT_REVISION` | launcher -> container | Claude model / revision for workspace init |
+| `AGENT_COMMIT_MSG_LLM` / `AGENT_SYSTEM_PROMPT_FILE` | user -> container | Optional agent overrides |
 | `MYSQL_DEFAULTS_FILE` | `build_container_args` -> container | Credentials path inside container |
+| `WORKSPACE_ORIGIN` | `container-init.sh` -> Python | `/workspace/origin` (read by `vcs/detect.py`) |
 
 ## Agent Output
 

@@ -8,7 +8,7 @@ Run Claude Code in Docker containers with VCS workspace isolation. Supports **ju
 - Docker
 - A **jujutsu** or **git** repository (jj preferred; git used as fallback)
 - Python 3.11+ with [Poetry](https://python-poetry.org/)
-- Optional: `MYSQL_CONFIG` env pointing to a `.cnf` file (vendor-specific; safe to ignore)
+- Optional: `CLD_MYSQL_CONFIG` env pointing to a `.cnf` file (vendor-specific; safe to ignore)
 
 ## Setup
 
@@ -194,13 +194,31 @@ Containers run as host UID/GID with `--cap-drop=ALL`, `--security-opt=no-new-pri
 
 **Known gaps -- read carefully before shipping anything sensitive into a container:**
 
-- **No outbound network firewall.** Once an agent is running, it can reach any host on the public internet and exfiltrate anything mounted in (`~/.claude` tokens, `~/.claude.json` MCP creds, `~/.config/*` creds, `MYSQL_CONFIG`). Anthropic's reference devcontainer ships an `init-firewall.sh` with default-deny outbound and a small allowlist; cld does not (yet) ship an equivalent.
+- **No outbound network firewall.** Once an agent is running, it can reach any host on the public internet and exfiltrate anything mounted in (`~/.claude` tokens, `~/.claude.json` MCP creds, `~/.config/*` creds, `CLD_MYSQL_CONFIG`). Anthropic's reference devcontainer ships an `init-firewall.sh` with default-deny outbound and a small allowlist; cld does not (yet) ship an equivalent.
 - **`/var/run/docker.sock` mount = host root.** When the docker socket is mounted (it is, for the orchestrator), an agent inside can run `docker run -v /:/host --privileged ...` and read or modify anything on the host. This effectively bypasses every other security control. If you don't need the orchestrator, comment out the docker.sock block in `cld/docker.py`.
 - **`~/.claude` is mounted rw.** A malicious agent can both read your OAuth tokens and overwrite session state.
 
 Treat the container as **trusted with your full host environment** until the firewall and a docker-socket proxy land. Use `--dangerously-skip-permissions` accordingly.
 
-## Environment Variables
+## Configuration
+
+All Python-side runtime tunables live in `cld/config.py:Config` (frozen dataclass). Each command/MCP tool builds a `Config.from_env()` once at entry and passes it explicitly to launch helpers (Variant A: explicit DI). `from_env()` reads `.env` from the cwd before reading env vars.
+
+`CLD_*` env vars (defaults shown):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CLD_BASE_IMAGE` | `claude-base:latest` | Common base Docker image |
+| `CLD_DEVCONTAINER_IMAGE` | `claude-devcontainer:latest` | Devcontainer image |
+| `CLD_AGENT_IMAGE` | `claude-agent:latest` | Agent image |
+| `CLD_MYSQL_CONFIG` | `""` | Host path to a `.cnf` file (mounted into container if set) |
+| `CLD_HOST_PROJECT_DIR` | `""` | Host repo root path; set by host launcher into containers for nested docker path translation |
+| `CLD_HOST_HOME` | `""` | Host home directory (for path translation) |
+| `CLD_AGENT_TIMEOUT` | `1800` | Loop's per-agent wait timeout (seconds) |
+| `CLD_POLL_INTERVAL` | `30` | Loop's docker-ps poll interval (seconds) |
+| `CLD_DEBUG` | `false` | Diagnostics flag |
+
+Container-side env vars consumed by shell entrypoints (kept unprefixed):
 
 | Variable | Purpose |
 |---|---|
@@ -208,9 +226,7 @@ Treat the container as **trusted with your full host environment** until the fir
 | `INSTRUCTION_FILE` | Task file path inside agent container |
 | `AGENT_REVISION` | Revision for workspace init (default: `@` / `HEAD`) |
 | `AGENT_MODEL` | Claude model override (default: `sonnet`) |
-| `HOST_PROJECT_DIR` | Host repo root path (for nested docker path translation) |
-| `HOST_HOME` | Host home directory (for path translation) |
-| `MYSQL_CONFIG` | Host path to `.cnf` file (mounted into container if set) |
+| `WORKSPACE_ORIGIN` | Path to bind-mounted host repo inside container (set by `container-init.sh`) |
 
 ## Development
 
@@ -230,4 +246,4 @@ poetry run pytest -m docker
 poetry run pytest -m e2e
 ```
 
-Test markers are declared in `pyproject.toml`. The `tests/conftest.py` detects when running inside the devcontainer via `HOST_PROJECT_DIR` to translate paths.
+Test markers are declared in `pyproject.toml`. The `tests/conftest.py` detects when running inside the devcontainer via `CLD_HOST_PROJECT_DIR` to translate paths.

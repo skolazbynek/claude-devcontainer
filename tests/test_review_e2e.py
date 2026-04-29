@@ -150,7 +150,7 @@ class TestReviewLaunchIntegration:
         vcs = repo_with_branches
         launched = {}
 
-        def fake_launch_agent(task_file=None, model="", session_name=None, **kwargs):
+        def fake_launch_agent(cfg, task_file=None, model="", session_name=None, **kwargs):
             launched["task_file"] = task_file
             launched["session_name"] = session_name
             return {"container_id": "fake", "session_name": session_name, "repo_root": str(vcs.repo_root)}
@@ -158,11 +158,11 @@ class TestReviewLaunchIntegration:
         with patch("cld.agent.get_backend", return_value=vcs), \
              patch("cld.agent.launch_agent", side_effect=fake_launch_agent), \
              patch("cld.agent.require_docker"), \
-             patch("cld.agent.load_dotenv"), \
              patch("cld.agent.find_repo_root", return_value=vcs.repo_root), \
              patch("cld.agent.ensure_image"):
             from cld.agent import launch_review
-            result = launch_review("feature", "trunk", name="test-review")
+            from cld.config import Config
+            result = launch_review(Config(), "feature", "trunk", name="test-review")
 
         assert "session_name" in result
         assert result["session_name"].startswith("review_")
@@ -189,12 +189,12 @@ class TestReviewLaunchIntegration:
 
         with patch("cld.agent.get_backend", return_value=vcs), \
              patch("cld.agent.require_docker"), \
-             patch("cld.agent.load_dotenv"), \
              patch("cld.agent.find_repo_root", return_value=vcs.repo_root), \
              patch("cld.agent.ensure_image"):
             from cld.agent import launch_review
+            from cld.config import Config
             with pytest.raises(SystemExit):
-                launch_review("trunk", "trunk", name="empty-review")
+                launch_review(Config(), "trunk", "trunk", name="empty-review")
 
 
 @skip_no_agent_image

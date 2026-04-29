@@ -10,6 +10,7 @@ from pathlib import Path
 from string import Template
 
 from cld.agent import launch_agent
+from cld.config import Config
 from cld.docker import (
     build_session_name,
     cld_tmpdir,
@@ -20,28 +21,25 @@ from cld.docker import (
 )
 from cld.vcs import VcsBackend, get_backend
 
-_POLL_INTERVAL = 30
-_AGENT_TIMEOUT = 1800
-
 
 # --- Agent polling ---
 
 
-def _wait_for_agent(session_name: str, vcs: VcsBackend, agent_timeout: int = _AGENT_TIMEOUT) -> dict:
+def _wait_for_agent(session_name: str, vcs: VcsBackend, cfg: Config) -> dict:
     """Block until an agent container exits, then read its summary from the VCS.
 
-    Polls Docker for the container every ``_POLL_INTERVAL`` seconds. Once the
+    Polls Docker for the container every ``cfg.poll_interval`` seconds. Once the
     container disappears, reads ``summary.json`` from the agent's branch.
     """
     start = time.monotonic()
-    while time.monotonic() - start < agent_timeout:
+    while time.monotonic() - start < cfg.agent_timeout:
         result = subprocess.run(
             ["docker", "ps", "--filter", f"name=^{session_name}$", "--format", "{{.Status}}"],
             capture_output=True, text=True,
         )
         if not result.stdout.strip():
             break
-        time.sleep(_POLL_INTERVAL)
+        time.sleep(cfg.poll_interval)
     else:
         subprocess.run(["docker", "stop", session_name], capture_output=True, text=True)
         return {"status": "timeout", "session_name": session_name}
@@ -321,6 +319,7 @@ def _cleanup_temp_files(repo_root: Path) -> None:
 
 
 def run_loop(
+    cfg: Config,
     task_file: Path,
     *,
     name: str = "",
@@ -329,7 +328,6 @@ def run_loop(
     revision: str = "",
     max_iterations: int = 3,
     approve: bool = False,
-    agent_timeout: int = _AGENT_TIMEOUT,
 ) -> None:
     """Run the automated implement-review loop.
 
@@ -365,6 +363,7 @@ def run_loop(
             phase_start = time.monotonic()
 
             impl_result = launch_agent(
+                cfg,
                 task_file=impl_task,
                 model=model,
                 revision=loop_branch,
@@ -372,7 +371,7 @@ def run_loop(
                 quiet=True,
             )
 
-            impl_summary = _wait_for_agent(impl_result["session_name"], vcs, agent_timeout)
+            impl_summary = _wait_for_agent(impl_result["session_name"], vcs, cfg)
             impl_cost = _read_agent_cost(impl_result["session_name"], vcs)
             if impl_cost is not None:
                 total_cost_usd += impl_cost
@@ -397,6 +396,7 @@ def run_loop(
             phase_start = time.monotonic()
 
             review_result = launch_agent(
+                cfg,
                 task_file=review_task,
                 model=review_model,
                 revision=loop_branch,
@@ -404,7 +404,7 @@ def run_loop(
                 quiet=True,
             )
 
-            review_summary = _wait_for_agent(review_result["session_name"], vcs, agent_timeout)
+            review_summary = _wait_for_agent(review_result["session_name"], vcs, cfg)
             review_cost = _read_agent_cost(review_result["session_name"], vcs)
             if review_cost is not None:
                 total_cost_usd += review_cost

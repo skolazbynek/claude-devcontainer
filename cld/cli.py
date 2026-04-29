@@ -9,22 +9,20 @@ from typing import Optional
 
 import typer
 
-from cld.agent import launch_agent, launch_review, AGENT_IMAGE
+from cld.agent import launch_agent, launch_review
+from cld.config import Config
 from cld.docker import (
     build_container_args,
     build_session_name,
     cld_tmpdir,
     ensure_image,
     find_repo_root,
-    load_dotenv,
     log_error,
     log_info,
     log_warn,
     mount_home_path,
     require_docker,
-    BASE_IMAGE,
     CONTAINER_HOME,
-    DEVCONTAINER_IMAGE,
 )
 from cld.loop import run_loop
 
@@ -73,7 +71,9 @@ def agent(
     if not task_path and not prompt:
         typer.echo("Error: Provide a task file, --prompt, or both", err=True)
         raise typer.Exit(1)
+    cfg = Config.from_env()
     launch_agent(
+        cfg,
         task_file=task_path,
         inline_prompt=prompt or None,
         name=name,
@@ -105,24 +105,24 @@ def devcontainer(
 ):
     """Launch an interactive Claude devcontainer."""
     require_docker()
+    cfg = Config.from_env()
 
     cld_root = Path(__file__).resolve().parent.parent
     ensure_image(
-        DEVCONTAINER_IMAGE,
+        cfg.devcontainer_image,
         cld_root / "imgs/claude-devcontainer/Dockerfile.claude-devcontainer",
         cld_root,
         parent_image=(
-            BASE_IMAGE,
+            cfg.base_image,
             cld_root / "imgs/claude-base/Dockerfile.claude-base",
             cld_root,
         ),
     )
-    load_dotenv()
 
     repo_root = find_repo_root()
     session = build_session_name("cld", name)
 
-    args = build_container_args(repo_root, session, interactive=True)
+    args = build_container_args(repo_root, session, cfg, interactive=True)
     if model:
         args += ["-e", f"AGENT_MODEL={model}"]
     if revision:
@@ -130,14 +130,14 @@ def devcontainer(
 
     skipped = []
     for rel_path in _DIRECT_RO:
-        mnt = mount_home_path(rel_path, f"{CONTAINER_HOME}/{rel_path}:ro")
+        mnt = mount_home_path(rel_path, f"{CONTAINER_HOME}/{rel_path}:ro", cfg)
         if mnt:
             args += mnt
         else:
             skipped.append(rel_path)
 
     for rel_path, sub in _NVIM_HOST_MOUNTS.items():
-        mnt = mount_home_path(rel_path, f"/tmp/nvim-host/{sub}:ro")
+        mnt = mount_home_path(rel_path, f"/tmp/nvim-host/{sub}:ro", cfg)
         if mnt:
             args += mnt
         else:
@@ -146,7 +146,7 @@ def devcontainer(
     if skipped:
         log_warn(f"Optional host paths not found (skipped): {', '.join(skipped)}")
 
-    args += [DEVCONTAINER_IMAGE]
+    args += [cfg.devcontainer_image]
     if extra_args:
         args += extra_args
 
@@ -179,7 +179,8 @@ def review(
                 break
         if trunk_branch is None:
             raise RuntimeError("Could not auto-detect trunk branch; none of main/master/trunk found. Pass it explicitly.")
-    launch_review(feature_branch, trunk_branch, name=name, model=model)
+    cfg = Config.from_env()
+    launch_review(cfg, feature_branch, trunk_branch, name=name, model=model)
 
 
 @app.command()
@@ -216,7 +217,9 @@ def loop(
         tmp.close()
         task_path = Path(tmp.name)
 
+    cfg = Config.from_env()
     run_loop(
+        cfg,
         task_path,
         name=name,
         model=model,
@@ -232,10 +235,11 @@ def loop(
 def build(no_cache: bool = typer.Option(False, "--no-cache", help="Force rebuild without cache")):
     """Build base, devcontainer, and agent images (base first)."""
     require_docker()
+    cfg = Config.from_env()
     cld_root = Path(__file__).resolve().parent.parent
-    ensure_image(BASE_IMAGE, cld_root / "imgs/claude-base/Dockerfile.claude-base", cld_root, force=no_cache)
-    ensure_image(DEVCONTAINER_IMAGE, cld_root / "imgs/claude-devcontainer/Dockerfile.claude-devcontainer", cld_root, force=no_cache)
-    ensure_image(AGENT_IMAGE, cld_root / "imgs/claude-agent/Dockerfile.claude-agent", cld_root / "imgs/claude-agent", force=no_cache)
+    ensure_image(cfg.base_image, cld_root / "imgs/claude-base/Dockerfile.claude-base", cld_root, force=True, no_cache=no_cache)
+    ensure_image(cfg.devcontainer_image, cld_root / "imgs/claude-devcontainer/Dockerfile.claude-devcontainer", cld_root, force=True, no_cache=no_cache)
+    ensure_image(cfg.agent_image, cld_root / "imgs/claude-agent/Dockerfile.claude-agent", cld_root / "imgs/claude-agent", force=True, no_cache=no_cache)
 
 
 if __name__ == "__main__":

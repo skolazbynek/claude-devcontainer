@@ -107,8 +107,11 @@ def launch_agent(task_file: str, name: str = "", model: str = "", revision: str 
     if not _is_host_visible(task_path):
         task_path = _stage_to_host(task_path)
 
+    from cld.config import Config
+
     try:
         return _launch_agent(
+            Config.from_env(),
             task_file=task_path,
             name=name,
             model=model,

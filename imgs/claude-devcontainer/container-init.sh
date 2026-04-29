@@ -13,6 +13,21 @@ if [ -n "${MYSQL_DEFAULTS_FILE:-}" ] && [ -f "$MYSQL_DEFAULTS_FILE" ]; then
     chmod +x /tmp/bin/mysql
 fi
 
+# Symlink staged host config dirs into $HOME.
+# Docker mounts them to /tmp/host-config/<rel> so it never creates $HOME subdirs as root.
+setup_host_configs() {
+    [ -n "${HOST_CONFIG_DIRS:-}" ] || return 0
+    local rel src target
+    IFS=':' read -ra dirs <<< "$HOST_CONFIG_DIRS"
+    for rel in "${dirs[@]}"; do
+        src="/tmp/host-config/$rel"
+        [ -d "$src" ] || continue
+        target="$HOME/$rel"
+        mkdir -p "$(dirname "$target")"
+        ln -sfn "$src" "$target"
+    done
+}
+
 # Build container-local claude.json from read-only host config.
 # Merges global and host-project MCP servers into user scope (top-level mcpServers)
 # so they're available regardless of which project directory claude runs in.

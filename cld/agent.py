@@ -7,23 +7,20 @@ import tempfile
 from pathlib import Path
 from string import Template
 
+from cld.config import Config
 from cld.docker import (
     build_container_args,
     build_session_name,
     cld_tmpdir,
     ensure_image,
     find_repo_root,
-    load_dotenv,
     log_error,
     log_info,
     require_docker,
     to_host_path,
-    BASE_IMAGE,
     WORKSPACE_BASE,
 )
 from cld.vcs import get_backend
-
-AGENT_IMAGE = "claude-agent:latest"
 
 
 def _build_task_file(
@@ -57,6 +54,7 @@ def _build_task_file(
 
 
 def launch_agent(
+    cfg: Config,
     task_file: Path | None = None,
     inline_prompt: str | None = None,
     name: str = "",
@@ -72,17 +70,16 @@ def launch_agent(
     session_name, and repo_root.
     """
     require_docker()
-    load_dotenv()
     repo_root = find_repo_root()
     vcs = get_backend()
 
     cld_root = Path(__file__).resolve().parent.parent
     ensure_image(
-        AGENT_IMAGE,
+        cfg.agent_image,
         cld_root / "imgs/claude-agent/Dockerfile.claude-agent",
         cld_root / "imgs/claude-agent",
         parent_image=(
-            BASE_IMAGE,
+            cfg.base_image,
             cld_root / "imgs/claude-base/Dockerfile.claude-base",
             cld_root,
         ),
@@ -90,10 +87,10 @@ def launch_agent(
 
     session = session_name or build_session_name("agent", name)
     resolved_task = _build_task_file(task_file, inline_prompt, tmpdir=cld_tmpdir(repo_root))
-    host_task = to_host_path(str(resolved_task))
+    host_task = to_host_path(str(resolved_task), cfg)
 
     args = ["--name", session]
-    args += build_container_args(repo_root, session)
+    args += build_container_args(repo_root, session, cfg)
     args += [
         "-e", "INSTRUCTION_FILE=/config/task.md",
         "-v", f"{host_task}:/config/task.md:ro",
@@ -110,7 +107,7 @@ def launch_agent(
         print()
 
     container_id = subprocess.run(
-        ["docker", "run", "--detach"] + args + [AGENT_IMAGE],
+        ["docker", "run", "--detach"] + args + [cfg.agent_image],
         capture_output=True, text=True,
     )
 
@@ -145,6 +142,7 @@ def launch_agent(
 
 
 def launch_review(
+    cfg: Config,
     feature_branch: str,
     trunk_branch: str,
     name: str = "",
@@ -200,6 +198,7 @@ def launch_review(
     print()
 
     return launch_agent(
+        cfg,
         task_file=task_file,
         model=model,
         session_name=session,
