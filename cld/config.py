@@ -39,6 +39,10 @@ _TOML_KEYS = {
     "agent_timeout",
     "poll_interval",
     "debug",
+    "home_mounts_always",
+    "home_mounts_devcontainer",
+    "trunk_candidates",
+    "ssl_certs_path",
 }
 
 
@@ -110,6 +114,30 @@ class Config:
     # Optional MySQL credentials (path to a .cnf file on the host)
     mysql_config: str = ""
 
+    # SSL CA certificates path on the host (dir or file).
+    # Empty = auto-detect: /etc/ssl/certs (Linux) then /etc/ssl/cert.pem (macOS).
+    # Set explicitly to use a custom CA bundle; leave empty to skip if neither found.
+    ssl_certs_path: str = ""
+
+    # RO $HOME paths staged into every container (relative to $HOME)
+    home_mounts_always: tuple[str, ...] = (
+        ".claude.json",
+        ".config/anthropic",
+        ".config/claude",
+        ".config/jj",
+    )
+    # Additional RO $HOME paths staged only for devcontainer
+    home_mounts_devcontainer: tuple[str, ...] = (
+        ".gitconfig",
+        ".bashrc",
+        ".config/nvim",
+        ".local/state/nvim",
+        ".cache/nvim",
+    )
+
+    # Ordered list of branch names tried when auto-detecting trunk for `cld review`
+    trunk_candidates: tuple[str, ...] = ("main", "master", "trunk")
+
     # Set by the host launcher when running inside a container, so Python
     # code (e.g. the orchestrator MCP server) can translate container-side
     # paths back to host paths for sibling -v mounts. Empty on the host.
@@ -144,9 +172,17 @@ class Config:
             devcontainer_image=_env_str("CLD_DEVCONTAINER_IMAGE", layered.get("devcontainer_image", "claude-devcontainer:latest")),
             agent_image=_env_str("CLD_AGENT_IMAGE", layered.get("agent_image", "claude-agent:latest")),
             mysql_config=_env_str("CLD_MYSQL_CONFIG", layered.get("mysql_config", "")),
+            ssl_certs_path=_env_str("CLD_SSL_CERTS_PATH", layered.get("ssl_certs_path", "")),
             host_project_dir=_env_str("CLD_HOST_PROJECT_DIR"),
             host_home=_env_str("CLD_HOST_HOME"),
             agent_timeout=_env_int("CLD_AGENT_TIMEOUT", int(layered.get("agent_timeout", 1800))),
             poll_interval=_env_int("CLD_POLL_INTERVAL", int(layered.get("poll_interval", 30))),
             debug=_env_bool("CLD_DEBUG", bool(layered.get("debug", False))),
+            home_mounts_always=tuple(layered.get("home_mounts_always", (
+                ".claude.json", ".config/anthropic", ".config/claude", ".config/jj",
+            ))),
+            home_mounts_devcontainer=tuple(layered.get("home_mounts_devcontainer", (
+                ".gitconfig", ".bashrc", ".config/nvim", ".local/state/nvim", ".cache/nvim",
+            ))),
+            trunk_candidates=tuple(layered.get("trunk_candidates", ("main", "master", "trunk"))),
         )

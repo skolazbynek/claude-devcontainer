@@ -49,11 +49,13 @@ def _version_callback(value: bool):
         raise typer.Exit()
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def main(
+    ctx: typer.Context,
     version: bool = typer.Option(False, "--version", callback=_version_callback, is_eager=True, help="Show version and exit"),
 ):
-    pass
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(devcontainer, name="", model="", revision="", extra_args=None)
 
 
 @app.command()
@@ -83,16 +85,6 @@ def agent(
         revision=revision,
     )
 
-
-# Devcontainer-only RO $HOME mounts. Staged under /tmp/host-config/<rel> like
-# the always-set in docker.py and copied into $HOME by the entrypoint.
-_RO_HOME_MOUNTS_DEVCONTAINER = (
-    ".gitconfig",
-    ".bashrc",
-    ".config/nvim",
-    ".local/state/nvim",
-    ".cache/nvim",
-)
 
 
 @app.command()
@@ -131,7 +123,7 @@ def devcontainer(
         args += ["-e", f"AGENT_REVISION={revision}"]
 
     skipped = []
-    for rel in _RO_HOME_MOUNTS_DEVCONTAINER:
+    for rel in cfg.home_mounts_devcontainer:
         mnt = stage_home_ro(rel, cfg)
         if mnt:
             args += mnt
@@ -160,6 +152,7 @@ def review(
     model: str = typer.Option("", "-m", "--model", help="Claude model"),
 ):
     """Launch a code review agent."""
+    cfg = Config.from_env()
     if trunk_branch is None:
         from cld.vcs import get_backend
         branches = get_backend().list_branches()
@@ -168,13 +161,12 @@ def review(
             for line in branches.splitlines()
             if line.strip()
         }
-        for candidate in ("main", "master", "trunk"):
+        for candidate in cfg.trunk_candidates:
             if candidate in branch_names:
                 trunk_branch = candidate
                 break
         if trunk_branch is None:
-            raise RuntimeError("Could not auto-detect trunk branch; none of main/master/trunk found. Pass it explicitly.")
-    cfg = Config.from_env()
+            raise RuntimeError(f"Could not auto-detect trunk branch; none of {list(cfg.trunk_candidates)} found. Pass it explicitly.")
     launch_review(cfg, feature_branch, trunk_branch, name=name, model=model)
 
 

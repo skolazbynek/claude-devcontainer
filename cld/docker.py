@@ -22,13 +22,6 @@ WORKSPACE_BASE = "/workspace"
 # Allowlist only -- avoid leaking gh/aws/gcloud/etc creds.
 _RO_HOME_MOUNT_ROOT = "/tmp/host-config"
 
-# Always staged in every container.
-_RO_HOME_MOUNTS_ALWAYS = (
-    ".claude.json",
-    ".config/anthropic",
-    ".config/claude",
-    ".config/jj",
-)
 
 _RED = "\033[0;31m"
 _GREEN = "\033[0;32m"
@@ -255,16 +248,26 @@ def build_container_args(
     ]
 
     # Workspace (required)
-    ssl_certs = Path("/etc/ssl/certs")
-    if not ssl_certs.is_dir():
-        log_error("/etc/ssl/certs not found -- HTTPS/API calls will fail")
-        sys.exit(1)
     args += [
-        "-v", "/etc/ssl/certs:/etc/ssl/certs:ro",
         "-v", f"{host_repo_root}:{WORKSPACE_BASE}/origin",
         "-w", f"{WORKSPACE_BASE}/current",
-        "-e", "NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt",
     ]
+
+    # SSL CA certificates -- optional, container has its own bundle as fallback.
+    _SSL_CANDIDATES = ["/etc/ssl/certs", "/etc/ssl/cert.pem"]
+    ssl_src = cfg.ssl_certs_path or next(
+        (p for p in _SSL_CANDIDATES if Path(p).exists()), None
+    )
+    if ssl_src:
+        ssl_path = Path(ssl_src)
+        if ssl_path.is_dir():
+            args += ["-v", f"{ssl_src}:/etc/ssl/certs:ro",
+                     "-e", "NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt"]
+        else:
+            args += ["-v", f"{ssl_src}:/etc/ssl/cert.pem:ro",
+                     "-e", "NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem"]
+    else:
+        log_warn("No host SSL CA bundle found -- container will use its own ca-certificates")
 
     # Claude session state (required)
     # rw needed for OAuth token refresh and session state writes; tradeoff: agent can both
@@ -277,7 +280,7 @@ def build_container_args(
 
     # RO $HOME mounts: all staged under /tmp/host-config/<rel>, then copied
     # into $HOME by the entrypoint. Devcontainer-only entries are added by cli.py.
-    for rel in _RO_HOME_MOUNTS_ALWAYS:
+    for rel in cfg.home_mounts_always:
         mnt = stage_home_ro(rel, cfg)
         if mnt:
             args += mnt
