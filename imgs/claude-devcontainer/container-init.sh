@@ -13,26 +13,22 @@ if [ -n "${MYSQL_DEFAULTS_FILE:-}" ] && [ -f "$MYSQL_DEFAULTS_FILE" ]; then
     chmod +x /tmp/bin/mysql
 fi
 
-# Symlink staged host config dirs into $HOME.
-# Docker mounts them to /tmp/host-config/<rel> so it never creates $HOME subdirs as root.
-setup_host_configs() {
-    [ -n "${HOST_CONFIG_DIRS:-}" ] || return 0
-    local rel src target
-    IFS=':' read -ra dirs <<< "$HOST_CONFIG_DIRS"
-    for rel in "${dirs[@]}"; do
-        src="/tmp/host-config/$rel"
-        [ -d "$src" ] || continue
-        target="$HOME/$rel"
-        mkdir -p "$(dirname "$target")"
-        ln -sfn "$src" "$target"
-    done
+# Copy staged host config tree into $HOME.
+# Every RO $HOME mount is staged under /tmp/host-config/<rel> by the launcher;
+# we overlay that tree onto $HOME so the container has writable copies and
+# Docker never creates $HOME subdirs as root.
+copy_host_configs() {
+    local src_root="/tmp/host-config"
+    [ -d "$src_root" ] || return 0
+    cp -aT "$src_root" "$HOME"
+    chmod -R u+w "$HOME" 2>/dev/null || true
 }
 
 # Build container-local claude.json from read-only host config.
 # Merges global and host-project MCP servers into user scope (top-level mcpServers)
 # so they're available regardless of which project directory claude runs in.
 build_claude_config() {
-    local host_config="/tmp/host-claude.json"
+    local host_config="/tmp/host-config/.claude.json"
     [ -f "$host_config" ] || return 0
 
     if ! command -v jq &>/dev/null; then

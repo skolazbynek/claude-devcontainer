@@ -182,7 +182,7 @@ Containers mount the host repo at `/workspace/origin` and create an isolated wor
 
 Host `~/.claude.json` is mounted read-only. The entrypoint builds a container-local copy with MCP servers merged for the container's project path.
 
-The devcontainer mounts host nvim config/data (`~/.config/nvim`, `~/.local/share/nvim`, `~/.local/state/nvim`, `~/.cache/nvim`) read-only under `/tmp/nvim-host/` and copies them into `$HOME` on startup. Changes made inside the container do not persist to the host. The agent image has no editor and does not mount these.
+All RO `$HOME` mounts (claude/anthropic/jj configs, `~/.claude.json`, plus devcontainer-only `~/.gitconfig`, `~/.bashrc`, and the nvim dirs `~/.config/nvim` / `~/.local/state/nvim` / `~/.cache/nvim`) are staged read-only under `/tmp/host-config/<rel>` and copied into `$HOME` on startup by `copy_host_configs`. Changes made inside the container do not persist to the host. The agent image has no editor and skips the devcontainer-only entries.
 
 ### Docker socket
 
@@ -202,9 +202,33 @@ Treat the container as **trusted with your full host environment** until the fir
 
 ## Configuration
 
-All Python-side runtime tunables live in `cld/config.py:Config` (frozen dataclass). Each command/MCP tool builds a `Config.from_env()` once at entry and passes it explicitly to launch helpers (Variant A: explicit DI). `from_env()` reads `.env` from the cwd before reading env vars.
+All Python-side runtime tunables live in `cld/config.py:Config` (frozen dataclass). Each command/MCP tool builds a `Config.from_env()` once at entry and passes it explicitly to launch helpers (Variant A: explicit DI).
 
-`CLD_*` env vars (defaults shown):
+### Resolution order
+
+Lowest → highest priority:
+
+1. Dataclass defaults
+2. User TOML — `~/.config/cld/config.toml`
+3. Project TOML — `<repo_root>/.cld.config` (walked up from cwd)
+4. `.env` in cwd
+5. `CLD_*` env vars
+
+### TOML schema
+
+Flat snake_case keys mirroring `Config` field names. Unknown keys are warned about on stderr and ignored. `host_project_dir` / `host_home` are container-internal and not exposed.
+
+```toml
+base_image = "claude-base:latest"
+devcontainer_image = "claude-devcontainer:latest"
+agent_image = "claude-agent:latest"
+mysql_config = "/path/to/mysql.cnf"
+agent_timeout = 1800
+poll_interval = 30
+debug = false
+```
+
+### `CLD_*` env vars (defaults shown)
 
 | Variable | Default | Purpose |
 |---|---|---|

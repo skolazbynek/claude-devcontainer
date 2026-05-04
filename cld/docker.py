@@ -17,11 +17,18 @@ CONTAINER_USER = "claude"
 CONTAINER_HOME = f"/home/{CONTAINER_USER}"
 WORKSPACE_BASE = "/workspace"
 
-# Host-config dirs staged RO to /tmp/host-config/<rel> in every container.
+# All RO $HOME mounts are staged under /tmp/host-config/<rel> and copied into
+# $HOME by the entrypoint (see copy_host_configs in container-init.sh).
 # Allowlist only -- avoid leaking gh/aws/gcloud/etc creds.
-# Entrypoint symlinks each into $HOME so Docker never creates $HOME subdirs as root.
-# Nvim is devcontainer-only and lives in cli.py via the RO+copy pattern.
-_SHARED_RO_CONFIG_DIRS = (".config/anthropic", ".config/claude", ".config/jj")
+_RO_HOME_MOUNT_ROOT = "/tmp/host-config"
+
+# Always staged in every container.
+_RO_HOME_MOUNTS_ALWAYS = (
+    ".claude.json",
+    ".config/anthropic",
+    ".config/claude",
+    ".config/jj",
+)
 
 _RED = "\033[0;31m"
 _GREEN = "\033[0;32m"
@@ -268,23 +275,14 @@ def build_container_args(
         sys.exit(1)
     args += ["-v", f"{host_home}/.claude:{CONTAINER_HOME}/.claude:rw"]
 
-    # Claude config (optional -- host MCP servers won't be available without it)
-    local_claude_json = Path(home) / ".claude.json"
-    if local_claude_json.is_file():
-        args += ["-v", f"{host_home}/.claude.json:/tmp/host-claude.json:ro"]
-    else:
-        log_warn(f"{local_claude_json} not found -- host MCP servers won't be available in container")
-
-    staged_configs = []
-    for config_rel in _SHARED_RO_CONFIG_DIRS:
-        local_config_path = Path(home) / config_rel
-        if local_config_path.is_dir():
-            args += ["-v", f"{host_home}/{config_rel}:/tmp/host-config/{config_rel}:ro"]
-            staged_configs.append(config_rel)
+    # RO $HOME mounts: all staged under /tmp/host-config/<rel>, then copied
+    # into $HOME by the entrypoint. Devcontainer-only entries are added by cli.py.
+    for rel in _RO_HOME_MOUNTS_ALWAYS:
+        mnt = stage_home_ro(rel, cfg)
+        if mnt:
+            args += mnt
         else:
-            log_warn(f"{local_config_path} not found -- skipping")
-    if staged_configs:
-        args += ["-e", f"HOST_CONFIG_DIRS={':'.join(staged_configs)}"]
+            log_warn(f"~/{rel} not found -- skipping")
 
     # Session
     args += ["-e", f"SESSION_NAME={session_name}"]
@@ -320,10 +318,14 @@ def build_container_args(
     return args
 
 
-def mount_home_path(rel_path: str, target: str, cfg: Config) -> list[str]:
-    """Mount $HOME/rel_path to target. Returns empty list if source doesn't exist."""
+def stage_home_ro(rel_path: str, cfg: Config) -> list[str]:
+    """Stage ``$HOME/<rel_path>`` RO under ``/tmp/host-config/<rel_path>``.
+
+    Returns the ``["-v", ...]`` arg pair, or ``[]`` if the source doesn't exist.
+    The entrypoint copies the staged tree into ``$HOME`` (see ``copy_host_configs``).
+    """
     local_path = Path.home() / rel_path
     if not local_path.exists():
         return []
     host_path = to_host_path(str(local_path.resolve()), cfg)
-    return ["-v", f"{host_path}:{target}"]
+    return ["-v", f"{host_path}:{_RO_HOME_MOUNT_ROOT}/{rel_path}:ro"]

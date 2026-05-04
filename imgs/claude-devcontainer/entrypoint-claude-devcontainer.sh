@@ -2,23 +2,7 @@
 source /workspace/container-init.sh
 source /workspace/vcs-lib.sh
 
-setup_host_configs
-
-# Copy host nvim config/data into container HOME so nvim can write freely
-# without persisting back to the host. Source dirs are RO-mounted by the
-# devcontainer launcher under /tmp/nvim-host/.
-NVIM_HOST_DIR="/tmp/nvim-host"
-if [ -d "$NVIM_HOST_DIR" ]; then
-    mkdir -p "$HOME/.config" "$HOME/.local/share" "$HOME/.local/state" "$HOME/.cache"
-    [ -d "$NVIM_HOST_DIR/config" ] && cp -aT "$NVIM_HOST_DIR/config" "$HOME/.config/nvim"
-    # share/ is intentionally not copied: it contains host-built artifacts
-    # (Mason LSP venvs with hardcoded host paths, compiled .so parsers, Go
-    # binaries, absolute symlinks). lazy.nvim re-clones plugins from
-    # lazy-lock.json on first launch; Mason / treesitter / dbee reinstall
-    # in-container.
-    [ -d "$NVIM_HOST_DIR/state" ]  && cp -aT "$NVIM_HOST_DIR/state"  "$HOME/.local/state/nvim"
-    [ -d "$NVIM_HOST_DIR/cache" ]  && cp -aT "$NVIM_HOST_DIR/cache"  "$HOME/.cache/nvim"
-fi
+copy_host_configs
 
 BOOKMARK="${SESSION_NAME:?SESSION_NAME must be set}"
 

@@ -23,9 +23,8 @@ from cld.docker import (
     log_error,
     log_info,
     log_warn,
-    mount_home_path,
     require_docker,
-    CONTAINER_HOME,
+    stage_home_ro,
 )
 from cld.loop import run_loop
 
@@ -85,16 +84,15 @@ def agent(
     )
 
 
-# Host paths to mount read-only (config files), devcontainer only.
-_DIRECT_RO = [".gitconfig", ".bashrc"]
-
-# Nvim host dirs mounted RO under /tmp/nvim-host/<sub>; devcontainer entrypoint
-# copies them into $HOME so changes don't persist back to the host.
-_NVIM_HOST_MOUNTS = {
-    ".config/nvim": "config",
-    ".local/state/nvim": "state",
-    ".cache/nvim": "cache",
-}
+# Devcontainer-only RO $HOME mounts. Staged under /tmp/host-config/<rel> like
+# the always-set in docker.py and copied into $HOME by the entrypoint.
+_RO_HOME_MOUNTS_DEVCONTAINER = (
+    ".gitconfig",
+    ".bashrc",
+    ".config/nvim",
+    ".local/state/nvim",
+    ".cache/nvim",
+)
 
 
 @app.command()
@@ -133,19 +131,12 @@ def devcontainer(
         args += ["-e", f"AGENT_REVISION={revision}"]
 
     skipped = []
-    for rel_path in _DIRECT_RO:
-        mnt = mount_home_path(rel_path, f"{CONTAINER_HOME}/{rel_path}:ro", cfg)
+    for rel in _RO_HOME_MOUNTS_DEVCONTAINER:
+        mnt = stage_home_ro(rel, cfg)
         if mnt:
             args += mnt
         else:
-            skipped.append(rel_path)
-
-    for rel_path, sub in _NVIM_HOST_MOUNTS.items():
-        mnt = mount_home_path(rel_path, f"/tmp/nvim-host/{sub}:ro", cfg)
-        if mnt:
-            args += mnt
-        else:
-            skipped.append(rel_path)
+            skipped.append(rel)
 
     if skipped:
         log_warn(f"Optional host paths not found (skipped): {', '.join(skipped)}")

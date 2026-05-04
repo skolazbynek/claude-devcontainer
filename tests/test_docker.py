@@ -9,7 +9,7 @@ from cld.docker import (
     to_host_path,
     build_session_name,
     find_repo_root,
-    mount_home_path,
+    stage_home_ro,
 )
 
 
@@ -99,14 +99,38 @@ class TestToHostPath:
         assert to_host_path("/unrelated/path", cfg) == "/unrelated/path"
 
 
-class TestMountHomePath:
+class TestStageHomeRo:
     def test_missing_returns_empty(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
-        assert mount_home_path(".missing", "/dst", Config()) == []
+        assert stage_home_ro(".missing", Config()) == []
 
-    def test_existing_file_returns_v_args(self, tmp_path, monkeypatch):
+    def test_existing_file(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
         (tmp_path / ".gitconfig").write_text("x")
-        args = mount_home_path(".gitconfig", "/dst:ro", Config())
+        args = stage_home_ro(".gitconfig", Config())
         assert args[0] == "-v"
-        assert args[1].endswith(":/dst:ro")
+        assert args[1].endswith(":/tmp/host-config/.gitconfig:ro")
+        assert str(tmp_path / ".gitconfig") in args[1]
+
+    def test_existing_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".config" / "anthropic").mkdir(parents=True)
+        args = stage_home_ro(".config/anthropic", Config())
+        assert args[0] == "-v"
+        assert args[1].endswith(":/tmp/host-config/.config/anthropic:ro")
+
+    def test_nested_rel_preserved(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".local" / "state" / "nvim").mkdir(parents=True)
+        args = stage_home_ro(".local/state/nvim", Config())
+        assert args[1].endswith(":/tmp/host-config/.local/state/nvim:ro")
+
+    def test_to_host_path_translation(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".bashrc").write_text("x")
+        cfg = Config(host_home="/host/home")
+        # tmp_path stands in for $CONTAINER_HOME via HOME env; to_host_path
+        # only rewrites paths starting with CONTAINER_HOME, which tmp_path does
+        # not, so the host-translated string is just the resolved tmp path.
+        args = stage_home_ro(".bashrc", cfg)
+        assert args[1].startswith(str(tmp_path.resolve()) + "/.bashrc:")

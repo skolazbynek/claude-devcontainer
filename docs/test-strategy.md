@@ -34,7 +34,7 @@ tests/
   conftest.py           autouse fixture strips leaky env vars
                         (WORKSPACE_ORIGIN, CLD_HOST_PROJECT_DIR, CLD_HOST_HOME, CLD_MYSQL_CONFIG)
   test_docker.py        build_session_name, find_jj_root, load_dotenv,
-                        _to_host_path, mount_home_path
+                        _to_host_path, stage_home_ro
   test_agent.py         _build_task_file (file-only, inline-only, both, neither)
   test_loop.py          _parse_review_severity, _format_duration
   test_orchestrator.py  _parse_description, _is_host_visible

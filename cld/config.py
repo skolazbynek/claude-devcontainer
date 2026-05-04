@@ -9,6 +9,8 @@ not user-tunable and are coupled to Dockerfile/shell-script invariants.
 """
 
 import os
+import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +29,49 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if not val:
         return default
     return val in ("1", "true", "yes", "on")
+
+
+_TOML_KEYS = {
+    "base_image",
+    "devcontainer_image",
+    "agent_image",
+    "mysql_config",
+    "agent_timeout",
+    "poll_interval",
+    "debug",
+}
+
+
+def _user_config_path() -> Path:
+    return Path.home() / ".config" / "cld" / "config.toml"
+
+
+def _find_project_config(start: Path | None = None) -> Path | None:
+    """Walk up from ``start`` (or cwd) looking for ``.cld.config``.
+
+    Independent of VCS detection so config can be discovered before a backend
+    is required (and so a missing VCS does not abort startup).
+    """
+    cur = (start or Path.cwd()).resolve()
+    for d in (cur, *cur.parents):
+        candidate = d / ".cld.config"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _load_toml(path: Path) -> dict:
+    """Read a TOML file, warn on parse errors or unknown keys; return known keys only."""
+    try:
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        print(f"warning: failed to read {path}: {e}", file=sys.stderr)
+        return {}
+    unknown = set(data) - _TOML_KEYS
+    for key in sorted(unknown):
+        print(f"warning: unknown key '{key}' in {path}", file=sys.stderr)
+    return {k: v for k, v in data.items() if k in _TOML_KEYS}
 
 
 def _load_dotenv(path: Path | None = None) -> None:
@@ -79,17 +124,29 @@ class Config:
     debug: bool = False
 
     @classmethod
-    def from_env(cls, dotenv: Path | None = None) -> "Config":
-        """Build a ``Config`` from ``CLD_*`` env vars (loading ``.env`` first)."""
+    def from_env(
+        cls,
+        dotenv: Path | None = None,
+        user_config: Path | None = None,
+        project_config: Path | None = None,
+    ) -> "Config":
+        """Build a ``Config`` layering: defaults < user TOML < project TOML < .env < CLD_* env."""
         _load_dotenv(dotenv)
+        layered: dict = {}
+        up = user_config if user_config is not None else _user_config_path()
+        if up.is_file():
+            layered.update(_load_toml(up))
+        pp = project_config if project_config is not None else _find_project_config()
+        if pp and pp.is_file():
+            layered.update(_load_toml(pp))
         return cls(
-            base_image=_env_str("CLD_BASE_IMAGE", "claude-base:latest"),
-            devcontainer_image=_env_str("CLD_DEVCONTAINER_IMAGE", "claude-devcontainer:latest"),
-            agent_image=_env_str("CLD_AGENT_IMAGE", "claude-agent:latest"),
-            mysql_config=_env_str("CLD_MYSQL_CONFIG"),
+            base_image=_env_str("CLD_BASE_IMAGE", layered.get("base_image", "claude-base:latest")),
+            devcontainer_image=_env_str("CLD_DEVCONTAINER_IMAGE", layered.get("devcontainer_image", "claude-devcontainer:latest")),
+            agent_image=_env_str("CLD_AGENT_IMAGE", layered.get("agent_image", "claude-agent:latest")),
+            mysql_config=_env_str("CLD_MYSQL_CONFIG", layered.get("mysql_config", "")),
             host_project_dir=_env_str("CLD_HOST_PROJECT_DIR"),
             host_home=_env_str("CLD_HOST_HOME"),
-            agent_timeout=_env_int("CLD_AGENT_TIMEOUT", 1800),
-            poll_interval=_env_int("CLD_POLL_INTERVAL", 30),
-            debug=_env_bool("CLD_DEBUG"),
+            agent_timeout=_env_int("CLD_AGENT_TIMEOUT", int(layered.get("agent_timeout", 1800))),
+            poll_interval=_env_int("CLD_POLL_INTERVAL", int(layered.get("poll_interval", 30))),
+            debug=_env_bool("CLD_DEBUG", bool(layered.get("debug", False))),
         )

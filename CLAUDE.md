@@ -74,7 +74,11 @@ cld review [-n name] [-m model] <feature-branch> <trunk-branch>
 
 ## Configuration
 
-All Python-side runtime tunables live in `cld/config.py:Config` (frozen dataclass). Each Typer command and MCP tool constructs `Config.from_env()` once at entry and passes it explicitly down the call chain (Variant A: explicit DI, no global). `from_env()` also loads `.env` from the cwd before reading env vars.
+All Python-side runtime tunables live in `cld/config.py:Config` (frozen dataclass). Each Typer command and MCP tool constructs `Config.from_env()` once at entry and passes it explicitly down the call chain (Variant A: explicit DI, no global).
+
+**Resolution order (lowest → highest priority):** dataclass defaults < user TOML (`~/.config/cld/config.toml`) < project TOML (`<repo_root>/.cld.config`, walked up from cwd) < `.env` in cwd < `CLD_*` env vars.
+
+TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `devcontainer_image`, `agent_image`, `mysql_config`, `agent_timeout`, `poll_interval`, `debug`). Unknown keys are warned about on stderr and ignored. `host_project_dir` / `host_home` are container-internal and not configurable via TOML.
 
 `CLD_*` env vars (read by `Config.from_env`):
 

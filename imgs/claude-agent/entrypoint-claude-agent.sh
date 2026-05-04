@@ -39,7 +39,7 @@ fi
 # Stage host configs (jj user.email/name, claude config, etc.) before any
 # VCS operation; jj workspace add creates a working-copy change that needs
 # user.email/user.name from ~/.config/jj.
-setup_host_configs
+copy_host_configs
 
 # Detect VCS type (jj or git)
 detect_vcs || exit 1
