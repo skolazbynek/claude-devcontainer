@@ -61,6 +61,15 @@ WORKDIR /workspace
 
 USER root
 
+# Disable Claude Code's Bash sandbox: the container itself (cap-drop ALL,
+# no-new-privileges, ephemeral, host UID, scoped mounts) is the trust
+# boundary, so the in-process sandbox layer adds only friction (refuses
+# legitimate VCS writes in headless runs). Managed settings have highest
+# precedence and live outside $HOME, so the host's ~/.claude bind-mount
+# cannot shadow them.
+RUN mkdir -p /etc/claude-code
+COPY imgs/claude-base/managed-settings.json /etc/claude-code/managed-settings.json
+
 # Copy shared shell helpers (context: repo root)
 COPY imgs/claude-devcontainer/container-init.sh imgs/claude-devcontainer/vcs-lib.sh ./
 RUN chmod +x container-init.sh vcs-lib.sh && \
