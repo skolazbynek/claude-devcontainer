@@ -36,6 +36,11 @@ if [ ! -f "$INSTRUCTION_FILE" ]; then
     exit 1
 fi
 
+# Stage host configs (jj user.email/name, claude config, etc.) before any
+# VCS operation; jj workspace add creates a working-copy change that needs
+# user.email/user.name from ~/.config/jj.
+setup_host_configs
+
 # Detect VCS type (jj or git)
 detect_vcs || exit 1
 
@@ -73,7 +78,6 @@ log "Agent $AGENT_NAME started (VCS: $VCS_TYPE)"
 
 # --- Configure MCP servers ---
 
-setup_host_configs
 build_claude_config
 
 # --- Execute Claude ---
