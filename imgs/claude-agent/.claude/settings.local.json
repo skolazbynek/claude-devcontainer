@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(./scripts/run-claude-agent.sh:*)",
+      "WebSearch",
+      "Bash(docker build:*)",
+      "Bash(jj diff:*)",
+      "Bash(jj show:*)"
+    ]
+  }
+}
