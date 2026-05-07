@@ -85,7 +85,7 @@ def _parse_review_severity(content: str) -> dict:
 
 
 def _describe_impl_change(
-    session_name: str, iteration: int, task_file: Path,
+    session_name: str, iteration: int, task_text: str,
     review_content: str | None, vcs: VcsBackend,
 ) -> None:
     """Annotate an implementation change with loop metadata.
@@ -98,7 +98,7 @@ def _describe_impl_change(
     parts = [f"[loop impl {iteration}] {original_msg}"]
 
     if iteration == 1:
-        first_line = task_file.read_text().strip().splitlines()[0]
+        first_line = task_text.strip().splitlines()[0] if task_text.strip() else ""
         parts.append(f"\nTask: {first_line}")
     elif review_content:
         severity = _parse_review_severity(review_content)
@@ -130,30 +130,26 @@ def _describe_review_change(
 
 
 def _compose_iter_prompt(
-    task_file: Path, review_content: str | None, iteration: int, repo_root: Path,
-) -> Path:
-    """Build the task prompt for an implementation iteration.
+    task_text: str, review_content: str | None, iteration: int, repo_root: Path,
+) -> tuple[Path | None, str | None]:
+    """Build the task prompt inputs for an implementation iteration.
 
-    First iteration: returns the original task file unchanged.
-    Subsequent iterations: combines the task with previous review findings.
+    Returns ``(task_file, inline_prompt)`` to forward to ``launch_agent``.
+    First iteration: returns the original task text as ``inline_prompt`` so the
+    container composes it inside the agent's workspace. Subsequent iterations:
+    combine the task with previous review findings, again as ``inline_prompt``.
     """
     if iteration == 1 or not review_content:
-        return task_file
+        return None, task_text
 
     combined = (
-        f"{task_file.read_text()}\n\n"
+        f"{task_text}\n\n"
         f"# Review Findings (Iteration {iteration - 1})\n\n"
         f"The following issues were found in the previous implementation. "
         f"Address all Critical and Major findings. Minor findings are optional.\n\n"
         f"{review_content}\n"
     )
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".md", prefix=f"loop-impl-iter{iteration}-",
-        delete=False, dir=cld_tmpdir(repo_root),
-    )
-    tmp.write(combined)
-    tmp.close()
-    return Path(tmp.name)
+    return None, combined
 
 
 def _compose_review_prompt(
@@ -320,8 +316,9 @@ def _cleanup_temp_files(repo_root: Path) -> None:
 
 def run_loop(
     cfg: Config,
-    task_file: Path,
+    task_file: Path | None,
     *,
+    inline_prompt: str | None = None,
     name: str = "",
     model: str = "",
     review_model: str = "",
@@ -342,6 +339,13 @@ def run_loop(
     default_rev = "@" if vcs.name == "jj" else "HEAD"
     start_commit = vcs.resolve_revision(revision or default_rev)
 
+    if task_file and inline_prompt:
+        task_text = f"{task_file.read_text()}\n\n## Additional Instructions\n\n{inline_prompt}\n"
+    elif task_file:
+        task_text = task_file.read_text()
+    else:
+        task_text = inline_prompt or ""
+
     vcs.create_branch(loop_branch, start_commit)
 
     log_info(f"Loop '{loop_branch}' started at {start_commit[:12]}")
@@ -356,7 +360,9 @@ def run_loop(
             final_iteration = iteration
 
             # --- IMPLEMENT ---
-            impl_task = _compose_iter_prompt(task_file, review_content, iteration, repo_root)
+            impl_task_file, impl_inline = _compose_iter_prompt(
+                task_text, review_content, iteration, repo_root,
+            )
             impl_session = f"{loop_branch}_impl{iteration}"
 
             _print_phase(iteration, max_iterations, "implementing...", impl_session)
@@ -364,7 +370,8 @@ def run_loop(
 
             impl_result = launch_agent(
                 cfg,
-                task_file=impl_task,
+                task_file=impl_task_file,
+                inline_prompt=impl_inline,
                 model=model,
                 revision=loop_branch,
                 session_name=impl_session,
@@ -384,7 +391,7 @@ def run_loop(
                 final_reason = f"implementer {impl_status} (iteration {iteration})"
                 break
 
-            _describe_impl_change(impl_session, iteration, task_file, review_content, vcs)
+            _describe_impl_change(impl_session, iteration, task_text, review_content, vcs)
             vcs.set_branch(loop_branch, impl_session)
             vcs.delete_branch(impl_session)
 

@@ -1,30 +1,21 @@
-"""Tests for cld.agent._build_task_file."""
+"""Tests for cld.agent.launch_agent input validation.
+
+Task composition (merging task file + inline prompt) was moved into the
+container entrypoint so the resulting file lands on the agent's VCS change,
+not on the host's working copy. Only the host-side validation is unit-tested
+here; composition is exercised by integration tests.
+"""
+
+from unittest.mock import patch
 
 import pytest
 
-from cld.agent import _build_task_file
+from cld.agent import launch_agent
+from cld.config import Config
 
 
-class TestBuildTaskFile:
-    def test_task_file_only_returns_resolved_path(self, tmp_path):
-        task = tmp_path / "task.md"
-        task.write_text("do the thing")
-        assert _build_task_file(task, None, tmpdir=tmp_path) == task.resolve()
-
-    def test_inline_only_writes_temp_file(self, tmp_path):
-        path = _build_task_file(None, "inline task", tmpdir=tmp_path)
-        assert path.parent == tmp_path
-        assert path.read_text() == "inline task"
-
-    def test_both_concatenates_with_heading(self, tmp_path):
-        task = tmp_path / "task.md"
-        task.write_text("base task")
-        path = _build_task_file(task, "extra instructions", tmpdir=tmp_path)
-        content = path.read_text()
-        assert content.startswith("base task")
-        assert "## Additional Instructions" in content
-        assert content.endswith("extra instructions\n")
-
-    def test_neither_exits(self):
-        with pytest.raises(SystemExit):
-            _build_task_file(None, None)
+class TestLaunchAgentValidation:
+    def test_neither_task_file_nor_prompt_exits(self):
+        with patch("cld.agent.require_docker"):
+            with pytest.raises(SystemExit):
+                launch_agent(Config())

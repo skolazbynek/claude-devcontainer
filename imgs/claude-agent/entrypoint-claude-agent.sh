@@ -4,7 +4,8 @@ source /workspace/container-init.sh
 source /workspace/vcs-lib.sh
 
 AGENT_NAME="${SESSION_NAME:?SESSION_NAME must be set}"
-INSTRUCTION_FILE="${INSTRUCTION_FILE:-/config/task.md}"
+TASK_FILE_MOUNT="${INSTRUCTION_FILE:-/config/task.md}"
+INSTRUCTION_FILE=""
 
 cleanup() {
     local exit_code=$?
@@ -29,10 +30,10 @@ log_error() {
     [ -n "$LOG_FILE" ] && echo "$msg" >> "$LOG_FILE"
 }
 
-# --- Validate environment ---
+# --- Validate inputs ---
 
-if [ ! -f "$INSTRUCTION_FILE" ]; then
-    echo "Error: Instruction file not found: $INSTRUCTION_FILE" >&2
+if [ ! -f "$TASK_FILE_MOUNT" ] && [ -z "$AGENT_INLINE_PROMPT" ]; then
+    echo "Error: No task file mounted at $TASK_FILE_MOUNT and no AGENT_INLINE_PROMPT set" >&2
     exit 1
 fi
 
@@ -73,6 +74,21 @@ LOG_FILE="$OUTPUT_DIR/agent.log"
 RESULT_FILE="$OUTPUT_DIR/result.json"
 SUMMARY_FILE="$OUTPUT_DIR/summary.json"
 mkdir -p "$OUTPUT_DIR"
+
+# Compose the effective task file inside the agent workspace so it lives on
+# the agent's change rather than the host's working copy. If only a mounted
+# task file is provided (no inline prompt), use it directly.
+if [ -n "$AGENT_INLINE_PROMPT" ]; then
+    INSTRUCTION_FILE="$OUTPUT_DIR/task.md"
+    if [ -f "$TASK_FILE_MOUNT" ]; then
+        cat "$TASK_FILE_MOUNT" > "$INSTRUCTION_FILE"
+        printf '\n\n## Additional Instructions\n\n%s\n' "$AGENT_INLINE_PROMPT" >> "$INSTRUCTION_FILE"
+    else
+        printf '%s' "$AGENT_INLINE_PROMPT" > "$INSTRUCTION_FILE"
+    fi
+else
+    INSTRUCTION_FILE="$TASK_FILE_MOUNT"
+fi
 
 log "Agent $AGENT_NAME started (VCS: $VCS_TYPE)"
 

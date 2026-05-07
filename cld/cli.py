@@ -3,7 +3,6 @@
 import functools
 import os
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -16,7 +15,6 @@ from cld.docker import (
     base_extra_paths,
     build_container_args,
     build_session_name,
-    cld_tmpdir,
     devcontainer_extra_paths,
     ensure_image,
     find_repo_root,
@@ -191,23 +189,11 @@ def loop(
         typer.echo(f"Error: Task file not found: {task_file}", err=True)
         raise typer.Exit(1)
 
-    if prompt:
-        repo_root = find_repo_root()
-        tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".md", prefix="loop-task-", delete=False, dir=cld_tmpdir(repo_root),
-        )
-        if task_path:
-            tmp.write(task_path.read_text())
-            tmp.write(f"\n\n## Additional Instructions\n\n{prompt}\n")
-        else:
-            tmp.write(prompt)
-        tmp.close()
-        task_path = Path(tmp.name)
-
     cfg = Config.from_env()
     run_loop(
         cfg,
         task_path,
+        inline_prompt=prompt or None,
         name=name,
         model=model,
         review_model=review_model,

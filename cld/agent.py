@@ -25,36 +25,6 @@ from cld.docker import (
 from cld.vcs import get_backend
 
 
-def _build_task_file(
-    task_file: Path | None, inline_prompt: str | None, tmpdir: Path | None = None,
-) -> Path:
-    """Combine a task file and/or inline prompt into a single markdown file.
-
-    If both are given, the inline prompt is appended. Returns the resolved path
-    to the final task file. *tmpdir* controls where temp files are created
-    (must be host-translatable for bind mounts).
-    """
-    if task_file and inline_prompt:
-        tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".md", prefix="task-", delete=False, dir=tmpdir,
-        )
-        tmp.write(task_file.read_text())
-        tmp.write(f"\n\n## Additional Instructions\n\n{inline_prompt}\n")
-        tmp.close()
-        return Path(tmp.name)
-    if inline_prompt:
-        tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".md", prefix="task-", delete=False, dir=tmpdir,
-        )
-        tmp.write(inline_prompt)
-        tmp.close()
-        return Path(tmp.name)
-    if task_file:
-        return task_file.resolve()
-    log_error("No task file or prompt provided")
-    sys.exit(1)
-
-
 def launch_agent(
     cfg: Config,
     task_file: Path | None = None,
@@ -72,6 +42,10 @@ def launch_agent(
     session_name, and repo_root.
     """
     require_docker()
+    if not task_file and not inline_prompt:
+        log_error("No task file or prompt provided")
+        sys.exit(1)
+
     repo_root = find_repo_root()
     vcs = get_backend()
 
@@ -90,15 +64,14 @@ def launch_agent(
     )
 
     session = session_name or build_session_name("agent", name)
-    resolved_task = _build_task_file(task_file, inline_prompt, tmpdir=cld_tmpdir(repo_root))
-    host_task = to_host_path(str(resolved_task), cfg)
 
     args = ["--name", session]
     args += build_container_args(repo_root, session, cfg)
-    args += [
-        "-e", "INSTRUCTION_FILE=/config/task.md",
-        "-v", f"{host_task}:/config/task.md:ro",
-    ]
+    if task_file:
+        host_task = to_host_path(str(task_file.resolve()), cfg)
+        args += ["-v", f"{host_task}:/config/task.md:ro"]
+    if inline_prompt:
+        args += ["-e", f"AGENT_INLINE_PROMPT={inline_prompt}"]
     if model:
         args += ["-e", f"AGENT_MODEL={model}"]
     if revision:
@@ -106,7 +79,10 @@ def launch_agent(
 
     if not quiet:
         log_info("Starting agent in background...")
-        log_info(f"Task: {resolved_task}")
+        if task_file:
+            log_info(f"Task file: {task_file}")
+        if inline_prompt:
+            log_info("Inline prompt: provided")
         log_info(f"Repository: {repo_root}")
         print()
 
