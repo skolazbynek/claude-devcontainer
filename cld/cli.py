@@ -246,5 +246,40 @@ def build(no_cache: bool = typer.Option(False, "--no-cache", help="Force rebuild
     )
 
 
+def _parse_description(path: Path) -> str:
+    lines = path.read_text().splitlines()
+    if not lines or lines[0].strip() != "---":
+        return ""
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if line.startswith("description:"):
+            return line[len("description:"):].strip()
+    return ""
+
+
+@app.command()
+def prompts():
+    """List available prompt templates with descriptions."""
+    prompts_dir = Path(__file__).resolve().parent.parent / "prompts"
+    if not prompts_dir.exists():
+        typer.echo("No prompts directory found.", err=True)
+        raise typer.Exit(1)
+
+    items = []
+    for path in sorted(prompts_dir.rglob("*.md")):
+        rel = path.relative_to(prompts_dir).with_suffix("")
+        desc = _parse_description(path)
+        items.append((str(rel), desc))
+
+    if not items:
+        typer.echo("No prompts found.")
+        return
+
+    width = max(len(name) for name, _ in items)
+    for name, desc in items:
+        typer.echo(f"  {name:<{width}}  {desc}")
+
+
 if __name__ == "__main__":
     app()
