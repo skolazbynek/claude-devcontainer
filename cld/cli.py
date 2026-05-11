@@ -23,6 +23,7 @@ from cld.docker import (
     log_warn,
     require_docker,
     stage_home_ro,
+    to_host_path,
 )
 from cld.loop import run_loop
 
@@ -53,7 +54,7 @@ def main(
     version: bool = typer.Option(False, "--version", callback=_version_callback, is_eager=True, help="Show version and exit"),
 ):
     if ctx.invoked_subcommand is None:
-        ctx.invoke(devcontainer, name="", model="", revision="", extra_args=None)
+        ctx.invoke(devcontainer, task_file=None, name="", model="", revision="", prompt="", extra_args=None)
 
 
 @app.command()
@@ -88,13 +89,19 @@ def agent(
 @app.command()
 @_handle_errors
 def devcontainer(
+    task_file: Optional[str] = typer.Argument(None, help="Path to task markdown file"),
     name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
     model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
     revision: str = typer.Option("", "-r", "--revision", help="Revision to base workspace on (default: last committed change -- @- for jj, HEAD for git)"),
+    prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (appended to task file if both given)"),
     extra_args: Optional[list[str]] = typer.Argument(None, help="Extra args passed to container"),
 ):
     """Launch an interactive Claude devcontainer."""
     require_docker()
+    task_path = Path(task_file) if task_file else None
+    if task_path and not task_path.is_file():
+        typer.echo(f"Error: Task file not found: {task_file}", err=True)
+        raise typer.Exit(1)
     cfg = Config.from_env()
 
     cld_root = Path(__file__).resolve().parent.parent
@@ -115,6 +122,11 @@ def devcontainer(
     session = build_session_name("cld", name)
 
     args = build_container_args(repo_root, session, cfg, interactive=True)
+    if task_path:
+        host_task = to_host_path(str(task_path.resolve()), cfg)
+        args += ["-v", f"{host_task}:/config/task.md:ro"]
+    if prompt:
+        args += ["-e", f"AGENT_INLINE_PROMPT={prompt}"]
     if model:
         args += ["-e", f"AGENT_MODEL={model}"]
     effective_revision = revision or workspace_rev

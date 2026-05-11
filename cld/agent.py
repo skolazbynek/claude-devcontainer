@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from string import Template
 
@@ -18,11 +19,51 @@ from cld.docker import (
     find_repo_context,
     log_error,
     log_info,
+    log_warn,
     require_docker,
     to_host_path,
     WORKSPACE_BASE,
 )
 from cld.vcs import get_backend
+
+
+def _wait_for_workspace(vcs, session: str, container_id: str, timeout: int = 60) -> bool:
+    """Poll until the named workspace/worktree appears in the host-side repo.
+
+    Returns True when found, False on timeout or if the container exits before
+    the workspace is created (which indicates a startup failure).
+    """
+    deadline = time.monotonic() + timeout
+    poll_interval = 0.25
+    liveness_interval = 2.0
+    last_liveness_check = time.monotonic()
+
+    while time.monotonic() < deadline:
+        if vcs.name == "jj":
+            result = subprocess.run(
+                ["jj", "--no-pager", "workspace", "list",
+                 "--ignore-working-copy", "--color=never"],
+                capture_output=True, text=True, cwd=str(vcs.repo_root),
+            )
+            if f"\n{session}:" in f"\n{result.stdout}":
+                return True
+        else:
+            if (vcs.repo_root / ".git" / "worktrees" / session).is_dir():
+                return True
+
+        now = time.monotonic()
+        if now - last_liveness_check >= liveness_interval:
+            last_liveness_check = now
+            probe = subprocess.run(
+                ["docker", "inspect", "-f", "{{.State.Running}}", container_id],
+                capture_output=True, text=True,
+            )
+            if probe.returncode != 0 or probe.stdout.strip() != "true":
+                return False
+
+        time.sleep(poll_interval)
+
+    return False
 
 
 def launch_agent(
@@ -97,6 +138,12 @@ def launch_agent(
         sys.exit(1)
 
     cid = container_id.stdout.strip()
+
+    if not quiet:
+        log_info("Waiting for workspace to initialize...")
+    if not _wait_for_workspace(vcs, session, cid):
+        log_warn(f"Workspace '{session}' not visible after waiting — container may have crashed")
+        log_warn(f"Check logs: docker logs {cid}")
 
     if not quiet:
         vcs_name = vcs.name

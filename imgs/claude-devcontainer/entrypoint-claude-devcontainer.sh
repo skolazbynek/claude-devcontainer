@@ -53,6 +53,20 @@ fi
 printf '#!/bin/bash\nexec %s %s "$@"\n' "$CLAUDE_BIN" "$CLAUDE_EXTRA_ARGS" > /tmp/bin/claude
 chmod +x /tmp/bin/claude
 
+TASK_FILE_MOUNT="/config/task.md"
+COMPOSED_PROMPT=""
+if [ -n "$AGENT_INLINE_PROMPT" ] && [ -f "$TASK_FILE_MOUNT" ]; then
+    COMPOSED_PROMPT="$(cat "$TASK_FILE_MOUNT")"$'\n\n## Additional Instructions\n\n'"$AGENT_INLINE_PROMPT"
+elif [ -n "$AGENT_INLINE_PROMPT" ]; then
+    COMPOSED_PROMPT="$AGENT_INLINE_PROMPT"
+elif [ -f "$TASK_FILE_MOUNT" ]; then
+    COMPOSED_PROMPT="$(cat "$TASK_FILE_MOUNT")"
+fi
+
+if [ -n "$COMPOSED_PROMPT" ]; then
+    claude -- "$COMPOSED_PROMPT" || true
+fi
+
 /bin/bash
 
 # Cleanup when shell exits
