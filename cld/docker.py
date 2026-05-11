@@ -54,6 +54,21 @@ def find_repo_root(start: Path | None = None) -> Path:
         sys.exit(1)
 
 
+def find_repo_context(start: Path | None = None) -> tuple[Path, str]:
+    """Return (repo_root, workspace_revision_hint).
+
+    workspace_revision_hint is non-empty when invoked from a secondary jj workspace
+    or git worktree, set to the appropriate revision so the container starts from
+    the caller's current working copy rather than the main workspace default.
+    """
+    try:
+        backend = get_backend(start)
+        return backend.repo_root, backend.workspace_revision
+    except RuntimeError as e:
+        log_error(str(e))
+        sys.exit(1)
+
+
 def build_session_name(prefix: str, suffix: str = "") -> str:
     """Generate a session name like ``prefix_suffix`` or ``prefix_<random>``."""
     return f"{prefix}_{suffix or secrets.token_hex(3)}"

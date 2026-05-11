@@ -47,11 +47,20 @@ def get_backend(start: Path | None = None) -> VcsBackend:
 
     # Prefer jj if both repo marker and binary exist
     if jj_root and shutil.which("jj"):
-        return JjBackend(jj_root)
+        resolved = JjBackend._resolve_secondary_workspace(jj_root)
+        workspace_rev = ""
+        if resolved != jj_root:
+            name = JjBackend._current_workspace_name(jj_root)
+            workspace_rev = f"{name}@" if name else ""
+        return JjBackend(resolved, workspace_rev)
 
     # Fall back to git
     if git_root and shutil.which("git"):
-        return GitBackend(git_root)
+        resolved = GitBackend._resolve_worktree_root(git_root)
+        workspace_rev = ""
+        if resolved != git_root:
+            workspace_rev = GitBackend._current_worktree_branch(git_root)
+        return GitBackend(resolved, workspace_rev)
 
     # Also fall back to git if we found .jj but not the jj binary,
     # and the repo has a .git (jj with git backend)

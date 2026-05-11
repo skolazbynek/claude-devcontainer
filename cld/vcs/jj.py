@@ -1,5 +1,6 @@
 """Jujutsu (jj) backend implementation."""
 
+import subprocess
 from pathlib import Path
 
 from cld.vcs.base import VcsBackend
@@ -28,9 +29,34 @@ class JjBackend(VcsBackend):
         d = start or Path.cwd()
         while d != d.parent:
             if (d / ".jj").is_dir():
-                return d
+                return cls._resolve_secondary_workspace(d)
             d = d.parent
         return None
+
+    @staticmethod
+    def _resolve_secondary_workspace(path: Path) -> Path:
+        """If path is a jj secondary workspace, follow .jj/repo pointer to the main root."""
+        repo_file = path / ".jj" / "repo"
+        if not repo_file.is_file():
+            return path
+        store_path = Path(repo_file.read_text().strip())
+        if not store_path.is_absolute():
+            store_path = (repo_file.parent / store_path).resolve()
+        return store_path.parent.parent
+
+    @staticmethod
+    def _current_workspace_name(path: Path) -> str:
+        """Return the jj workspace name for the working directory at *path*."""
+        result = subprocess.run(
+            ["jj", "--no-pager", "workspace", "list", "--color=never",
+             "--ignore-working-copy", "-T",
+             'if(target.current_working_copy(), name ++ "\\n")'],
+            capture_output=True, text=True, cwd=str(path),
+        )
+        if result.returncode != 0:
+            return ""
+        lines = result.stdout.strip().splitlines()
+        return lines[0] if lines else ""
 
     # -- workspace isolation --------------------------------------------------
 

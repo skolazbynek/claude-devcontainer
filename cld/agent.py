@@ -15,7 +15,7 @@ from cld.docker import (
     build_session_name,
     cld_tmpdir,
     ensure_image,
-    find_repo_root,
+    find_repo_context,
     log_error,
     log_info,
     require_docker,
@@ -46,7 +46,7 @@ def launch_agent(
         log_error("No task file or prompt provided")
         sys.exit(1)
 
-    repo_root = find_repo_root()
+    repo_root, workspace_rev = find_repo_context()
     vcs = get_backend()
 
     cld_root = Path(__file__).resolve().parent.parent
@@ -74,8 +74,9 @@ def launch_agent(
         args += ["-e", f"AGENT_INLINE_PROMPT={inline_prompt}"]
     if model:
         args += ["-e", f"AGENT_MODEL={model}"]
-    if revision:
-        args += ["-e", f"AGENT_REVISION={revision}"]
+    effective_revision = revision or workspace_rev
+    if effective_revision:
+        args += ["-e", f"AGENT_REVISION={effective_revision}"]
 
     if not quiet:
         log_info("Starting agent in background...")

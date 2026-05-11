@@ -31,9 +31,35 @@ class GitBackend(VcsBackend):
         while d != d.parent:
             git_path = d / ".git"
             if git_path.is_dir() or git_path.is_file():
-                return d
+                return cls._resolve_worktree_root(d)
             d = d.parent
         return None
+
+    @staticmethod
+    def _resolve_worktree_root(path: Path) -> Path:
+        """If path is a git worktree, resolve to the main repository root."""
+        if not (path / ".git").is_file():
+            return path
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse",
+             "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return path
+        return Path(result.stdout.strip()).parent
+
+    @staticmethod
+    def _current_worktree_branch(path: Path) -> str:
+        """Return the branch name checked out in the worktree at *path*."""
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return ""
+        branch = result.stdout.strip()
+        return branch if branch != "HEAD" else ""
 
     # -- helpers --------------------------------------------------------------
 

@@ -17,7 +17,7 @@ from cld.docker import (
     build_session_name,
     devcontainer_extra_paths,
     ensure_image,
-    find_repo_root,
+    find_repo_context,
     log_error,
     log_info,
     log_warn,
@@ -111,14 +111,15 @@ def devcontainer(
         ),
     )
 
-    repo_root = find_repo_root()
+    repo_root, workspace_rev = find_repo_context()
     session = build_session_name("cld", name)
 
     args = build_container_args(repo_root, session, cfg, interactive=True)
     if model:
         args += ["-e", f"AGENT_MODEL={model}"]
-    if revision:
-        args += ["-e", f"AGENT_REVISION={revision}"]
+    effective_revision = revision or workspace_rev
+    if effective_revision:
+        args += ["-e", f"AGENT_REVISION={effective_revision}"]
 
     skipped = []
     for rel in cfg.home_mounts_devcontainer:

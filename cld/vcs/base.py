@@ -13,8 +13,9 @@ class VcsBackend(ABC):
     ``self.repo_root`` as the working directory.
     """
 
-    def __init__(self, repo_root: Path):
+    def __init__(self, repo_root: Path, workspace_revision: str = ""):
         self.repo_root = repo_root
+        self.workspace_revision = workspace_revision
 
     @property
     @abstractmethod
