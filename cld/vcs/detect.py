@@ -49,18 +49,22 @@ def get_backend(start: Path | None = None) -> VcsBackend:
     if jj_root and shutil.which("jj"):
         resolved = JjBackend._resolve_secondary_workspace(jj_root)
         workspace_rev = ""
+        workspace_path = None
         if resolved != jj_root:
             name = JjBackend._current_workspace_name(jj_root)
             workspace_rev = f"{name}@" if name else ""
-        return JjBackend(resolved, workspace_rev)
+            workspace_path = jj_root
+        return JjBackend(resolved, workspace_rev, workspace_path)
 
     # Fall back to git
     if git_root and shutil.which("git"):
         resolved = GitBackend._resolve_worktree_root(git_root)
         workspace_rev = ""
+        workspace_path = None
         if resolved != git_root:
             workspace_rev = GitBackend._current_worktree_branch(git_root)
-        return GitBackend(resolved, workspace_rev)
+            workspace_path = git_root
+        return GitBackend(resolved, workspace_rev, workspace_path)
 
     # Also fall back to git if we found .jj but not the jj binary,
     # and the repo has a .git (jj with git backend)

@@ -1,0 +1,42 @@
+#!/bin/bash
+# Stub claude binary for the cld loop E2E test (two-iteration scenario).
+# Review iterations: detect CODE_REVIEW_iter<N>.md in the prompt; iter 1 emits
+# a Critical finding (loop must continue), iter 2+ emits clean (loop must stop).
+# Impl iterations: write a tracked file so the next reviewer has a non-empty diff.
+
+PROMPT="$2"
+ITER=$(printf '%s' "$PROMPT" | grep -oP 'CODE_REVIEW_iter\K\d+' | head -1)
+
+if [ -n "$ITER" ]; then
+    OUTPUT="CODE_REVIEW_iter${ITER}.md"
+    if [ "$ITER" = "1" ]; then
+        cat > "$OUTPUT" <<'EOF'
+## Critical
+
+### Real bug
+
+There is an issue.
+
+## Major
+
+## Minor
+EOF
+    else
+        cat > "$OUTPUT" <<'EOF'
+## Critical
+
+## Major
+
+## Minor
+
+### nit
+
+Cosmetic only.
+EOF
+    fi
+else
+    UNIQ=$(date +%N)
+    echo "// impl payload ${UNIQ}" > "impl_${UNIQ}.txt"
+fi
+
+echo '{"type":"result","subtype":"success","cost_usd":0.0,"duration_ms":100,"duration_api_ms":50,"is_error":false,"num_turns":1,"result":"stub","session_id":"stub-session"}'

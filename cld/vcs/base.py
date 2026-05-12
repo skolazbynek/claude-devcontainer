@@ -10,12 +10,17 @@ class VcsBackend(ABC):
 
     Concrete implementations (JjBackend, GitBackend) translate these high-level
     operations into VCS-specific commands. All methods that execute commands use
-    ``self.repo_root`` as the working directory.
+    ``self.workspace_path`` as the working directory (equals ``repo_root`` for the
+    main workspace, the secondary workspace dir otherwise).
     """
 
-    def __init__(self, repo_root: Path, workspace_revision: str = ""):
+    def __init__(self, repo_root: Path, workspace_revision: str = "", workspace_path: Path | None = None):
         self.repo_root = repo_root
         self.workspace_revision = workspace_revision
+        # workspace_path is the actual working directory for VCS commands. When in a
+        # secondary workspace (jj workspace / git worktree), this differs from repo_root
+        # so that revset symbols like @ resolve to the correct workspace's change.
+        self.workspace_path = workspace_path or repo_root
 
     @property
     @abstractmethod
@@ -30,8 +35,8 @@ class VcsBackend(ABC):
     # -- low-level -----------------------------------------------------------
 
     def run(self, args: list[str], **kwargs) -> subprocess.CompletedProcess:
-        """Execute a raw VCS command rooted at repo_root."""
-        defaults = {"capture_output": True, "text": True, "cwd": str(self.repo_root)}
+        """Execute a raw VCS command in workspace_path (defaults to repo_root)."""
+        defaults = {"capture_output": True, "text": True, "cwd": str(self.workspace_path)}
         defaults.update(kwargs)
         return subprocess.run([self.name] + args, **defaults)
 
