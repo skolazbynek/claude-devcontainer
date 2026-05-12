@@ -85,7 +85,8 @@ def _parse_review_severity(content: str) -> dict:
 
 
 def _describe_impl_change(
-    session_name: str, iteration: int, task_text: str,
+    session_name: str, iteration: int,
+    task_file: Path | None, inline_prompt: str | None,
     review_content: str | None, vcs: VcsBackend,
 ) -> None:
     """Annotate an implementation change with loop metadata.
@@ -98,6 +99,7 @@ def _describe_impl_change(
     parts = [f"[loop impl {iteration}] {original_msg}"]
 
     if iteration == 1:
+        task_text = _load_task_text(task_file, inline_prompt)
         first_line = task_text.strip().splitlines()[0] if task_text.strip() else ""
         parts.append(f"\nTask: {first_line}")
     elif review_content:
@@ -130,18 +132,22 @@ def _describe_review_change(
 
 
 def _compose_iter_prompt(
-    task_text: str, review_content: str | None, iteration: int, repo_root: Path,
+    task_file: Path | None, inline_prompt: str | None,
+    review_content: str | None, iteration: int, repo_root: Path,
 ) -> tuple[Path | None, str | None]:
     """Build the task prompt inputs for an implementation iteration.
 
     Returns ``(task_file, inline_prompt)`` to forward to ``launch_agent``.
-    First iteration: returns the original task text as ``inline_prompt`` so the
-    container composes it inside the agent's workspace. Subsequent iterations:
-    combine the task with previous review findings, again as ``inline_prompt``.
+    First iteration: forwards the user's inputs unchanged so the agent
+    entrypoint combines them the same way ``cld agent`` does. Subsequent
+    iterations: combines the original task with previous review findings into a
+    staged file under ``.cld/`` and forwards it as ``task_file``, avoiding env-
+    var bloat as findings accumulate.
     """
     if iteration == 1 or not review_content:
-        return None, task_text
+        return task_file, inline_prompt
 
+    task_text = _load_task_text(task_file, inline_prompt)
     combined = (
         f"{task_text}\n\n"
         f"# Review Findings (Iteration {iteration - 1})\n\n"
@@ -149,7 +155,18 @@ def _compose_iter_prompt(
         f"Address all Critical and Major findings. Minor findings are optional.\n\n"
         f"{review_content}\n"
     )
-    return None, combined
+    staged = cld_tmpdir(repo_root) / f"loop-impl-iter{iteration}.md"
+    staged.write_text(combined)
+    return staged, None
+
+
+def _load_task_text(task_file: Path | None, inline_prompt: str | None) -> str:
+    """Read task_file + inline_prompt back into a single string for host-side use."""
+    if task_file and inline_prompt:
+        return f"{task_file.read_text()}\n\n## Additional Instructions\n\n{inline_prompt}\n"
+    if task_file:
+        return task_file.read_text()
+    return inline_prompt or ""
 
 
 def _compose_review_prompt(
@@ -172,8 +189,7 @@ def _compose_review_prompt(
     diff_file = cld_tmpdir(repo_root) / f"loop-diff-iter{iteration}.patch"
     diff_file.write_text(diff_content)
 
-    cld_root = Path(__file__).resolve().parent.parent
-    template_path = cld_root / "prompts/loop-review.md"
+    template_path = Path(__file__).resolve().parent / "prompts/loop-review.md"
     template = Template(template_path.read_text())
 
     content = template.safe_substitute(
@@ -265,12 +281,12 @@ def _print_exit_report(
 
 
 def _prompt_user(severity: dict, review_content: str) -> tuple[str, str]:
-    """Prompt the user to continue, stop, view the full review, or edit the next prompt."""
+    """Prompt the user to continue, stop, view review findings, or edit them before feeding back."""
     print()
     print(f"  Critical: {severity['critical']}  Major: {severity['major']}  Minor: {severity['minor']}")
     print()
     while True:
-        choice = input("  [c]ontinue / [s]top / [v]iew diff / [e]dit prompt / [q]uit: ").strip().lower()
+        choice = input("  [c]ontinue / [s]top / [v]iew findings / [e]dit findings / [q]uit: ").strip().lower()
         if choice in ("c", "continue"):
             return "continue", review_content
         if choice in ("s", "stop", "q", "quit"):
@@ -294,7 +310,7 @@ def _prompt_user(severity: dict, review_content: str) -> tuple[str, str]:
             tf = Path(tf_path)
             review_content = tf.read_text()
             tf.unlink(missing_ok=True)
-            print("  Prompt updated.")
+            print("  Findings updated.")
             print()
 
 
@@ -339,13 +355,6 @@ def run_loop(
     default_rev = "@" if vcs.name == "jj" else "HEAD"
     start_commit = vcs.resolve_revision(revision or default_rev)
 
-    if task_file and inline_prompt:
-        task_text = f"{task_file.read_text()}\n\n## Additional Instructions\n\n{inline_prompt}\n"
-    elif task_file:
-        task_text = task_file.read_text()
-    else:
-        task_text = inline_prompt or ""
-
     vcs.create_branch(loop_branch, start_commit)
 
     log_info(f"Loop '{loop_branch}' started at {start_commit[:12]}")
@@ -361,7 +370,7 @@ def run_loop(
 
             # --- IMPLEMENT ---
             impl_task_file, impl_inline = _compose_iter_prompt(
-                task_text, review_content, iteration, repo_root,
+                task_file, inline_prompt, review_content, iteration, repo_root,
             )
             impl_session = f"{loop_branch}_impl{iteration}"
 
@@ -389,9 +398,11 @@ def run_loop(
             if impl_status != "success":
                 log_error(f"Implementer {impl_status}: {impl_summary.get('error', '')}")
                 final_reason = f"implementer {impl_status} (iteration {iteration})"
+                if iteration == 1:
+                    vcs.delete_branch(loop_branch)
                 break
 
-            _describe_impl_change(impl_session, iteration, task_text, review_content, vcs)
+            _describe_impl_change(impl_session, iteration, task_file, inline_prompt, review_content, vcs)
             vcs.set_branch(loop_branch, impl_session)
             vcs.delete_branch(impl_session)
 
@@ -440,13 +451,14 @@ def run_loop(
 
             _print_iteration_result(iteration, max_iterations, severity)
 
-            if approve:
+            is_clean = severity["critical"] == 0 and severity["major"] == 0
+            if approve and not is_clean and iteration < max_iterations:
                 action, review_content = _prompt_user(severity, review_content)
                 if action == "stop":
                     final_reason = "user stopped"
                     break
 
-            if severity["critical"] == 0 and severity["major"] == 0:
+            if is_clean:
                 final_reason = "clean review"
                 break
 

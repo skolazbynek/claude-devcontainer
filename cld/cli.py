@@ -189,11 +189,17 @@ def loop(
     model: str = typer.Option("", "-m", "--model", help="Model for implementer agent"),
     review_model: str = typer.Option("", "--review-model", help="Model for reviewer agent"),
     revision: str = typer.Option("", "-r", "--revision", help="Revision to base workspace on (default: last committed change -- @- for jj, HEAD for git)"),
-    max_iterations: int = typer.Option(3, "--max-iterations", help="Maximum iteration count"),
-    prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (alternative to task file)"),
-    approve: bool = typer.Option(False, "--approve", help="Pause after each review for approval"),
+    max_iterations: int = typer.Option(3, "--max-iterations", help="Hard cap on iterations; loop also stops early on a clean review (no critical/major findings)"),
+    prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (appended to task file if both given)"),
+    approve: bool = typer.Option(False, "--approve", help="Pause after each review for approval (continue/stop/view/edit findings)"),
 ):
-    """Run an automated implement-review loop."""
+    """Run an automated implement-review loop.
+
+    Each iteration runs an implementer agent, then a reviewer agent. Review
+    findings feed into the next implementer. Stops on a clean review, hitting
+    --max-iterations, or an agent failure. All iterations land on a single
+    'loop_<name>' branch; the final report prints inspection/merge commands.
+    """
     if not task_file and not prompt:
         typer.echo("Error: Provide a task file, --prompt, or both", err=True)
         raise typer.Exit(1)

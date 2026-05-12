@@ -1,5 +1,5 @@
 ---
-description: Review TEST_RESULT_ANALYSIS.md fix suggestions and implement approved ones
+description: Review TEST_RESULT_ANALYSIS.md fix suggestions created by fix-pytest-files.md prompt and implement approved ones
 ---
 
 # Overview

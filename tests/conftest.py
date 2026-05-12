@@ -218,6 +218,12 @@ def claude_stub_review():
     return _STUB_DIR_BASE / "stub-review"
 
 
+@pytest.fixture
+def claude_stub_loop_review():
+    """Host-visible directory containing a claude stub for 2-iteration loop tests."""
+    return _STUB_DIR_BASE / "stub-loop-review"
+
+
 # --- Docker helpers -----------------------------------------------------------
 
 

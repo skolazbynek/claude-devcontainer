@@ -21,9 +21,12 @@ class TestRequireDocker:
 
 @skip_no_docker
 class TestEnsureImage:
-    def test_existing_image_is_noop(self, tmp_path):
+    def test_existing_image_is_noop(self, tmp_path, monkeypatch):
         # Should not trigger a build for an already-existing image
         # Use a dummy dockerfile path since it shouldn't be touched
+        import cld.docker as docker_mod
+        expected = docker_mod._content_hash([tmp_path / "nonexistent.Dockerfile"], None)
+        monkeypatch.setattr(docker_mod, "_image_label", lambda *_: expected)
         ensure_image(
             "claude-devcontainer:latest",
             tmp_path / "nonexistent.Dockerfile",

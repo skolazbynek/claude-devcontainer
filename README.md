@@ -37,7 +37,7 @@ cld agent task.md -p "Focus on the database layer"
 cld review [-n name] [-m model] <feature-branch> <trunk-branch>
 
 # Implement-review loop (automated iterate until clean review)
-cld loop [-n name] [-m model] [--max-iterations 3] task.md
+cld loop [-n name] [-m model] [--review-model model] [-r rev] [--max-iterations 3] [--approve] [-p prompt] [task.md]
 ```
 
 ### Agent workflow
@@ -74,6 +74,52 @@ git merge agent_fix-auth
 ```
 
 Agent containers run detached and auto-remove on exit. Results are committed to the agent's branch as `agent-output-<session>/` containing `agent.log`, `result.json`, and `summary.json`.
+
+### Loop workflow
+
+`cld loop` runs implement → review iterations on a single branch until the review is clean (no Critical and no Major findings) or `--max-iterations` is reached. Each iteration spawns two agent containers in sequence (implementer, then reviewer). Review findings are fed into the next implementer's prompt.
+
+```bash
+# Run with a task file (combine with -p, same semantics as `cld agent`)
+cld loop -n add-cache task.md
+cld loop -n add-cache -p "Use the redis client already in src/cache.py" task.md
+
+# Inline-only
+cld loop -n add-cache -p "Add a cache layer to the user repository"
+
+# Pick a reviewer model independent of the implementer
+cld loop -n add-cache -m opus --review-model sonnet task.md
+
+# Human-in-the-loop: pause after each review (continue/stop/view/edit findings)
+cld loop --approve task.md
+```
+
+Exit conditions:
+
+- **Clean review** (`critical == 0` and `major == 0`) -- loop stops early, exit reason `clean review`.
+- **`--max-iterations` reached** (default 3) -- loop stops with the last iteration's state.
+- **Implementer or reviewer failure** -- loop stops; the failing iteration's branch state is preserved for inspection.
+- **`--approve` stop** -- user terminates after a paused review.
+
+The loop creates a single branch `loop_<name>` accumulating all iterations. The final exit report prints the relevant inspection commands for your VCS:
+
+```bash
+# jujutsu
+jj log -r 'loop_add-cache::@'
+jj diff -r loop_add-cache
+jj file show -r loop_add-cache CODE_REVIEW_iter<N>.md
+jj squash --from loop_add-cache
+
+# git
+git log loop_add-cache
+git diff loop_add-cache~1..loop_add-cache
+git show loop_add-cache:CODE_REVIEW_iter<N>.md
+git merge loop_add-cache
+```
+
+Commit messages on the loop branch are tagged `[loop impl N]` and `[loop review N]` and include severity counts. A total cost in USD is reported at the end. Per-iteration review files (`CODE_REVIEW_iter<N>.md`) are committed to the branch.
+
+Loop env vars (see *Configuration* below): `CLD_AGENT_TIMEOUT` caps per-agent wait time; `CLD_POLL_INTERVAL` controls docker-ps polling.
 
 ## VCS Backend
 

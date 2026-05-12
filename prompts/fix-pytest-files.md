@@ -1,5 +1,5 @@
 ---
-description: Analyze failing pytest logs in ./test_failures/, find root causes, and suggest fixes
+description: Analyze failing pytest logs in ./test_failures/ split by split_pytest_result skill, find root causes, and suggest fixes
 ---
 
 # Overview
