@@ -4,11 +4,10 @@ Run Claude Code in Docker containers with VCS workspace isolation. Supports **ju
 
 ## Prerequisites
 
-- **Linux host** (required: `/etc/ssl/certs` is mandatory; macOS/Windows Docker Desktop layouts may not satisfy this)
 - Docker
 - A **jujutsu** or **git** repository (jj preferred; git used as fallback)
 - Python 3.11+ with [Poetry](https://python-poetry.org/)
-- Optional: `CLD_MYSQL_CONFIG` env pointing to a `.cnf` file (vendor-specific; safe to ignore)
+- Probably not Windows
 
 ## Setup
 
@@ -25,6 +24,9 @@ All commands must be run from within a VCS repository (jj or git).
 ## Usage
 
 ```bash
+# Show information
+cld --help
+
 # Interactive devcontainer (neovim, jj/git, poetry, claude with --dangerously-skip-permissions)
 cld devcontainer [-n name]
 
@@ -37,41 +39,10 @@ cld agent task.md -p "Focus on the database layer"
 cld review [-n name] [-m model] <feature-branch> <trunk-branch>
 
 # Implement-review loop (automated iterate until clean review)
-cld loop [-n name] [-m model] [--review-model model] [-r rev] [--max-iterations 3] [--approve] [-p prompt] [task.md]
+cld loop task.md -p "Optional additional information to the task file"
 ```
 
 ### Agent workflow
-
-With jujutsu:
-
-```bash
-# Launch an agent
-cld agent -n fix-auth task.md
-
-# Check progress (wait a few seconds first for the file to appear)
-until [ -f "$(jj root)/agent-output-agent_fix-auth/agent.log" ]; do sleep 1; done
-tail -f $(jj root)/agent-output-agent_fix-auth/agent.log
-
-# After completion, inspect and merge
-jj log -r agent_fix-auth
-jj diff -r agent_fix-auth
-jj squash --from agent_fix-auth
-```
-
-With git:
-
-```bash
-# Launch an agent
-cld agent -n fix-auth task.md
-
-# Check progress
-tail -f $(git rev-parse --show-toplevel)/agent-output-agent_fix-auth/agent.log
-
-# After completion, inspect and merge
-git log agent_fix-auth
-git diff agent_fix-auth~1..agent_fix-auth
-git merge agent_fix-auth
-```
 
 Agent containers run detached and auto-remove on exit. Results are committed to the agent's branch as `agent-output-<session>/` containing `agent.log`, `result.json`, and `summary.json`.
 
@@ -91,6 +62,7 @@ cld loop -n add-cache -p "Add a cache layer to the user repository"
 cld loop -n add-cache -m opus --review-model sonnet task.md
 
 # Human-in-the-loop: pause after each review (continue/stop/view/edit findings)
+# Untested
 cld loop --approve task.md
 ```
 
@@ -101,23 +73,7 @@ Exit conditions:
 - **Implementer or reviewer failure** -- loop stops; the failing iteration's branch state is preserved for inspection.
 - **`--approve` stop** -- user terminates after a paused review.
 
-The loop creates a single branch `loop_<name>` accumulating all iterations. The final exit report prints the relevant inspection commands for your VCS:
-
-```bash
-# jujutsu
-jj log -r 'loop_add-cache::@'
-jj diff -r loop_add-cache
-jj file show -r loop_add-cache CODE_REVIEW_iter<N>.md
-jj squash --from loop_add-cache
-
-# git
-git log loop_add-cache
-git diff loop_add-cache~1..loop_add-cache
-git show loop_add-cache:CODE_REVIEW_iter<N>.md
-git merge loop_add-cache
-```
-
-Commit messages on the loop branch are tagged `[loop impl N]` and `[loop review N]` and include severity counts. A total cost in USD is reported at the end. Per-iteration review files (`CODE_REVIEW_iter<N>.md`) are committed to the branch.
+The loop creates a single branch `loop_<name>` accumulating all iterations. Commit messages on the loop branch are tagged `[loop impl N]` and `[loop review N]` and include severity counts. A total cost in USD is reported at the end. Per-iteration review files (`CODE_REVIEW_iter<N>.md`) are committed to the branch.
 
 Loop env vars (see *Configuration* below): `CLD_AGENT_TIMEOUT` caps per-agent wait time; `CLD_POLL_INTERVAL` controls docker-ps polling.
 
@@ -243,8 +199,6 @@ Containers run as host UID/GID with `--cap-drop=ALL`, `--security-opt=no-new-pri
 - **No outbound network firewall.** Once an agent is running, it can reach any host on the public internet and exfiltrate anything mounted in (`~/.claude` tokens, `~/.claude.json` MCP creds, `~/.config/*` creds, `CLD_MYSQL_CONFIG`). Anthropic's reference devcontainer ships an `init-firewall.sh` with default-deny outbound and a small allowlist; cld does not (yet) ship an equivalent.
 - **`/var/run/docker.sock` mount = host root.** When the docker socket is mounted (it is, for the orchestrator), an agent inside can run `docker run -v /:/host --privileged ...` and read or modify anything on the host. This effectively bypasses every other security control. If you don't need the orchestrator, comment out the docker.sock block in `cld/docker.py`.
 - **`~/.claude` is mounted rw.** A malicious agent can both read your OAuth tokens and overwrite session state.
-
-Treat the container as **trusted with your full host environment** until the firewall and a docker-socket proxy land. Use `--dangerously-skip-permissions` accordingly.
 
 ## Configuration
 
