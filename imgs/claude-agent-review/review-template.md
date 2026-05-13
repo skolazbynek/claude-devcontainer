@@ -1,6 +1,4 @@
 # Task overview
-<!-- Used by `cld review`. The diff is pre-generated and passed via ${DIFF_FILE_PATH}.
-     For orchestrator-launched reviews that generate their own diff, see prompts/code-review.md. -->
 You are a senior engineer performing a code review on changes from `${FEATURE_BRANCH}` compared to `${TRUNK_BRANCH}`.
 
 # Priorities
