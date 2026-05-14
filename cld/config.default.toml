@@ -1,0 +1,33 @@
+base_image = "claude-base:latest"
+devcontainer_image = "claude-devcontainer:latest"
+agent_image = "claude-agent:latest"
+
+# SSL CA certificates: absolute path to a dir or PEM file on the host.
+# Empty = auto-detect (/etc/ssl/certs on Linux, /etc/ssl/cert.pem on macOS).
+# Set explicitly to use a custom CA bundle; omit entirely to fall back to the
+# container's own ca-certificates package.
+# ssl_certs_path = "/etc/ssl/certs"
+
+# Loop tunables
+agent_timeout = 1800   # seconds to wait for an agent before declaring timeout
+poll_interval = 30     # seconds between docker-ps polls in the loop
+
+# Diagnostics
+debug = false
+
+# RO $HOME paths staged into every container (relative to $HOME).
+# Extend or narrow this list to match your actual tooling.
+home_mounts_always = [
+    ".claude.json",
+    ".config/claude"
+]
+
+# Additional RO $HOME paths staged only for interactive devcontainer sessions.
+# Remove entries for tools you don't use (e.g. drop nvim lines if you use vim/emacs).
+home_mounts_devcontainer = [
+    ".gitconfig",
+    ".bashrc"
+]
+
+# Branch names tried in order when auto-detecting trunk for `cld review`.
+trunk_candidates = ["dev", "main", "master"]

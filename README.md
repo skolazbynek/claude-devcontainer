@@ -235,22 +235,11 @@ debug = false
 | `CLD_BASE_IMAGE` | `claude-base:latest` | Common base Docker image |
 | `CLD_DEVCONTAINER_IMAGE` | `claude-devcontainer:latest` | Devcontainer image |
 | `CLD_AGENT_IMAGE` | `claude-agent:latest` | Agent image |
-| `CLD_MYSQL_CONFIG` | `""` | Host path to a `.cnf` file (mounted into container if set) |
 | `CLD_HOST_PROJECT_DIR` | `""` | Host repo root path; set by host launcher into containers for nested docker path translation |
 | `CLD_HOST_HOME` | `""` | Host home directory (for path translation) |
 | `CLD_AGENT_TIMEOUT` | `1800` | Loop's per-agent wait timeout (seconds) |
 | `CLD_POLL_INTERVAL` | `30` | Loop's docker-ps poll interval (seconds) |
 | `CLD_DEBUG` | `false` | Diagnostics flag |
-
-Container-side env vars consumed by shell entrypoints (kept unprefixed):
-
-| Variable | Purpose |
-|---|---|
-| `SESSION_NAME` | Branch, workspace, and container name |
-| `INSTRUCTION_FILE` | Task file path inside agent container |
-| `AGENT_REVISION` | Revision for workspace init (default: `@` / `HEAD`) |
-| `AGENT_MODEL` | Claude model override (default: `sonnet`) |
-| `WORKSPACE_ORIGIN` | Path to bind-mounted host repo inside container (set by `container-init.sh`) |
 
 ## Development
 

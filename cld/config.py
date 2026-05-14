@@ -9,6 +9,7 @@ not user-tunable and are coupled to Dockerfile/shell-script invariants.
 """
 
 import os
+import shutil
 import sys
 import tomllib
 from dataclasses import dataclass
@@ -46,8 +47,20 @@ _TOML_KEYS = {
 }
 
 
+_DEFAULT_CONFIG_TEMPLATE = Path(__file__).parent / "config.default.toml"
+
+
 def _user_config_path() -> Path:
     return Path.home() / ".config" / "cld" / "config.toml"
+
+
+def _ensure_user_config(path: Path) -> None:
+    """Copy the default template to ``path`` if it does not exist yet."""
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(_DEFAULT_CONFIG_TEMPLATE, path)
+    print(f"cld: created default config at {path}", file=sys.stderr)
 
 
 def _find_project_config(start: Path | None = None) -> Path | None:
@@ -162,6 +175,7 @@ class Config:
         _load_dotenv(dotenv)
         layered: dict = {}
         up = user_config if user_config is not None else _user_config_path()
+        _ensure_user_config(up)
         if up.is_file():
             layered.update(_load_toml(up))
         pp = project_config if project_config is not None else _find_project_config()
