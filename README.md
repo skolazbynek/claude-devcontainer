@@ -202,7 +202,7 @@ Containers run as host UID/GID with `--cap-drop=ALL`, `--security-opt=no-new-pri
 
 ## Configuration
 
-All Python-side runtime tunables live in `cld/config.py:Config` (frozen dataclass). Each command/MCP tool builds a `Config.from_env()` once at entry and passes it explicitly to launch helpers (Variant A: explicit DI).
+Any command checks for `~/.config/cld/config.toml` and creates a default file if it doesn't exist. Adjust it as you need - especially what paths are mounted into the devcontainer. You can create a per-project overrides with `<repo_root>/.cld.config`.
 
 ### Resolution order
 
