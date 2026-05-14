@@ -12,8 +12,13 @@ Run Claude Code in Docker containers with VCS workspace isolation. Supports **ju
 ## Setup
 
 ```bash
-# Install the CLI
+# Install with poetry
 poetry install
+
+# You can run from the poetry environment within CLD repo
+poetry run cld --help
+
+# To run from any directory, add `/.venv/bin/cld` to your PATH. I have `~/.local/bin/cld` symlink pointing there.
 
 # Build images (one command builds both, devcontainer first)
 cld build [--no-cache]
