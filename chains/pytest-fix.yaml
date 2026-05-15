@@ -1,0 +1,17 @@
+name: pytest
+description: parse pytest failures, then design and implement fixes.
+
+defaults:
+  model: sonnet
+
+steps:
+  - name: review_failures
+    persona: architect
+    model: opus
+    prompt: |
+      Read and use /prompts/fix-pytest-files.md prompt from opts/cld/ directory.
+
+  - name: implement_fixes
+    persona: implementer
+    prompt: |
+      Read and use /prompt/implement_test_fixes.md prompt from opts/cld/ directory.

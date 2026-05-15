@@ -75,6 +75,9 @@ def launch_agent(
     revision: str = "",
     session_name: str | None = None,
     quiet: bool = False,
+    *,
+    system_prompt_file: Path | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> dict:
     """Launch an autonomous Claude agent in a Docker container.
 
@@ -118,6 +121,13 @@ def launch_agent(
     effective_revision = revision or workspace_rev
     if effective_revision:
         args += ["-e", f"AGENT_REVISION={effective_revision}"]
+    if system_prompt_file:
+        host_prompt = to_host_path(str(system_prompt_file.resolve()), cfg)
+        args += ["-v", f"{host_prompt}:/config/persona.md:ro"]
+        args += ["-e", "AGENT_SYSTEM_PROMPT_FILE=/config/persona.md"]
+    if extra_env:
+        for k, v in extra_env.items():
+            args += ["-e", f"{k}={v}"]
 
     if not quiet:
         log_info("Starting agent in background...")
@@ -150,7 +160,10 @@ def launch_agent(
         print(f"Container ID: {cid}")
         print()
         print("========================================")
-        print("Agent started successfully")
+        if workspace_ready:
+            print("Agent started successfully")
+        else:
+            print("Agent started (workspace not yet visible)")
         print("========================================")
         print()
         print(f"Check if running:\n  docker ps --filter id={cid}")

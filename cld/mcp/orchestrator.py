@@ -158,7 +158,7 @@ def list_agents() -> list[dict]:
         name = name.rstrip(":").split("@")[0]
         if not name or name in agents:
             continue
-        if any(name.startswith(p) for p in ("agent_", "review_", "loop_")):
+        if any(name.startswith(p) for p in ("agent_", "review_", "loop_", "chain_")):
             agents[name] = {"session_name": name, "status": "completed"}
 
     return list(agents.values())

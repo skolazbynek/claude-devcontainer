@@ -45,6 +45,13 @@ cld review [-n name] [-m model] <feature-branch> <trunk-branch>
 
 # Implement-review loop (automated iterate until clean review)
 cld loop task.md -p "Optional additional information to the task file"
+
+# Declarative multi-agent chain
+cld chain run @review-implement task.md
+cld chain run chains/parallel-review.yaml -p "Focus on auth code"
+cld chain list
+cld chain validate chains/my-chain.yaml
+cld chain dry-run @review-implement
 ```
 
 ### Agent workflow
@@ -81,6 +88,89 @@ Exit conditions:
 The loop creates a single branch `loop_<name>` accumulating all iterations. Commit messages on the loop branch are tagged `[loop impl N]` and `[loop review N]` and include severity counts. A total cost in USD is reported at the end. Per-iteration review files (`CODE_REVIEW_iter<N>.md`) are committed to the branch.
 
 Loop env vars (see *Configuration* below): `CLD_AGENT_TIMEOUT` caps per-agent wait time; `CLD_POLL_INTERVAL` controls docker-ps polling.
+
+### Chain workflow
+
+`cld chain` runs a declarative sequence of named agents defined in a YAML file. Each step is an autonomous agent that receives the prior step's output as context. Steps can run in parallel (a `parallel:` group); the synthesiser step that follows sees a combined summary. Built-in chains live in `chains/` in the repo and in the installed package; reference them with `@name` shorthand.
+
+```bash
+# Run a built-in chain against a task file
+cld chain run @review-implement task.md
+
+# Run with an inline prompt instead of a task file
+cld chain run @review-implement -p "Fix the N+1 query in user_repo.py"
+
+# Run a local chain file
+cld chain run chains/parallel-review.yaml task.md
+
+# Inspect without running
+cld chain list
+cld chain validate @parallel-review
+cld chain dry-run @review-implement
+```
+
+**Built-in chains:**
+
+`chains/review-implement.yaml` — reviewer flags issues, implementer fixes them:
+
+```yaml
+name: review-implement
+description: Reviewer flags issues, implementer fixes them.
+
+defaults:
+  model: sonnet
+
+steps:
+  - name: review
+    persona: reviewer
+
+  - name: implement
+    persona: implementer
+```
+
+`chains/parallel-review.yaml` — two reviewers in parallel; synthesiser ranks findings:
+
+```yaml
+name: parallel-review
+description: Two reviewers in parallel; synthesiser picks the most actionable.
+
+defaults:
+  model: sonnet
+
+steps:
+  - parallel:
+      - name: generic
+        persona: reviewer
+      - name: security
+        persona: security-reviewer
+
+  - name: synthesise
+    persona: reviewer
+    prompt: |
+      Two prior reviewers produced findings. Combine them, deduplicate,
+      and rank by severity. Drop anything that contradicts the user's
+      original task.
+```
+
+**YAML field reference:**
+
+| Field | Level | Description |
+|---|---|---|
+| `name` | chain, step | Identifier; used as branch name suffix |
+| `description` | chain | Human-readable summary shown by `cld chain list` |
+| `defaults` | chain | Default values applied to every step (`model`, `timeout`) |
+| `steps` | chain | Ordered list of step or `parallel` group items |
+| `parallel` | step item | List of steps to run concurrently |
+| `persona` | step | Claude persona / system-prompt name |
+| `model` | step, defaults | Claude model override for this step |
+| `timeout` | step, defaults | Per-agent timeout in seconds (0 = inherit `CLD_AGENT_TIMEOUT`) |
+| `prompt` | step | Extra instructions appended to the step's system prompt |
+| `output` | step | Explicit output file path committed by this step |
+| `inputs` | step | List of prior step names whose output this step receives |
+
+**Limitations (PoC scope):** no loops, no conditionals. For parallel groups, code changes committed by non-first siblings are not visible to the next sequential step — only text output is forwarded.
+
+Chain env vars (see *Configuration* below): `CLD_CHAIN_MAX_PARALLEL` caps concurrent siblings; `CLD_CHAIN_DEFAULT_MODEL` overrides the model for all steps.
 
 ## VCS Backend
 
@@ -155,6 +245,7 @@ cld/                               Python package (CLI + shared logic)
   docker.py                        container arg building, image management, path translation
   agent.py                         agent and review launch logic
   loop.py                          automated implement-review loop
+  chain.py                         declarative multi-agent chain runner
   vcs/                             VCS abstraction layer
     base.py                        abstract VcsBackend interface
     jj.py                          jujutsu backend (preferred)
@@ -244,6 +335,8 @@ debug = false
 | `CLD_HOST_HOME` | `""` | Host home directory (for path translation) |
 | `CLD_AGENT_TIMEOUT` | `1800` | Loop's per-agent wait timeout (seconds) |
 | `CLD_POLL_INTERVAL` | `30` | Loop's docker-ps poll interval (seconds) |
+| `CLD_CHAIN_MAX_PARALLEL` | `4` | Max agents running concurrently in a parallel chain group |
+| `CLD_CHAIN_DEFAULT_MODEL` | `""` | Model override for all chain steps; empty = use chain YAML default |
 | `CLD_DEBUG` | `false` | Diagnostics flag |
 
 ## Development

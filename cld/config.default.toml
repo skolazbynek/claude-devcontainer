@@ -12,6 +12,10 @@ agent_image = "claude-agent:latest"
 agent_timeout = 1800   # seconds to wait for an agent before declaring timeout
 poll_interval = 30     # seconds between docker-ps polls in the loop
 
+# Chain orchestration tunables
+# chain_max_parallel = 4    # max agents running in parallel in a chain
+# chain_default_model = ""  # model override for chain agents; empty = use agent default
+
 # Diagnostics
 debug = false
 

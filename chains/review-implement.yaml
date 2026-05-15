@@ -1,0 +1,12 @@
+name: review-implement
+description: Reviewer flags issues, implementer fixes them.
+
+defaults:
+  model: sonnet
+
+steps:
+  - name: review
+    persona: reviewer
+
+  - name: implement
+    persona: implementer

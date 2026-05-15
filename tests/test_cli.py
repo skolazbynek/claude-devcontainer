@@ -54,7 +54,7 @@ class TestReviewTrunkAutoDetection:
     def _invoke(self, branches_output, argv=("review", "feature")):
         backend = MagicMock()
         backend.list_branches.return_value = branches_output
-        with patch("cld.vcs.get_backend", return_value=backend), \
+        with patch("cld.cli.get_backend", return_value=backend), \
              patch("cld.cli.launch_review") as lr:
             result = runner.invoke(app, list(argv))
         return result, backend, lr

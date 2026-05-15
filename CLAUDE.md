@@ -17,7 +17,9 @@ cld/                             -- Python package (host-side CLI + shared logic
   cli.py                         -- typer app, all subcommands
   docker.py                      -- container setup: arg building, image management, path translation
   agent.py                       -- agent/review launch logic
+  agent_runtime.py               -- shared agent lifecycle helpers (wait, cost, formatting)
   loop.py                        -- automated implement-review loop
+  chain.py                       -- chain orchestrator (mirrors loop.py for multi-step pipelines)
   vcs/                           -- VCS abstraction layer
     base.py                      -- abstract VcsBackend interface
     jj.py                        -- jujutsu backend implementation
@@ -34,7 +36,10 @@ imgs/
     vcs-lib.sh                   -- Shell-level VCS abstraction (sourced by both entrypoints, baked into base)
   claude-agent/                  -- Agent image (FROM base, adds agent entrypoint + system prompt)
   claude-agent-review/           -- Review templates (review-template.md, fix-mr.md)
-prompts/                         -- Reusable task prompts for agents
+prompts/
+  personas/                      -- Persona system prompts (architect, implementer, reviewer, …)
+  (other task prompts)           -- Reusable task prompts for agents
+chains/                          -- YAML chain definitions (e.g. architect-implement-review.yaml)
 ```
 
 **Image hierarchy:** `claude-base` is the parent of both `claude-devcontainer` and `claude-agent` (siblings). Build base first.
@@ -78,7 +83,7 @@ All Python-side runtime tunables live in `cld/config.py:Config` (frozen dataclas
 
 **Resolution order (lowest → highest priority):** dataclass defaults < user TOML (`~/.config/cld/config.toml`) < project TOML (`<repo_root>/.cld.config`, walked up from cwd) < `.env` in cwd < `CLD_*` env vars.
 
-TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `devcontainer_image`, `agent_image`, `mysql_config`, `ssl_certs_path`, `agent_timeout`, `poll_interval`, `debug`, `home_mounts_always`, `home_mounts_devcontainer`, `trunk_candidates`). Array fields accept TOML arrays of strings. Unknown keys are warned about on stderr and ignored. `host_project_dir` / `host_home` are container-internal and not configurable via TOML.
+TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `devcontainer_image`, `agent_image`, `mysql_config`, `ssl_certs_path`, `agent_timeout`, `poll_interval`, `debug`, `home_mounts_always`, `home_mounts_devcontainer`, `trunk_candidates`, `chain_max_parallel`, `chain_default_model`). Array fields accept TOML arrays of strings. Unknown keys are warned about on stderr and ignored. `host_project_dir` / `host_home` are container-internal and not configurable via TOML.
 
 `CLD_*` env vars (read by `Config.from_env`):
 
@@ -93,6 +98,8 @@ TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `de
 | `CLD_HOST_HOME` | `""` | Same idea for `$HOME` paths |
 | `CLD_AGENT_TIMEOUT` | `1800` | Loop's per-agent wait timeout (seconds) |
 | `CLD_POLL_INTERVAL` | `30` | Loop's docker-ps poll interval (seconds) |
+| `CLD_CHAIN_MAX_PARALLEL` | `4` | Max parallel siblings launched concurrently in a chain group |
+| `CLD_CHAIN_DEFAULT_MODEL` | `""` | Model override for chain agents; empty = agent default |
 | `CLD_DEBUG` | `false` | Diagnostics flag |
 
 Container-side env vars consumed by shell entrypoints (NOT read by Python `Config`; left unprefixed because shell scripts read them by name):
@@ -128,3 +135,44 @@ Internal notes:
 - `launch_agent` calls `cld.agent.launch_agent()` directly (not via subprocess) so it shares image-management, env, and path-translation logic.
 - Non-host-visible task files are staged into `repo_root/.agent-tasks/` so they can be bind-mounted.
 - The orchestrator never squashes or merges into external branches; result aggregation is the caller's job.
+
+## Chain Orchestrator
+
+Module: `cld/chain.py`. Mirrors `cld/loop.py` but for declarative multi-step pipelines. Entry point is `cld chain <file.yaml>` via `cli.py`.
+
+**Dataclasses** (all frozen):
+
+| Class | Role |
+|---|---|
+| `ChainStep` | Single agent step: name, persona, model, prompt, output, inputs, timeout |
+| `ParallelGroup` | A group of `ChainStep` siblings to run in parallel |
+| `ChainDefaults` | Chain-level defaults for model and timeout |
+| `Chain` | Top-level: name, description, defaults, ordered `steps` tuple |
+| `StepResult` | Outcome of one step: status, output_text, failure_md, cost, duration |
+| `ChainResult` | Outcome of the whole chain: aggregated results, branch name, success flag |
+
+**Public functions:**
+
+| Function | Purpose |
+|---|---|
+| `load_chain(path)` | Parse YAML into `Chain`; structural only, no file-system checks |
+| `validate_chain(chain, repo_root, cld_root)` | Semantic validation: name regex, unique step names, persona resolution, no forward `inputs` refs |
+| `run_chain(cfg, chain_file, ...)` | Orchestrate all steps; returns `ChainResult` |
+| `print_chain_report(result, vcs)` | Print summary table with cost, duration, VCS inspect commands |
+
+**Shared helpers** (`cld/agent_runtime.py`, extracted from `loop.py`):
+- `wait_for_agent(session_name, vcs, cfg)` -- polls `docker ps` until container exits, reads `summary.json`.
+- `read_agent_cost(session, vcs)` -- reads `result.json` for `cost_usd`.
+- `format_duration(seconds)` -- formats as `Xm00s`.
+
+**Persona injection:** Each step declares a `persona:` name. `persona_resolve()` searches `<repo_root>/prompts/personas/` then `<cld_root>/prompts/personas/`. The resolved path is passed to `launch_agent(system_prompt_file=...)`, which mounts it as the agent's system prompt override.
+
+**Branch model:**
+- A persistent `chain_<name>` branch is created at the start and acts as the accumulator.
+- Each step's agent runs off a transient `chain_<name>_<step>` branch (parallel: `chain_<name>_<idx>_<step>`).
+- On step success, `advance_chain_branch()` moves the accumulator to the step's tip and deletes the transient branch.
+- On failure the accumulator stays at its last good position; transient branches are left for inspection.
+
+**Parallel concurrency:** `_run_parallel()` serializes `launch_agent()` calls (avoids Docker race conditions), then waits on all siblings sequentially. The effective parallelism is Docker-side: all containers run concurrently even though Python's wait loop is sequential. `CLD_CHAIN_MAX_PARALLEL` caps the number of siblings per group.
+
+**Chain YAML files** live in `chains/`. Persona files live in `prompts/personas/`. Step outputs are written to `.cld/chain-outputs/<chain-name>/` inside the agent's workspace.

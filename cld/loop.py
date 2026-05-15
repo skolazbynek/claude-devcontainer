@@ -1,6 +1,5 @@
 """Automated implement-review loop."""
 
-import json
 import os
 import subprocess
 import sys
@@ -10,6 +9,7 @@ from pathlib import Path
 from string import Template
 
 from cld.agent import launch_agent
+from cld.agent_runtime import format_duration, read_agent_cost, wait_for_agent
 from cld.config import Config
 from cld.docker import (
     build_session_name,
@@ -20,39 +20,6 @@ from cld.docker import (
     log_warn,
 )
 from cld.vcs import VcsBackend, get_backend
-
-
-# --- Agent polling ---
-
-
-def _wait_for_agent(session_name: str, vcs: VcsBackend, cfg: Config) -> dict:
-    """Block until an agent container exits, then read its summary from the VCS.
-
-    Polls Docker for the container every ``cfg.poll_interval`` seconds. Once the
-    container disappears, reads ``summary.json`` from the agent's branch.
-    """
-    start = time.monotonic()
-    while time.monotonic() - start < cfg.agent_timeout:
-        result = subprocess.run(
-            ["docker", "ps", "--filter", f"name=^{session_name}$", "--format", "{{.Status}}"],
-            capture_output=True, text=True,
-        )
-        if not result.stdout.strip():
-            break
-        time.sleep(cfg.poll_interval)
-    else:
-        subprocess.run(["docker", "stop", session_name], capture_output=True, text=True)
-        return {"status": "timeout", "session_name": session_name}
-
-    summary_raw = vcs.file_show(
-        session_name, f"agent-output-{session_name}/summary.json",
-    )
-    if not summary_raw:
-        return {"status": "unknown", "error": "No summary.json found"}
-    try:
-        return json.loads(summary_raw)
-    except json.JSONDecodeError:
-        return {"status": "unknown", "error": "Invalid summary.json"}
 
 
 # --- Review severity parsing ---
@@ -210,11 +177,6 @@ def _compose_review_prompt(
 # --- Output formatting ---
 
 
-def _format_duration(seconds: float) -> str:
-    m, s = divmod(int(seconds), 60)
-    return f"{m}m{s:02d}s"
-
-
 def _print_phase(iteration: int, max_iter: int, phase: str, session: str) -> None:
     log_info(f"[{iteration}/{max_iter}] {phase} ({session})")
 
@@ -230,19 +192,6 @@ def _print_iteration_result(iteration: int, max_iter: int, severity: dict) -> No
     is_clean = severity["critical"] == 0 and severity["major"] == 0
     action = "clean, stopping" if is_clean else "continuing"
     log_info(f"[{iteration}/{max_iter}] result: {summary} -> {action}")
-
-
-def _read_agent_cost(session: str, vcs: VcsBackend) -> float | None:
-    """Read cost_usd from a completed agent's result.json."""
-    raw = vcs.file_show(session, f"agent-output-{session}/result.json")
-    if not raw:
-        return None
-    try:
-        data = json.loads(raw)
-        cost = data.get("cost_usd")
-        return float(cost) if cost is not None else None
-    except (json.JSONDecodeError, ValueError):
-        return None
 
 
 def _print_exit_report(
@@ -363,6 +312,7 @@ def run_loop(
     final_reason = "max iterations reached"
     final_iteration = 0
     total_cost_usd = 0.0
+    current_cid: str | None = None
 
     try:
         for iteration in range(1, max_iterations + 1):
@@ -386,15 +336,20 @@ def run_loop(
                 session_name=impl_session,
                 quiet=True,
             )
+            current_cid = impl_result["container_id"]
 
-            impl_summary = _wait_for_agent(impl_result["session_name"], vcs, cfg)
-            impl_cost = _read_agent_cost(impl_result["session_name"], vcs)
+            impl_summary = wait_for_agent(impl_result["session_name"], vcs, cfg)
+            impl_cost = read_agent_cost(impl_result["session_name"], vcs)
             if impl_cost is not None:
                 total_cost_usd += impl_cost
             duration = time.monotonic() - phase_start
-            log_info(f"[{iteration}/{max_iterations}] implementing... done ({_format_duration(duration)})")
+            log_info(f"[{iteration}/{max_iterations}] implementing... done ({format_duration(duration)})")
 
             impl_status = impl_summary.get("status", "unknown")
+            if impl_status == "no_changes":
+                log_info(f"[{iteration}/{max_iterations}] No changes made — task already complete")
+                final_reason = "no changes (task already complete)"
+                break
             if impl_status != "success":
                 log_error(f"Implementer {impl_status}: {impl_summary.get('error', '')}")
                 final_reason = f"implementer {impl_status} (iteration {iteration})"
@@ -421,13 +376,14 @@ def run_loop(
                 session_name=review_session,
                 quiet=True,
             )
+            current_cid = review_result["container_id"]
 
-            review_summary = _wait_for_agent(review_result["session_name"], vcs, cfg)
-            review_cost = _read_agent_cost(review_result["session_name"], vcs)
+            review_summary = wait_for_agent(review_result["session_name"], vcs, cfg)
+            review_cost = read_agent_cost(review_result["session_name"], vcs)
             if review_cost is not None:
                 total_cost_usd += review_cost
             duration = time.monotonic() - phase_start
-            log_info(f"[{iteration}/{max_iterations}] reviewing... done ({_format_duration(duration)})")
+            log_info(f"[{iteration}/{max_iterations}] reviewing... done ({format_duration(duration)})")
 
             # --- EVALUATE ---
             review_content = vcs.file_show(
@@ -466,6 +422,9 @@ def run_loop(
         print()
         log_warn("Interrupted")
         final_reason = "interrupted"
+        if current_cid:
+            log_warn(f"Stopping container {current_cid[:12]}...")
+            subprocess.run(["docker", "stop", "--time=10", current_cid], capture_output=True)
 
     _print_exit_report(loop_branch, final_iteration, max_iterations, final_reason, vcs, total_cost_usd)
     _cleanup_temp_files(repo_root)

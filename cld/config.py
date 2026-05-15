@@ -44,6 +44,8 @@ _TOML_KEYS = {
     "home_mounts_devcontainer",
     "trunk_candidates",
     "ssl_certs_path",
+    "chain_max_parallel",
+    "chain_default_model",
 }
 
 
@@ -161,6 +163,10 @@ class Config:
     agent_timeout: int = 1800
     poll_interval: int = 30
 
+    # Chain orchestration tunables
+    chain_max_parallel: int = 4
+    chain_default_model: str = ""
+
     # Diagnostics
     debug: bool = False
 
@@ -199,4 +205,6 @@ class Config:
                 ".gitconfig", ".bashrc", ".config/nvim", ".local/state/nvim", ".cache/nvim",
             ))),
             trunk_candidates=tuple(layered.get("trunk_candidates", ("main", "master", "trunk"))),
+            chain_max_parallel=_env_int("CLD_CHAIN_MAX_PARALLEL", int(layered.get("chain_max_parallel", 4))),
+            chain_default_model=_env_str("CLD_CHAIN_DEFAULT_MODEL", layered.get("chain_default_model", "")),
         )

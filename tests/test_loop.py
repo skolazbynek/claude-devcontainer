@@ -5,8 +5,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from cld.agent_runtime import format_duration
 from cld.config import Config
-from cld.loop import _format_duration, _parse_review_severity, run_loop
+from cld.loop import _parse_review_severity, run_loop
 
 
 class TestParseReviewSeverity:
@@ -62,7 +63,7 @@ class TestFormatDuration:
         ids=["zero", "seconds-only", "one-minute-one-change", "simple", "just-under-hour"],
     )
     def test_formatting(self, seconds, expected):
-        assert _format_duration(seconds) == expected
+        assert format_duration(seconds) == expected
 
 
 # --- run_loop orchestration tests ---------------------------------------------
@@ -90,9 +91,9 @@ def _install_loop_mocks(monkeypatch, vcs, wait_results):
     la_mock = MagicMock()
     wait_mock = MagicMock(side_effect=list(wait_results))
     monkeypatch.setattr("cld.loop.launch_agent", la_mock)
-    monkeypatch.setattr("cld.loop._wait_for_agent", wait_mock)
+    monkeypatch.setattr("cld.loop.wait_for_agent", wait_mock)
     monkeypatch.setattr("cld.loop.get_backend", lambda *_a, **_kw: vcs)
-    monkeypatch.setattr("cld.loop._read_agent_cost", lambda *a, **k: 0.0)
+    monkeypatch.setattr("cld.loop.read_agent_cost", lambda *a, **k: 0.0)
     monkeypatch.chdir(vcs.repo_root)
     return la_mock, wait_mock
 

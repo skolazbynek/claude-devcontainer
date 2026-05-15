@@ -1,0 +1,16 @@
+name: architect-implement-review
+description: Design first, implement, then review.
+
+defaults:
+  model: sonnet
+
+steps:
+  - name: design
+    persona: architect
+
+  - name: implement
+    persona: implementer
+    model: opus
+
+  - name: review
+    persona: reviewer

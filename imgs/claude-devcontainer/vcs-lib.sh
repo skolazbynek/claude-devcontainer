@@ -37,14 +37,14 @@ vcs_create_workspace() {
     local name="$1" path="$2" revision="${3:-}"
 
     if [ "$VCS_TYPE" = "jj" ]; then
-        local cmd="jj workspace add --name $name"
-        [ -n "$revision" ] && cmd="$cmd -r $revision"
-        cmd="$cmd $path"
-        eval "$cmd" 2>&1
+        local cmd=("jj" "workspace" "add" "--name" "$name")
+        [ -n "$revision" ] && cmd+=("-r" "$revision")
+        cmd+=("$path")
+        "${cmd[@]}" 2>&1
     else
-        local cmd="git worktree add -b $name $path"
-        [ -n "$revision" ] && cmd="$cmd $revision"
-        eval "$cmd" 2>&1
+        local cmd=("git" "worktree" "add" "-b" "$name" "$path")
+        [ -n "$revision" ] && cmd+=("$revision")
+        "${cmd[@]}" 2>&1
     fi
 }
 
@@ -73,9 +73,9 @@ vcs_create_branch() {
     local name="$1" revision="${2:-}"
 
     if [ "$VCS_TYPE" = "jj" ]; then
-        local cmd="jj bookmark create $name"
-        [ -n "$revision" ] && cmd="$cmd -r $revision"
-        eval "$cmd" 2>&1
+        local cmd=("jj" "bookmark" "create" "$name")
+        [ -n "$revision" ] && cmd+=("-r" "$revision")
+        "${cmd[@]}" 2>&1
     else
         # In git worktree context, branch is already created by worktree add.
         # This is for additional branches if needed.
