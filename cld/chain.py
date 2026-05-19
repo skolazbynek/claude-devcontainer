@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import logging
 import re
-import sys
 import time
 import yaml
 from dataclasses import dataclass
@@ -15,12 +15,10 @@ from cld.agent import launch_agent
 from cld.agent_runtime import wait_for_agent, read_agent_cost, format_duration
 from cld.config import Config
 from cld.docker import cld_tmpdir, find_repo_root
+from cld.log import get_logger
 from cld.vcs import get_backend
 
-
-def _dbg(cfg: Config, msg: str) -> None:
-    if cfg.debug:
-        print(f"[chain] {msg}", file=sys.stderr, flush=True)
+log = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -346,9 +344,9 @@ def execute_step(
         prior_outputs=prior_outputs,
         repo_root=repo_root, cld_root=cld_root,
     )
-    _dbg(cfg, f"composed task file: {task_file}")
-    if cfg.debug:
-        _dbg(cfg, task_file.read_text()[:500])
+    log.debug("composed task file: %s", task_file)
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug("%s", task_file.read_text()[:500])
     model = step.model or chain.defaults.model or cfg.chain_default_model or ""
     revision = chain_branch(chain)
     start = time.monotonic()
@@ -406,7 +404,8 @@ def run_chain(
 
     chain = load_chain(chain_file)
     validate_chain(chain, repo_root, cld_root)
-    _dbg(cfg, f"run_chain: name={chain.name} file={chain_file} steps={len(chain.steps)}")
+    log.info("Chain '%s' starting with %d step(s)", chain.name, len(chain.steps))
+    log.debug("run_chain: name=%s file=%s steps=%d", chain.name, chain_file, len(chain.steps))
 
     default_rev = "@" if vcs.name == "jj" else "HEAD"
     start = revision or default_rev
@@ -421,7 +420,8 @@ def run_chain(
     try:
         for i, item in enumerate(chain.steps):
             if isinstance(item, ParallelGroup):
-                _dbg(cfg, f"parallel group ({len(item.siblings)} siblings) launching")
+                log.info("Parallel group %d: launching %d siblings", i, len(item.siblings))
+                log.debug("parallel group (%d siblings) launching", len(item.siblings))
                 prior_outputs = _gather_prior_outputs(chain, item, results, i)
                 step_initial = initial_text or None
                 group_results = _run_parallel(
@@ -451,11 +451,14 @@ def run_chain(
             step = item
             session = step_session(chain, step)
             model_eff = step.model or chain.defaults.model or cfg.chain_default_model or ""
-            _dbg(
-                cfg,
-                f"step {i+1}/{len(chain.steps)} '{step.name}' launching"
-                f" (persona={step.persona}, model={model_eff},"
-                f" revision={chain_branch(chain)}, session={session})",
+            log.info(
+                "Step %d/%d '%s' launching (persona=%s, model=%s)",
+                i + 1, len(chain.steps), step.name, step.persona, model_eff,
+            )
+            log.debug(
+                "step %d/%d '%s' launching (persona=%s, model=%s, revision=%s, session=%s)",
+                i + 1, len(chain.steps), step.name, step.persona, model_eff,
+                chain_branch(chain), session,
             )
             prior_outputs = _gather_prior_outputs(chain, step, results, i)
             step_initial = initial_text or None
@@ -469,11 +472,14 @@ def run_chain(
                 cld_root=cld_root,
             )
             results.append(result)
-            _dbg(
-                cfg,
-                f"step '{step.name}' completed status={result.status}"
-                f" cost=${result.cost_usd:.4f} duration={result.duration_seconds:.1f}s"
-                f" output_bytes={len(result.output_text)}",
+            log.info(
+                "Step '%s' done: status=%s, cost=$%.4f, duration=%.1fs",
+                step.name, result.status, result.cost_usd, result.duration_seconds,
+            )
+            log.debug(
+                "step '%s' completed status=%s cost=$%.4f duration=%.1fs output_bytes=%d",
+                step.name, result.status, result.cost_usd, result.duration_seconds,
+                len(result.output_text),
             )
 
             _TERMINAL_FAILURES = {"failed", "commit_failed", "timeout"}
@@ -482,16 +488,21 @@ def run_chain(
                 failure_reason = f"step '{step.name}' {result.status}"
                 if first_line:
                     failure_reason += f": {first_line}"
-                _dbg(cfg, f"step '{step.name}' FAILED ({result.status})")
+                log.error("Step '%s' failed: %s", step.name, result.status)
+                if first_line:
+                    log.error("%s", first_line)
                 break
             if result.status not in {"success", "no_changes", "unknown"}:
-                _dbg(cfg, f"step '{step.name}' unrecognised status={result.status!r}, treating as success")
+                log.warning(
+                    "Step '%s' has unrecognised status %r; treating as success",
+                    step.name, result.status,
+                )
 
             advance_chain_branch(
                 chain, vcs, successful_session=session,
                 transient_sessions=[session],
             )
-            _dbg(cfg, f"chain branch advanced to {session}")
+            log.debug("chain branch advanced to %s", session)
     except KeyboardInterrupt:
         failure_reason = "interrupted"
 
@@ -585,7 +596,7 @@ def _run_parallel(
             repo_root=repo_root, cld_root=cld_root,
         )
         model = sibling.model or chain.defaults.model or cfg.chain_default_model or ""
-        _dbg(cfg, f"parallel sibling '{sibling.name}' launching session={session}")
+        log.debug("parallel sibling '%s' launching session=%s", sibling.name, session)
         launch_agent(
             cfg,
             task_file=task_file,

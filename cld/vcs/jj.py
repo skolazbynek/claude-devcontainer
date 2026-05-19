@@ -3,7 +3,10 @@
 import subprocess
 from pathlib import Path
 
+from cld.log import get_logger
 from cld.vcs.base import VcsBackend
+
+log = get_logger(__name__)
 
 
 class JjBackend(VcsBackend):
@@ -47,13 +50,22 @@ class JjBackend(VcsBackend):
     @staticmethod
     def _current_workspace_name(path: Path) -> str:
         """Return the jj workspace name for the working directory at *path*."""
+        args = ["--no-pager", "workspace", "list", "--color=never",
+                "--ignore-working-copy", "-T",
+                'if(target.current_working_copy(), name ++ "\\n")']
+        log.debug("$ jj %s", " ".join(args))
         result = subprocess.run(
-            ["jj", "--no-pager", "workspace", "list", "--color=never",
-             "--ignore-working-copy", "-T",
-             'if(target.current_working_copy(), name ++ "\\n")'],
+            ["jj"] + args,
             capture_output=True, text=True, cwd=str(path),
         )
+        log.debug("-> rc=%d", result.returncode)
         if result.returncode != 0:
+            log.warning(
+                "jj %s failed (rc=%d): %s",
+                " ".join(args),
+                result.returncode,
+                (result.stderr or "")[:400],
+            )
             return ""
         lines = result.stdout.strip().splitlines()
         return lines[0] if lines else ""

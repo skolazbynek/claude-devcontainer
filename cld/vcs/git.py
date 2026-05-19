@@ -3,7 +3,10 @@
 import subprocess
 from pathlib import Path
 
+from cld.log import get_logger
 from cld.vcs.base import VcsBackend
+
+log = get_logger(__name__)
 
 
 class GitBackend(VcsBackend):
@@ -40,23 +43,35 @@ class GitBackend(VcsBackend):
         """If path is a git worktree, resolve to the main repository root."""
         if not (path / ".git").is_file():
             return path
-        result = subprocess.run(
-            ["git", "-C", str(path), "rev-parse",
-             "--path-format=absolute", "--git-common-dir"],
-            capture_output=True, text=True,
-        )
+        args = ["-C", str(path), "rev-parse",
+                "--path-format=absolute", "--git-common-dir"]
+        log.debug("$ git %s", " ".join(args))
+        result = subprocess.run(["git"] + args, capture_output=True, text=True)
+        log.debug("-> rc=%d", result.returncode)
         if result.returncode != 0:
+            log.warning(
+                "git %s failed (rc=%d): %s",
+                " ".join(args),
+                result.returncode,
+                (result.stderr or "")[:400],
+            )
             return path
         return Path(result.stdout.strip()).parent
 
     @staticmethod
     def _current_worktree_branch(path: Path) -> str:
         """Return the branch name checked out in the worktree at *path*."""
-        result = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True,
-        )
+        args = ["-C", str(path), "rev-parse", "--abbrev-ref", "HEAD"]
+        log.debug("$ git %s", " ".join(args))
+        result = subprocess.run(["git"] + args, capture_output=True, text=True)
+        log.debug("-> rc=%d", result.returncode)
         if result.returncode != 0:
+            log.warning(
+                "git %s failed (rc=%d): %s",
+                " ".join(args),
+                result.returncode,
+                (result.stderr or "")[:400],
+            )
             return ""
         branch = result.stdout.strip()
         return branch if branch != "HEAD" else ""

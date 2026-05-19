@@ -19,6 +19,10 @@ poll_interval = 30     # seconds between docker-ps polls in the loop
 # Diagnostics
 debug = false
 
+# Logging
+# log_level = "INFO"          # DEBUG / INFO / WARNING / ERROR
+# log_color = "auto"          # auto / always / never
+
 # RO $HOME paths staged into every container (relative to $HOME).
 # Extend or narrow this list to match your actual tooling.
 home_mounts_always = [

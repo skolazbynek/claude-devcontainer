@@ -15,11 +15,11 @@ from cld.docker import (
     build_session_name,
     cld_tmpdir,
     find_repo_root,
-    log_error,
-    log_info,
-    log_warn,
 )
+from cld.log import get_logger
 from cld.vcs import VcsBackend, get_backend
+
+log = get_logger(__name__)
 
 
 # --- Review severity parsing ---
@@ -147,10 +147,10 @@ def _compose_review_prompt(
     repo_root = vcs.repo_root
     diff_content = vcs.diff_between(start_commit, loop_branch)
     if diff_content.startswith("Error:"):
-        log_error(f"Failed to generate diff: {diff_content}")
+        log.error(f"Failed to generate diff: {diff_content}")
         sys.exit(1)
     if not diff_content.strip():
-        log_error("Generated diff is empty -- nothing to review")
+        log.error("Generated diff is empty -- nothing to review")
         sys.exit(1)
 
     diff_file = cld_tmpdir(repo_root) / f"loop-diff-iter{iteration}.patch"
@@ -178,7 +178,7 @@ def _compose_review_prompt(
 
 
 def _print_phase(iteration: int, max_iter: int, phase: str, session: str) -> None:
-    log_info(f"[{iteration}/{max_iter}] {phase} ({session})")
+    log.info(f"[{iteration}/{max_iter}] {phase} ({session})")
 
 
 def _print_iteration_result(iteration: int, max_iter: int, severity: dict) -> None:
@@ -191,7 +191,7 @@ def _print_iteration_result(iteration: int, max_iter: int, severity: dict) -> No
     summary = ", ".join(parts) if parts else "no findings"
     is_clean = severity["critical"] == 0 and severity["major"] == 0
     action = "clean, stopping" if is_clean else "continuing"
-    log_info(f"[{iteration}/{max_iter}] result: {summary} -> {action}")
+    log.info(f"[{iteration}/{max_iter}] result: {summary} -> {action}")
 
 
 def _print_exit_report(
@@ -306,7 +306,7 @@ def run_loop(
 
     vcs.create_branch(loop_branch, start_commit)
 
-    log_info(f"Loop '{loop_branch}' started at {start_commit[:12]}")
+    log.info(f"Loop '{loop_branch}' started at {start_commit[:12]}")
 
     review_content: str | None = None
     final_reason = "max iterations reached"
@@ -343,7 +343,7 @@ def run_loop(
             if impl_cost is not None:
                 total_cost_usd += impl_cost
             duration = time.monotonic() - phase_start
-            log_info(f"[{iteration}/{max_iterations}] implementing... done ({format_duration(duration)})")
+            log.info(f"[{iteration}/{max_iterations}] implementing... done ({format_duration(duration)})")
 
             impl_status = impl_summary.get("status", "unknown")
             if impl_status == "no_changes":
@@ -351,7 +351,7 @@ def run_loop(
                 final_reason = "no changes (task already complete)"
                 break
             if impl_status != "success":
-                log_error(f"Implementer {impl_status}: {impl_summary.get('error', '')}")
+                log.error(f"Implementer {impl_status}: {impl_summary.get('error', '')}")
                 final_reason = f"implementer {impl_status} (iteration {iteration})"
                 if iteration == 1:
                     vcs.delete_branch(loop_branch)
@@ -383,7 +383,7 @@ def run_loop(
             if review_cost is not None:
                 total_cost_usd += review_cost
             duration = time.monotonic() - phase_start
-            log_info(f"[{iteration}/{max_iterations}] reviewing... done ({format_duration(duration)})")
+            log.info(f"[{iteration}/{max_iterations}] reviewing... done ({format_duration(duration)})")
 
             # --- EVALUATE ---
             review_content = vcs.file_show(
@@ -391,7 +391,7 @@ def run_loop(
             )
 
             if not review_content:
-                log_warn("Reviewer produced no review file")
+                log.warning("Reviewer produced no review file")
                 if review_summary.get("status") == "success":
                     vcs.set_branch(loop_branch, review_session)
                 vcs.delete_branch(review_session)
@@ -420,7 +420,7 @@ def run_loop(
 
     except KeyboardInterrupt:
         print()
-        log_warn("Interrupted")
+        log.warning("Interrupted")
         final_reason = "interrupted"
         if current_cid:
             log_warn(f"Stopping container {current_cid[:12]}...")

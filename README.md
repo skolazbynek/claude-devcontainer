@@ -337,7 +337,23 @@ debug = false
 | `CLD_POLL_INTERVAL` | `30` | Loop's docker-ps poll interval (seconds) |
 | `CLD_CHAIN_MAX_PARALLEL` | `4` | Max agents running concurrently in a parallel chain group |
 | `CLD_CHAIN_DEFAULT_MODEL` | `""` | Model override for all chain steps; empty = use chain YAML default |
-| `CLD_DEBUG` | `false` | Diagnostics flag |
+| `CLD_LOG_LEVEL` | `INFO` | Root level for the `cld` logger hierarchy (DEBUG/INFO/WARNING/ERROR) |
+| `CLD_LOG_COLOR` | `auto` | ANSI color in log output: `auto` / `always` / `never` |
+| `CLD_DEBUG` | `false` | Diagnostics flag. Back-compat alias: truthy ⇒ `CLD_LOG_LEVEL=DEBUG` |
+
+### Logging
+
+`cld` writes diagnostic output via the stdlib `logging` module. All log records go to **stderr**; stdout is reserved for user-facing deliverable output (final reports, list rows, prompts).
+
+| Env var | Default | Values |
+|---|---|---|
+| `CLD_LOG_LEVEL` | `INFO` | DEBUG / INFO / WARNING / ERROR |
+| `CLD_LOG_COLOR` | `auto` | auto / always / never |
+| `CLD_DEBUG` | `false` | Back-compat alias: truthy ⇒ `CLD_LOG_LEVEL=DEBUG` |
+
+The same keys can be set in TOML: `log_level`, `log_color`.
+
+At DEBUG, every subprocess invocation (Docker, jj, git) and every VCS operation is logged with full command and exit code. At INFO (default), only major lifecycle events appear (agent starts/stops, image builds, chain steps).
 
 ## Development
 

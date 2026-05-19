@@ -4,6 +4,10 @@ import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+from cld.log import get_logger
+
+log = get_logger(__name__)
+
 
 class VcsBackend(ABC):
     """Backend-agnostic interface for version control operations.
@@ -38,7 +42,19 @@ class VcsBackend(ABC):
         """Execute a raw VCS command in workspace_path (defaults to repo_root)."""
         defaults = {"capture_output": True, "text": True, "cwd": str(self.workspace_path)}
         defaults.update(kwargs)
-        return subprocess.run([self.name] + args, **defaults)
+        log.debug("$ %s %s", self.name, " ".join(args))
+        result = subprocess.run([self.name] + args, **defaults)
+        log.debug("-> rc=%d", result.returncode)
+        if result.returncode != 0:
+            stderr = result.stderr if isinstance(result.stderr, str) else ""
+            log.warning(
+                "%s %s failed (rc=%d): %s",
+                self.name,
+                " ".join(args),
+                result.returncode,
+                stderr[:400] if stderr else "",
+            )
+        return result
 
     # -- repository discovery -------------------------------------------------
 

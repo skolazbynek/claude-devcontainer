@@ -9,7 +9,10 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from cld.docker import find_repo_root
+from cld.log import setup_logging, get_logger
 from cld.vcs import get_backend
+
+log = get_logger(__name__)
 
 mcp = FastMCP("claude-orchestrator")
 
@@ -82,6 +85,14 @@ def launch_agent(task_file: str, name: str = "", model: str = "", revision: str 
     """
     from cld.agent import launch_agent as _launch_agent
 
+    log.info(
+        "MCP tool: launch_agent (task_kind=%s, task_size=%d, name=%s, model=%s)",
+        "inline" if task_file.startswith("inline:") else "file",
+        len(task_file),
+        name or "<auto>",
+        model or "<default>",
+    )
+
     repo_root = find_repo_root()
 
     # Handle inline task creation
@@ -116,6 +127,7 @@ def launch_agent(task_file: str, name: str = "", model: str = "", revision: str 
             name=name,
             model=model,
             revision=revision,
+            quiet=True,
         )
     except SystemExit as e:
         return {"error": "Agent launch failed", "exit_code": e.code}
@@ -129,6 +141,7 @@ def list_agents() -> list[dict]:
     This also enumerates VCS branches matching agent_*/review_*/loop_* and merges them in.
     Each entry is {session_name, status: 'running'|'completed', container_id?, running_for?}.
     """
+    log.info("MCP tool: list_agents")
     result = _run([
         "docker", "ps",
         "--filter", "ancestor=claude-agent:latest",
@@ -172,6 +185,11 @@ def check_status(session_name: str, include_result: bool = False) -> dict:
     After completion: container is gone (--rm), reads summary from VCS branch/bookmark.
     Set include_result=True to also return result.json (can be large).
     """
+    log.info(
+        "MCP tool: check_status (session=%s, include_result=%s)",
+        session_name,
+        include_result,
+    )
     vcs = get_backend()
     info: dict = {"session_name": session_name}
 
@@ -224,6 +242,7 @@ def check_status(session_name: str, include_result: bool = False) -> dict:
 @mcp.tool()
 def stop_agent(session_name: str) -> dict:
     """Stop a running agent container."""
+    log.info("MCP tool: stop_agent (session=%s)", session_name)
     result = _run(["docker", "stop", session_name])
     if result.returncode != 0:
         return {"error": result.stderr.strip(), "exit_code": result.returncode}
@@ -236,6 +255,7 @@ def stop_agent(session_name: str) -> dict:
 @mcp.tool()
 def get_log(session_name: str, tail: int = 80) -> str:
     """Get the tail of an agent's log from its VCS branch/bookmark."""
+    log.info("MCP tool: get_log (session=%s, tail=%d)", session_name, tail)
     vcs = get_backend()
     content = vcs.file_show(session_name, f"agent-output-{session_name}/agent.log")
     if content is None:
@@ -250,6 +270,7 @@ def get_log(session_name: str, tail: int = 80) -> str:
 @mcp.tool()
 def list_prompts() -> list[dict]:
     """List available task prompt files from both builtin and workspace prompts."""
+    log.info("MCP tool: list_prompts")
     prompts: list[dict] = []
 
     builtin = _builtin_prompts_dir()
@@ -279,6 +300,7 @@ def list_prompts() -> list[dict]:
 @mcp.tool()
 def read_prompt(name: str) -> str:
     """Read a task prompt file by name. Searches workspace first, then builtin."""
+    log.info("MCP tool: read_prompt (name=%s)", name)
     try:
         workspace = _workspace_prompts_dir() / name
         if workspace.is_file():
@@ -299,6 +321,7 @@ def save_prompt(name: str, content: str) -> dict:
 
     Returns the saved path, which can be passed directly to launch_agent.
     """
+    log.info("MCP tool: save_prompt (name=%s, size=%d)", name, len(content))
     prompts_dir = _workspace_prompts_dir()
     prompts_dir.mkdir(exist_ok=True)
     if not name.endswith(".md"):
@@ -319,6 +342,7 @@ def vcs_log(revset: str = "", template: str = "") -> str:
     For git: revset is a git revision spec, template is a --format string.
     Defaults to current working copy / HEAD.
     """
+    log.info("MCP tool: vcs_log (revset=%s, template_size=%d)", revset or "<default>", len(template))
     vcs = get_backend()
     default_rev = "@" if vcs.name == "jj" else "HEAD"
     return vcs.log(revset or default_rev, template)
@@ -327,6 +351,7 @@ def vcs_log(revset: str = "", template: str = "") -> str:
 @mcp.tool()
 def vcs_branch_list() -> str:
     """List VCS branches (jj bookmarks or git branches)."""
+    log.info("MCP tool: vcs_branch_list")
     return get_backend().list_branches()
 
 
@@ -337,6 +362,11 @@ def vcs_new(revset: str = "", message: str = "") -> str:
     For jj: creates a new empty change. For git: checks out the revision.
     *message* sets the description on the new change (jj) or is ignored (git).
     """
+    log.info(
+        "MCP tool: vcs_new (revset=%s, message_size=%d)",
+        revset or "<default>",
+        len(message),
+    )
     vcs = get_backend()
     default_rev = "@" if vcs.name == "jj" else "HEAD"
     output = vcs.new_change(revset or default_rev)
@@ -353,6 +383,7 @@ def vcs_commit(message: str) -> str:
 
     For jj: commits the working copy. For git: stages all changes then commits.
     """
+    log.info("MCP tool: vcs_commit (message_size=%d)", len(message))
     vcs = get_backend()
     return vcs.commit(message) or "OK"
 
@@ -364,6 +395,11 @@ def vcs_describe(revset: str = "", message: str = "") -> str:
     Argument order matches the backend's describe(revision, message).
     For jj: updates the change description. For git: rewrites the commit message.
     """
+    log.info(
+        "MCP tool: vcs_describe (revset=%s, message_size=%d)",
+        revset or "<default>",
+        len(message),
+    )
     vcs = get_backend()
     default_rev = "@" if vcs.name == "jj" else "HEAD"
     return vcs.describe(revset or default_rev, message) or "OK"
@@ -376,6 +412,7 @@ def vcs_diff(revset: str = "", stat: bool = False) -> str:
     Without revset: shows working copy / uncommitted changes.
     With revset: shows changes introduced by that revision.
     """
+    log.info("MCP tool: vcs_diff (revset=%s, stat=%s)", revset or "<default>", stat)
     vcs = get_backend()
     output = vcs.diff(revset, stat=stat)
     return output[:50000] if output else "(no changes)"
@@ -421,4 +458,7 @@ def jj_diff(revset: str = "@", stat: bool = False) -> str:
 
 
 if __name__ == "__main__":
+    from cld.config import Config
+    setup_logging(Config.from_env(), force_stderr=True)
+    log.info("MCP orchestrator starting")
     mcp.run()

@@ -17,14 +17,14 @@ from cld.docker import (
     cld_tmpdir,
     ensure_image,
     find_repo_context,
-    log_error,
-    log_info,
-    log_warn,
     require_docker,
     to_host_path,
     WORKSPACE_BASE,
 )
+from cld.log import get_logger
 from cld.vcs import get_backend
+
+log = get_logger(__name__)
 
 
 def _wait_for_workspace(vcs, session: str, container_id: str, timeout: int = 60) -> bool:
@@ -87,7 +87,7 @@ def launch_agent(
     """
     require_docker()
     if not task_file and not inline_prompt:
-        log_error("No task file or prompt provided")
+        log.error("No task file or prompt provided")
         sys.exit(1)
 
     repo_root, workspace_rev = find_repo_context()
@@ -105,6 +105,7 @@ def launch_agent(
             cld_root,
             base_extra_paths(cld_root),
         ),
+        quiet=quiet,
     )
 
     session = session_name or build_session_name("agent", name)
@@ -130,12 +131,12 @@ def launch_agent(
             args += ["-e", f"{k}={v}"]
 
     if not quiet:
-        log_info("Starting agent in background...")
+        log.info("Starting agent in background...")
         if task_file:
-            log_info(f"Task file: {task_file}")
+            log.info(f"Task file: {task_file}")
         if inline_prompt:
-            log_info("Inline prompt: provided")
-        log_info(f"Repository: {repo_root}")
+            log.info("Inline prompt: provided")
+        log.info(f"Repository: {repo_root}")
         print()
 
     container_id = subprocess.run(
@@ -144,16 +145,23 @@ def launch_agent(
     )
 
     if container_id.returncode != 0:
-        log_error(f"Failed to start container: {container_id.stderr.strip()}")
+        log.error(f"Failed to start container: {container_id.stderr.strip()}")
         sys.exit(1)
 
     cid = container_id.stdout.strip()
 
     if not quiet:
-        log_info("Waiting for workspace to initialize...")
-    if not _wait_for_workspace(vcs, session, cid):
-        log_warn(f"Workspace '{session}' not visible after waiting — container may have crashed")
-        log_warn(f"Check logs: docker logs {cid}")
+        log.info("Waiting for workspace to initialize...")
+    workspace_timeout = 60
+    log.debug("Waiting for workspace %s (timeout=%ds)", session, workspace_timeout)
+    wait_start = time.monotonic()
+    workspace_ready = _wait_for_workspace(vcs, session, cid, timeout=workspace_timeout)
+    elapsed = time.monotonic() - wait_start
+    if workspace_ready:
+        log.info("Workspace %s ready after %.1fs", session, elapsed)
+    else:
+        log.warning(f"Workspace '{session}' not visible after waiting — container may have crashed")
+        log.warning(f"Check logs: docker logs {cid}")
 
     if not quiet:
         vcs_name = vcs.name
@@ -203,25 +211,25 @@ def launch_review(
     # Generate diff from fork point to feature branch
     tmp = cld_tmpdir(repo_root)
     diff_file = tmp / f"review-diff-{session}.patch"
-    log_info(f"Generating diff: fork_point({feature_branch}, {trunk_branch}) -> {feature_branch}")
+    log.info(f"Generating diff: fork_point({feature_branch}, {trunk_branch}) -> {feature_branch}")
 
     fork = vcs.fork_point(feature_branch, trunk_branch)
     diff_content = vcs.diff_between(fork, feature_branch)
 
     if diff_content.startswith("Error:"):
-        log_error(f"Failed to generate diff: {diff_content}")
+        log.error(f"Failed to generate diff: {diff_content}")
         sys.exit(1)
     if not diff_content.strip():
-        log_error("Generated diff is empty")
+        log.error("Generated diff is empty")
         sys.exit(1)
 
     diff_file.write_text(diff_content)
-    log_info(f"Diff saved to: {diff_file}")
+    log.info(f"Diff saved to: {diff_file}")
 
     # Create task from template
     template_path = cld_root / "imgs/claude-agent-review/review-template.md"
     if not template_path.is_file():
-        log_error(f"Template not found: {template_path}")
+        log.error(f"Template not found: {template_path}")
         sys.exit(1)
 
     task_content = Template(template_path.read_text()).safe_substitute(
@@ -235,7 +243,7 @@ def launch_review(
         dir=tmp,
     ).name)
     task_file.write_text(task_content)
-    log_info(f"Task file created: {task_file}")
+    log.info(f"Task file created: {task_file}")
     print()
 
     return launch_agent(

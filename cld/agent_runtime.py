@@ -5,12 +5,20 @@ import subprocess
 import time
 
 from cld.config import Config
+from cld.log import get_logger
 from cld.vcs import VcsBackend
+
+log = get_logger(__name__)
 
 
 def wait_for_agent(session_name: str, vcs: VcsBackend, cfg: Config) -> dict:
+    log.info(
+        "Waiting for agent %s (timeout=%ds, poll=%ds)",
+        session_name, cfg.agent_timeout, cfg.poll_interval,
+    )
     start = time.monotonic()
     while time.monotonic() - start < cfg.agent_timeout:
+        log.debug("polling %s (elapsed=%.0fs)", session_name, time.monotonic() - start)
         result = subprocess.run(
             ["docker", "ps", "--filter", f"name=^{session_name}$", "--format", "{{.Status}}"],
             capture_output=True, text=True,
@@ -19,6 +27,10 @@ def wait_for_agent(session_name: str, vcs: VcsBackend, cfg: Config) -> dict:
             break
         time.sleep(cfg.poll_interval)
     else:
+        log.warning(
+            "Agent %s timed out after %ds; stopping container",
+            session_name, cfg.agent_timeout,
+        )
         subprocess.run(["docker", "stop", session_name], capture_output=True, text=True)
         return {"status": "timeout", "session_name": session_name}
 
@@ -26,22 +38,33 @@ def wait_for_agent(session_name: str, vcs: VcsBackend, cfg: Config) -> dict:
         session_name, f"agent-output-{session_name}/summary.json",
     )
     if not summary_raw:
+        log.warning("Agent %s: no summary.json found", session_name)
         return {"status": "unknown", "error": "No summary.json found"}
     try:
-        return json.loads(summary_raw)
+        summary = json.loads(summary_raw)
     except json.JSONDecodeError:
+        log.warning("Agent %s: invalid summary.json", session_name)
         return {"status": "unknown", "error": "Invalid summary.json"}
+    log.info("Agent %s completed: status=%s", session_name, summary.get("status"))
+    return summary
 
 
 def read_agent_cost(session: str, vcs: VcsBackend) -> float | None:
     raw = vcs.file_show(session, f"agent-output-{session}/result.json")
     if not raw:
+        log.debug("read cost for %s: unavailable", session)
         return None
     try:
         data = json.loads(raw)
         cost = data.get("cost_usd")
-        return float(cost) if cost is not None else None
+        if cost is None:
+            log.debug("read cost for %s: unavailable", session)
+            return None
+        value = float(cost)
+        log.debug("read cost for %s: $%.4f", session, value)
+        return value
     except (json.JSONDecodeError, ValueError):
+        log.debug("read cost for %s: unavailable", session)
         return None
 
 

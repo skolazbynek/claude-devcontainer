@@ -83,7 +83,7 @@ All Python-side runtime tunables live in `cld/config.py:Config` (frozen dataclas
 
 **Resolution order (lowest → highest priority):** dataclass defaults < user TOML (`~/.config/cld/config.toml`) < project TOML (`<repo_root>/.cld.config`, walked up from cwd) < `.env` in cwd < `CLD_*` env vars.
 
-TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `devcontainer_image`, `agent_image`, `mysql_config`, `ssl_certs_path`, `agent_timeout`, `poll_interval`, `debug`, `home_mounts_always`, `home_mounts_devcontainer`, `trunk_candidates`, `chain_max_parallel`, `chain_default_model`). Array fields accept TOML arrays of strings. Unknown keys are warned about on stderr and ignored. `host_project_dir` / `host_home` are container-internal and not configurable via TOML.
+TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `devcontainer_image`, `agent_image`, `mysql_config`, `ssl_certs_path`, `agent_timeout`, `poll_interval`, `debug`, `home_mounts_always`, `home_mounts_devcontainer`, `trunk_candidates`, `chain_max_parallel`, `chain_default_model`, `log_level`, `log_color`). Array fields accept TOML arrays of strings. Unknown keys are warned about on stderr and ignored. `host_project_dir` / `host_home` are container-internal and not configurable via TOML.
 
 `CLD_*` env vars (read by `Config.from_env`):
 
@@ -100,7 +100,9 @@ TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `de
 | `CLD_POLL_INTERVAL` | `30` | Loop's docker-ps poll interval (seconds) |
 | `CLD_CHAIN_MAX_PARALLEL` | `4` | Max parallel siblings launched concurrently in a chain group |
 | `CLD_CHAIN_DEFAULT_MODEL` | `""` | Model override for chain agents; empty = agent default |
-| `CLD_DEBUG` | `false` | Diagnostics flag |
+| `CLD_LOG_LEVEL` | `INFO` | Root level for the `cld` logger hierarchy. Accepts DEBUG/INFO/WARNING/ERROR (case-insensitive; WARN aliased to WARNING). |
+| `CLD_LOG_COLOR` | `auto` | ANSI color in log output: `auto` (TTY-detect), `always`, or `never`. |
+| `CLD_DEBUG` | `false` | Diagnostics flag. Back-compat alias: when truthy and `CLD_LOG_LEVEL` is unset, equivalent to `CLD_LOG_LEVEL=DEBUG`. |
 
 Container-side env vars consumed by shell entrypoints (NOT read by Python `Config`; left unprefixed because shell scripts read them by name):
 
@@ -112,6 +114,8 @@ Container-side env vars consumed by shell entrypoints (NOT read by Python `Confi
 | `AGENT_COMMIT_MSG_LLM` / `AGENT_SYSTEM_PROMPT_FILE` | user -> container | Optional agent overrides |
 | `MYSQL_DEFAULTS_FILE` | `build_container_args` -> container | Credentials path inside container |
 | `WORKSPACE_ORIGIN` | `container-init.sh` -> Python | `/workspace/origin` (read by `vcs/detect.py`) |
+
+**Logging.** `cld/log.py` configures a stderr handler on the `cld.*` logger hierarchy. All modules use `log = get_logger(__name__)`. Logs go to stderr only — stdout is reserved for user-facing deliverables (final reports, list rows, prompts). Levels: DEBUG (verbose, every subprocess + VCS call), INFO (default; major lifecycle events), WARNING (recoverable issues), ERROR (failed operations).
 
 ## Agent Output
 
@@ -126,6 +130,7 @@ Inspect with git: `git log <name>`, `git diff <name>~1..<name>`. Merge: `git mer
 - Containers run as host UID/GID with security hardening (cap-drop ALL, no-new-privileges, resource limits).
 - The agent entrypoint merges global MCP server config from `~/.claude.json` into project scope.
 - Install with `poetry install` to get the `cld` command.
+- Logging is centralised in `cld/log.py`; each module obtains a logger via `get_logger(__name__)`.
 
 ## MCP Orchestrator
 

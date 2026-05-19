@@ -8,12 +8,21 @@ mount layouts) stay as module constants in their owning files -- they're
 not user-tunable and are coupled to Dockerfile/shell-script invariants.
 """
 
+import logging
 import os
 import shutil
-import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+
+from cld.log import _CldFormatter, _LazyStderrHandler
+
+_log = logging.getLogger("cld.config")
+if not _log.handlers:
+    _h = _LazyStderrHandler()
+    _h.setFormatter(_CldFormatter(use_color=False))
+    _log.addHandler(_h)
+    _log.propagate = False
 
 
 def _env_str(name: str, default: str = "") -> str:
@@ -46,6 +55,8 @@ _TOML_KEYS = {
     "ssl_certs_path",
     "chain_max_parallel",
     "chain_default_model",
+    "log_level",
+    "log_color",
 }
 
 
@@ -62,7 +73,7 @@ def _ensure_user_config(path: Path) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(_DEFAULT_CONFIG_TEMPLATE, path)
-    print(f"cld: created default config at {path}", file=sys.stderr)
+    _log.warning("created default config at %s", path)
 
 
 def _find_project_config(start: Path | None = None) -> Path | None:
@@ -85,11 +96,11 @@ def _load_toml(path: Path) -> dict:
         with path.open("rb") as f:
             data = tomllib.load(f)
     except (OSError, tomllib.TOMLDecodeError) as e:
-        print(f"warning: failed to read {path}: {e}", file=sys.stderr)
+        _log.warning("failed to read %s: %s", path, e)
         return {}
     unknown = set(data) - _TOML_KEYS
     for key in sorted(unknown):
-        print(f"warning: unknown key '{key}' in {path}", file=sys.stderr)
+        _log.warning("unknown key '%s' in %s", key, path)
     return {k: v for k, v in data.items() if k in _TOML_KEYS}
 
 
@@ -169,6 +180,8 @@ class Config:
 
     # Diagnostics
     debug: bool = False
+    log_level: str = "INFO"
+    log_color: str = "auto"
 
     @classmethod
     def from_env(
@@ -198,6 +211,8 @@ class Config:
             agent_timeout=_env_int("CLD_AGENT_TIMEOUT", int(layered.get("agent_timeout", 1800))),
             poll_interval=_env_int("CLD_POLL_INTERVAL", int(layered.get("poll_interval", 30))),
             debug=_env_bool("CLD_DEBUG", bool(layered.get("debug", False))),
+            log_level=_env_str("CLD_LOG_LEVEL", layered.get("log_level", "INFO")),
+            log_color=_env_str("CLD_LOG_COLOR", layered.get("log_color", "auto")),
             home_mounts_always=tuple(layered.get("home_mounts_always", (
                 ".claude.json", ".config/anthropic", ".config/claude", ".config/jj",
             ))),

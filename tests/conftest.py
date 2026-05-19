@@ -1,6 +1,7 @@
 """Shared pytest fixtures: env cleanup, VCS repos, docker helpers."""
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -17,6 +18,10 @@ _LEAKY_VARS = (
     "CLD_HOST_PROJECT_DIR",
     "CLD_HOST_HOME",
     "CLD_MYSQL_CONFIG",
+) + (
+    "CLD_LOG_LEVEL",
+    "CLD_LOG_COLOR",
+    "CLD_DEBUG",
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -40,6 +45,16 @@ def clean_env(monkeypatch):
     for var in _LEAKY_VARS:
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("JJ_EDITOR", "true")
+
+
+@pytest.fixture(autouse=True)
+def reset_cld_loggers():
+    yield
+    cld_log = logging.getLogger("cld")
+    for h in list(cld_log.handlers):
+        cld_log.removeHandler(h)
+    cld_log.setLevel(logging.NOTSET)
+    cld_log.propagate = True
 
 
 # --- VCS repo fixtures (use tmp_path -- fast, no Docker visibility needed) ----

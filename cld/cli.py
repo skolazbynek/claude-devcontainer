@@ -20,15 +20,15 @@ from cld.docker import (
     ensure_image,
     find_repo_context,
     find_repo_root,
-    log_error,
-    log_info,
-    log_warn,
     require_docker,
     stage_home_ro,
     to_host_path,
 )
+from cld.log import get_logger, setup_logging
 from cld.loop import run_loop
 from cld.vcs import get_backend
+
+log = get_logger(__name__)
 
 app = typer.Typer()
 
@@ -39,7 +39,8 @@ def _handle_errors(func):
         try:
             return func(*args, **kwargs)
         except (RuntimeError, ValueError, subprocess.CalledProcessError, FileNotFoundError) as e:
-            log_error(str(e))
+            log.error("Command failed: %s", e)
+            log.debug("traceback:", exc_info=True)
             raise typer.Exit(1)
     return wrapper
 
@@ -78,6 +79,15 @@ def agent(
         typer.echo("Error: Provide a task file, --prompt, or both", err=True)
         raise typer.Exit(1)
     cfg = Config.from_env()
+    setup_logging(cfg)
+    log.info(
+        "agent: name=%s, model=%s, revision=%s, task_file=%s, prompt=%s",
+        name or "<auto>",
+        model or "<default>",
+        revision or "<default>",
+        str(task_path) if task_path else "<none>",
+        "<provided>" if prompt else "<none>",
+    )
     launch_agent(
         cfg,
         task_file=task_path,
@@ -106,6 +116,15 @@ def devcontainer(
         typer.echo(f"Error: Task file not found: {task_file}", err=True)
         raise typer.Exit(1)
     cfg = Config.from_env()
+    setup_logging(cfg)
+    log.info(
+        "devcontainer: name=%s, model=%s, revision=%s, task_file=%s, prompt=%s",
+        name or "<auto>",
+        model or "<default>",
+        revision or "<default>",
+        str(task_path) if task_path else "<none>",
+        "<provided>" if prompt else "<none>",
+    )
 
     cld_root = Path(__file__).resolve().parent.parent
     ensure_image(
@@ -145,13 +164,13 @@ def devcontainer(
             skipped.append(rel)
 
     if skipped:
-        log_warn(f"Optional host paths not found (skipped): {', '.join(skipped)}")
+        log.warning(f"Optional host paths not found (skipped): {', '.join(skipped)}")
 
     args += [cfg.devcontainer_image]
     if extra_args:
         args += extra_args
 
-    log_info("Starting Claude Code in container...")
+    log.info("Starting Claude Code in container...")
     print()
 
     os.execvp("docker", ["docker", "run"] + args)
@@ -167,6 +186,7 @@ def review(
 ):
     """Launch a code review agent."""
     cfg = Config.from_env()
+    setup_logging(cfg)
     if trunk_branch is None:
         branches = get_backend().list_branches()
         branch_names = {
@@ -180,6 +200,12 @@ def review(
                 break
         if trunk_branch is None:
             raise RuntimeError(f"Could not auto-detect trunk branch; none of {list(cfg.trunk_candidates)} found. Pass it explicitly.")
+    log.info(
+        "review: feature=%s, trunk=%s, model=%s",
+        feature_branch,
+        trunk_branch or "<auto>",
+        model or "<default>",
+    )
     launch_review(cfg, feature_branch, trunk_branch, name=name, model=model)
 
 
@@ -214,6 +240,16 @@ def loop(
         raise typer.Exit(1)
 
     cfg = Config.from_env()
+    setup_logging(cfg)
+    log.info(
+        "loop: task_file=%s, prompt=%s, model=%s, review_model=%s, max_iterations=%d, approve=%s",
+        str(task_path) if task_path else "<none>",
+        "<provided>" if prompt else "<none>",
+        model or "<default>",
+        review_model or "<default>",
+        max_iterations,
+        approve,
+    )
     run_loop(
         cfg,
         task_path,
@@ -233,6 +269,8 @@ def build(no_cache: bool = typer.Option(False, "--no-cache", help="Force rebuild
     """Build base, devcontainer, and agent images (base first)."""
     require_docker()
     cfg = Config.from_env()
+    setup_logging(cfg)
+    log.info("build: no_cache=%s", no_cache)
     cld_root = Path(__file__).resolve().parent.parent
     ensure_image(
         cfg.base_image,
@@ -284,6 +322,9 @@ def _parse_description(path: Path) -> str:
 @app.command()
 def prompts():
     """List available prompt templates with descriptions."""
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    log.info("prompts list")
     prompts_dir = Path(__file__).resolve().parent.parent / "prompts"
     if not prompts_dir.exists():
         typer.echo("No prompts directory found.", err=True)
@@ -332,6 +373,13 @@ def chain_run(
         raise typer.Exit(1)
 
     cfg = Config.from_env()
+    setup_logging(cfg)
+    log.info(
+        "chain run: file=%s, name=%s, model=%s",
+        chain_file,
+        name or "<auto>",
+        model or "<default>",
+    )
     initial = task_path.read_text() if task_path else None
     result = run_chain(
         cfg, chain_path,
@@ -352,6 +400,9 @@ def chain_validate(
     if not chain_path.is_file():
         typer.echo(f"Error: chain file not found: {chain_file}", err=True)
         raise typer.Exit(1)
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    log.info("chain validate: %s", chain_file)
     repo_root = find_repo_root()
     cld_root = Path(__file__).resolve().parent.parent
     chain = load_chain(chain_path)
@@ -363,6 +414,9 @@ def chain_validate(
 @_handle_errors
 def chain_list():
     """List available chain definitions."""
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    log.info("chain list")
     repo_root = find_repo_root()
     cld_root = Path(__file__).resolve().parent.parent
 
@@ -403,6 +457,9 @@ def chain_dry_run(
     if not chain_path.is_file():
         typer.echo(f"Error: chain file not found: {chain_file}", err=True)
         raise typer.Exit(1)
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    log.info("chain dry-run: %s", chain_file)
     repo_root = find_repo_root()
     cld_root = Path(__file__).resolve().parent.parent
     chain = load_chain(chain_path)

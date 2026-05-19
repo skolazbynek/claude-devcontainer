@@ -10,7 +10,10 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from cld.config import Config
+from cld.log import get_logger, log_subprocess, mask_secrets
 from cld.vcs import get_backend
+
+log = get_logger(__name__)
 
 # Static structural constants (Dockerfile- and shell-script-coupled, not user-tunable).
 CONTAINER_USER = "claude"
@@ -23,24 +26,6 @@ WORKSPACE_BASE = "/workspace"
 _RO_HOME_MOUNT_ROOT = "/tmp/host-config"
 
 
-_RED = "\033[0;31m"
-_GREEN = "\033[0;32m"
-_YELLOW = "\033[1;33m"
-_NC = "\033[0m"
-
-
-def log_info(msg: str) -> None:
-    print(f"{_GREEN}[INFO]{_NC} {msg}")
-
-
-def log_warn(msg: str) -> None:
-    print(f"{_YELLOW}[WARN]{_NC} {msg}")
-
-
-def log_error(msg: str) -> None:
-    print(f"{_RED}[ERROR]{_NC} {msg}", file=sys.stderr)
-
-
 def find_repo_root(start: Path | None = None) -> Path:
     """Locate the VCS repository root (jj or git) by walking up from *start*.
 
@@ -48,10 +33,10 @@ def find_repo_root(start: Path | None = None) -> Path:
     """
     try:
         backend = get_backend(start)
-        return backend.repo_root
     except RuntimeError as e:
-        log_error(str(e))
+        log.error(str(e))
         sys.exit(1)
+    return backend.repo_root
 
 
 def find_repo_context(start: Path | None = None) -> tuple[Path, str]:
@@ -63,10 +48,11 @@ def find_repo_context(start: Path | None = None) -> tuple[Path, str]:
     """
     try:
         backend = get_backend(start)
-        return backend.repo_root, backend.workspace_revision
     except RuntimeError as e:
-        log_error(str(e))
+        log.error(str(e))
         sys.exit(1)
+    log.info("Repository: %s (VCS: %s)", backend.repo_root, backend.name)
+    return backend.repo_root, backend.workspace_revision
 
 
 def build_session_name(prefix: str, suffix: str = "") -> str:
@@ -77,7 +63,7 @@ def build_session_name(prefix: str, suffix: str = "") -> str:
 def require_docker() -> None:
     """Verify the ``docker`` CLI is available, exit otherwise."""
     if not shutil.which("docker"):
-        log_error("Docker is not installed.")
+        log.error("Docker is not installed.")
         sys.exit(1)
 
 
@@ -111,15 +97,20 @@ def _content_hash(paths: list[Path], parent_hash: str | None) -> str:
             h.update(f"{rel}\0".encode())
             h.update(entry.read_bytes())
             h.update(b"\0")
-    return h.hexdigest()[:16]
+    hexdigest_short = h.hexdigest()[:16]
+    log.debug(
+        "computed content hash %s (parent=%s)",
+        hexdigest_short,
+        parent_hash[:8] if parent_hash else "<root>",
+    )
+    return hexdigest_short
 
 
 def _image_label(image: str, label: str) -> str:
     """Read a Docker label off an image. Empty string if image or label is missing."""
-    result = subprocess.run(
-        ["docker", "inspect", "--format", f'{{{{ index .Config.Labels "{label}" }}}}', image],
-        capture_output=True, text=True,
-    )
+    cmd = ["docker", "inspect", "--format", f'{{{{ index .Config.Labels "{label}" }}}}', image]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    log_subprocess(log, cmd, result)
     if result.returncode != 0:
         return ""
     return result.stdout.strip()
@@ -154,6 +145,7 @@ def ensure_image(
     parent_image: tuple[str, Path, Path, list[Path]] | None = None,
     force: bool = False,
     no_cache: bool = False,
+    quiet: bool = False,
 ) -> str:
     """Build a Docker image if it's missing or its baked content has drifted from source.
 
@@ -165,6 +157,9 @@ def ensure_image(
     is built first; the parent's hash is folded into this image's hash so a base
     rebuild propagates.
     Pass force=True to always build. Pass no_cache=True to build with --no-cache.
+    Pass quiet=True to capture docker build output (logged at INFO line-by-line)
+    instead of streaming to the inherited stdout. Required when running under
+    MCP stdio (orchestrator) where stdout = JSON-RPC and must stay clean.
     Returns the content hash of the (now-current) image.
     """
     parent_hash: str | None = None
@@ -172,7 +167,7 @@ def ensure_image(
         parent_name, parent_dockerfile, parent_context, parent_extras = parent_image
         parent_hash = ensure_image(
             parent_name, parent_dockerfile, parent_context,
-            extra_paths=parent_extras, force=force, no_cache=no_cache,
+            extra_paths=parent_extras, force=force, no_cache=no_cache, quiet=quiet,
         )
 
     expected = _content_hash([dockerfile] + (extra_paths or []), parent_hash)
@@ -185,22 +180,39 @@ def ensure_image(
     if exists and not force and existing == expected:
         return expected
 
+    log.debug(
+        "Hash check: existing=%s expected=%s",
+        existing[:8] if existing else "<missing>",
+        expected[:8],
+    )
     if force:
-        log_info(f"Rebuilding '{image}' (forced, hash {expected[:8]})...")
+        log.info(f"Rebuilding '{image}' (forced, hash {expected[:8]})...")
     elif not exists:
-        log_info(f"Image '{image}' not found. Building (hash {expected[:8]}, may take 5+ minutes)...")
+        log.info(f"Image '{image}' not found. Building (hash {expected[:8]}, may take 5+ minutes)...")
     elif not existing:
-        log_info(f"Rebuilding '{image}' (no content-hash label; hash {expected[:8]})...")
+        log.info(f"Rebuilding '{image}' (no content-hash label; hash {expected[:8]})...")
     else:
-        log_info(f"Rebuilding '{image}' (stale: {existing[:8]} -> {expected[:8]})...")
+        log.info(f"Rebuilding '{image}' (stale: {existing[:8]} -> {expected[:8]})...")
 
     cmd = ["docker", "build", "-f", str(dockerfile), "-t", image,
            "--label", f"{CONTENT_HASH_LABEL}={expected}"]
     if no_cache:
         cmd.append("--no-cache")
     cmd.append(str(context))
-    subprocess.run(cmd, check=True)
-    log_info("Image built successfully.")
+    log.info("Running docker build for %s (this may take several minutes)", image)
+    if quiet:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            log.info("docker build: %s", line.rstrip())
+        rc = proc.wait()
+        if rc != 0:
+            raise subprocess.CalledProcessError(rc, cmd)
+    else:
+        subprocess.run(cmd, check=True)
+    log.info("docker build for %s succeeded", image)
     return expected
 
 
@@ -270,9 +282,16 @@ def build_container_args(
 
     # SSL CA certificates -- optional, container has its own bundle as fallback.
     _SSL_CANDIDATES = ["/etc/ssl/certs", "/etc/ssl/cert.pem"]
-    ssl_src = cfg.ssl_certs_path or next(
-        (p for p in _SSL_CANDIDATES if Path(p).exists()), None
-    )
+    if cfg.ssl_certs_path:
+        log.debug("SSL: using configured ssl_certs_path=%s", cfg.ssl_certs_path)
+        ssl_src: str | None = cfg.ssl_certs_path
+    else:
+        ssl_src = None
+        for candidate in _SSL_CANDIDATES:
+            present = Path(candidate).exists()
+            log.debug("SSL candidate %s: present=%s", candidate, present)
+            if present and ssl_src is None:
+                ssl_src = candidate
     if ssl_src:
         ssl_path = Path(ssl_src)
         if ssl_path.is_dir():
@@ -282,33 +301,36 @@ def build_container_args(
             args += ["-v", f"{ssl_src}:/etc/ssl/cert.pem:ro",
                      "-e", "NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem"]
     else:
-        log_warn("No host SSL CA bundle found -- container will use its own ca-certificates")
+        log.warning("No host SSL CA bundle found -- container will use its own ca-certificates")
 
     # Claude session state (required)
     # rw needed for OAuth token refresh and session state writes; tradeoff: agent can both
     # read OAuth tokens and overwrite session state. Consider ro + tmpfs overlay in the future.
     local_claude_dir = Path(home) / ".claude"
     if not local_claude_dir.is_dir():
-        log_error(f"{local_claude_dir} not found -- Claude auth and session state unavailable")
+        log.error(f"{local_claude_dir} not found -- Claude auth and session state unavailable")
         sys.exit(1)
     args += ["-v", f"{host_home}/.claude:{CONTAINER_HOME}/.claude:rw"]
 
     # RO $HOME mounts: all staged under /tmp/host-config/<rel>, then copied
     # into $HOME by the entrypoint. Devcontainer-only entries are added by cli.py.
     for rel in cfg.home_mounts_always:
+        log.debug("home_mounts_always: attempting ~/%s", rel)
         mnt = stage_home_ro(rel, cfg)
         if mnt:
             args += mnt
         else:
-            log_warn(f"~/{rel} not found -- skipping")
+            log.warning(f"~/{rel} not found -- skipping")
 
     # Session
     args += ["-e", f"SESSION_NAME={session_name}"]
-    log_info(f"Session name: {session_name}")
+    log.info(f"Session name: {session_name}")
 
     # Docker socket (conditional)
     docker_sock = Path("/var/run/docker.sock")
-    if docker_sock.is_socket():
+    sock_present = docker_sock.is_socket()
+    log.debug("Docker socket probe: path=%s found=%s", docker_sock, sock_present)
+    if sock_present:
         docker_gid = docker_sock.stat().st_gid
         args += [
             "-v", f"{docker_sock}:{docker_sock}",
@@ -316,23 +338,26 @@ def build_container_args(
             "-e", f"CLD_HOST_PROJECT_DIR={repo_root}",
             "-e", f"CLD_HOST_HOME={home}",
         ]
-        log_info("Docker socket mounted (orchestrator support)")
+        log.info("Docker socket mounted (orchestrator support)")
     else:
-        log_warn("Docker socket not found, orchestrator agent lifecycle tools unavailable")
+        log.warning("Docker socket not found, orchestrator agent lifecycle tools unavailable")
 
     # MySQL (conditional)
     if cfg.mysql_config:
         mysql_path = Path(cfg.mysql_config)
-        if mysql_path.is_file():
+        mysql_exists = mysql_path.is_file()
+        log.debug("MySQL config probe: path=%s exists=%s", mysql_path, mysql_exists)
+        if mysql_exists:
             resolved = str(mysql_path.resolve())
             args += [
                 "-v", f"{resolved}:/run/secrets/mysql.cnf:ro",
                 "-e", "MYSQL_DEFAULTS_FILE=/run/secrets/mysql.cnf",
             ]
-            log_info(f"MySQL config mounted from: {resolved}")
+            log.info(f"MySQL config mounted from: {resolved}")
         else:
-            log_warn(f"CLD_MYSQL_CONFIG set but file not found: {cfg.mysql_config}")
+            log.warning(f"CLD_MYSQL_CONFIG set but file not found: {cfg.mysql_config}")
 
+    log.debug("Container args: %s", mask_secrets(repr(args)))
     return args
 
 
