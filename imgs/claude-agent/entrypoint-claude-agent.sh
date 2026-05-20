@@ -45,28 +45,27 @@ copy_host_configs
 # Detect VCS type (jj or git)
 detect_vcs || exit 1
 
-# --- Create isolated workspace ---
+# --- Workspace setup ---
 
-cd "$WORKSPACE_ORIGIN"
-WORKSPACE_REV="${AGENT_REVISION:-}"
-# Provide VCS-appropriate default revision if none specified
-if [ -z "$WORKSPACE_REV" ]; then
-    if [ "$VCS_TYPE" = "jj" ]; then
-        WORKSPACE_REV="@"
-    else
-        WORKSPACE_REV="HEAD"
+if [ -z "${WORKSPACE_PREINITIALIZED:-}" ]; then
+    # Legacy path: host did not pre-initialize (e.g. direct container invocation).
+    cd "$WORKSPACE_ORIGIN"
+    WORKSPACE_REV="${AGENT_REVISION:-}"
+    if [ -z "$WORKSPACE_REV" ]; then
+        if [ "$VCS_TYPE" = "jj" ]; then
+            WORKSPACE_REV="@"
+        else
+            WORKSPACE_REV="HEAD"
+        fi
     fi
-fi
-
-vcs_create_workspace "$AGENT_NAME" "$WORKSPACE_CURRENT" "$WORKSPACE_REV" 2>&1
-
-cd "$WORKSPACE_CURRENT"
-
-# For jj, `jj workspace add` already created a fresh working-copy change
-# on top of WORKSPACE_REV; just place the bookmark on it.
-# For git, the worktree already has a branch at the right revision.
-if [ "$VCS_TYPE" = "jj" ]; then
-    jj bookmark create -r @ "$AGENT_NAME" 2>&1
+    vcs_create_workspace "$AGENT_NAME" "$WORKSPACE_CURRENT" "$WORKSPACE_REV" 2>&1
+    cd "$WORKSPACE_CURRENT"
+    if [ "$VCS_TYPE" = "jj" ]; then
+        jj bookmark create -r @ "$AGENT_NAME" 2>&1
+    fi
+else
+    # Fast path: workspace was created by the host before container start.
+    cd "$WORKSPACE_CURRENT"
 fi
 
 OUTPUT_DIR="$WORKSPACE_CURRENT/agent-output-$AGENT_NAME"

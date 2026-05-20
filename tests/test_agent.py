@@ -55,7 +55,7 @@ class TestLaunchAgentExtensions:
             patch("cld.agent.ensure_image"),
             patch("cld.agent.build_session_name", return_value=session),
             patch("cld.agent.build_container_args", return_value=[]),
-            patch("cld.agent._wait_for_workspace", return_value=True),
+            patch("cld.agent._create_agent_workspace", return_value=Path("/fake/repo/.cld/workspaces") / session),
             patch("cld.agent.subprocess.run", return_value=docker_result) as mock_run,
         ):
             launch_agent(Config(), quiet=True, **kwargs)

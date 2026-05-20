@@ -1,10 +1,8 @@
 """Agent and review launch logic."""
 
-import os
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 from string import Template
 
@@ -23,47 +21,57 @@ from cld.docker import (
 )
 from cld.log import get_logger
 from cld.vcs import get_backend
+from cld.vcs.jj import JjBackend
 
 log = get_logger(__name__)
 
 
-def _wait_for_workspace(vcs, session: str, container_id: str, timeout: int = 60) -> bool:
-    """Poll until the named workspace/worktree appears in the host-side repo.
+def _create_agent_workspace(vcs, session: str, revision: str, repo_root: Path) -> Path:
+    """Create the agent's workspace/worktree on the host before container start.
 
-    Returns True when found, False on timeout or if the container exits before
-    the workspace is created (which indicates a startup failure).
+    Returns the host path to the workspace working directory.
     """
-    deadline = time.monotonic() + timeout
-    poll_interval = 0.25
-    liveness_interval = 2.0
-    last_liveness_check = time.monotonic()
+    workspace_host_path = repo_root / ".cld" / "workspaces" / session
+    workspace_host_path.parent.mkdir(parents=True, exist_ok=True)
+    if workspace_host_path.exists():
+        log.error(f"Workspace path already exists: {workspace_host_path}")
+        sys.exit(1)
 
-    while time.monotonic() < deadline:
-        if vcs.name == "jj":
-            result = subprocess.run(
-                ["jj", "--no-pager", "workspace", "list",
-                 "--ignore-working-copy", "--color=never"],
-                capture_output=True, text=True, cwd=str(vcs.repo_root),
-            )
-            if f"\n{session}:" in f"\n{result.stdout}":
-                return True
-        else:
-            if (vcs.repo_root / ".git" / "worktrees" / session).is_dir():
-                return True
+    log.debug("Creating %s workspace %s at %s (rev=%s)",
+              vcs.name, session, workspace_host_path, revision or "<default>")
+    out = vcs.create_workspace(session, str(workspace_host_path), revision)
+    log.debug("create_workspace output: %s", out.strip() if out else "")
 
-        now = time.monotonic()
-        if now - last_liveness_check >= liveness_interval:
-            last_liveness_check = now
-            probe = subprocess.run(
-                ["docker", "inspect", "-f", "{{.State.Running}}", container_id],
-                capture_output=True, text=True,
-            )
-            if probe.returncode != 0 or probe.stdout.strip() != "true":
-                return False
+    if vcs.name == "jj":
+        # `jj workspace add` does not create a bookmark; place one at the new
+        # workspace's @ by running the command from inside that workspace.
+        ws_vcs = JjBackend(repo_root=vcs.repo_root, workspace_path=workspace_host_path)
+        ws_vcs.create_branch(session)
 
-        time.sleep(poll_interval)
+        # jj stores an absolute host-side path in <ws>/.jj/repo pointing back
+        # to the main repo's .jj/. The agent container bind-mounts the main
+        # repo at /workspace/origin, so we rewrite the pointer to the in-
+        # container path. (Run host-side jj operations on the workspace before
+        # this, since the pointer becomes invalid on the host afterward.)
+        repo_pointer = workspace_host_path / ".jj" / "repo"
+        repo_pointer.write_text(f"{WORKSPACE_BASE}/origin/.jj/repo")
+    else:
+        # git: `git worktree add -b` already created the branch. The worktree's
+        # .git file contains `gitdir: <abs-host-path>` to the main repo's
+        # .git/worktrees/<name> dir; rewrite to the in-container path.
+        dotgit = workspace_host_path / ".git"
+        if dotgit.is_file():
+            content = dotgit.read_text().strip()
+            if content.startswith("gitdir:"):
+                abs_target = Path(content.split(":", 1)[1].strip())
+                try:
+                    rel_to_repo = abs_target.relative_to(vcs.repo_root)
+                except ValueError:
+                    rel_to_repo = None
+                if rel_to_repo is not None:
+                    dotgit.write_text(f"gitdir: {WORKSPACE_BASE}/origin/{rel_to_repo}\n")
 
-    return False
+    return workspace_host_path
 
 
 def launch_agent(
@@ -109,9 +117,15 @@ def launch_agent(
     )
 
     session = session_name or build_session_name("agent", name)
+    effective_revision = revision or workspace_rev
+
+    workspace_host_path = _create_agent_workspace(vcs, session, effective_revision, repo_root)
 
     args = ["--name", session]
     args += build_container_args(repo_root, session, cfg)
+    host_ws = to_host_path(str(workspace_host_path), cfg)
+    args += ["-v", f"{host_ws}:{WORKSPACE_BASE}/current"]
+    args += ["-e", "WORKSPACE_PREINITIALIZED=1"]
     if task_file:
         host_task = to_host_path(str(task_file.resolve()), cfg)
         args += ["-v", f"{host_task}:/config/task.md:ro"]
@@ -119,9 +133,6 @@ def launch_agent(
         args += ["-e", f"AGENT_INLINE_PROMPT={inline_prompt}"]
     if model:
         args += ["-e", f"AGENT_MODEL={model}"]
-    effective_revision = revision or workspace_rev
-    if effective_revision:
-        args += ["-e", f"AGENT_REVISION={effective_revision}"]
     if system_prompt_file:
         host_prompt = to_host_path(str(system_prompt_file.resolve()), cfg)
         args += ["-v", f"{host_prompt}:/config/persona.md:ro"]
@@ -151,31 +162,15 @@ def launch_agent(
     cid = container_id.stdout.strip()
 
     if not quiet:
-        log.info("Waiting for workspace to initialize...")
-    workspace_timeout = 60
-    log.debug("Waiting for workspace %s (timeout=%ds)", session, workspace_timeout)
-    wait_start = time.monotonic()
-    workspace_ready = _wait_for_workspace(vcs, session, cid, timeout=workspace_timeout)
-    elapsed = time.monotonic() - wait_start
-    if workspace_ready:
-        log.info("Workspace %s ready after %.1fs", session, elapsed)
-    else:
-        log.warning(f"Workspace '{session}' not visible after waiting — container may have crashed")
-        log.warning(f"Check logs: docker logs {cid}")
-
-    if not quiet:
         vcs_name = vcs.name
         print(f"Container ID: {cid}")
         print()
         print("========================================")
-        if workspace_ready:
-            print("Agent started successfully")
-        else:
-            print("Agent started (workspace not yet visible)")
+        print("Agent started successfully")
         print("========================================")
         print()
         print(f"Check if running:\n  docker ps --filter id={cid}")
-        print(f"\nFollow progress (logs):\n  tail -f {repo_root}/agent-output-{session}/agent.log")
+        print(f"\nFollow progress (logs):\n  tail -f {workspace_host_path}/agent-output-{session}/agent.log")
         print(f"\nWait for completion:\n  docker wait {cid}")
         if vcs_name == "jj":
             print(f"\nAfter completion, view results:\n  jj log -r {session}\n  jj diff -r {session}")

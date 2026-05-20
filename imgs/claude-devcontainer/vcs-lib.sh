@@ -55,6 +55,11 @@ vcs_forget_workspace() {
 
     if [ "$VCS_TYPE" = "jj" ]; then
         jj workspace forget "$name" 2>&1
+        # Clear the bind-mounted workspace contents on the host (mount point
+        # itself remains; the host-side launcher created the directory).
+        if [ -n "$path" ] && [ -d "$path" ]; then
+            find "$path" -mindepth 1 -delete 2>/dev/null || true
+        fi
     else
         if [ -n "$path" ]; then
             git worktree remove --force "$path" 2>&1 || true
