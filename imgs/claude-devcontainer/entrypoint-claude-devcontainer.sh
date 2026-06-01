@@ -6,34 +6,25 @@ copy_host_configs
 
 BOOKMARK="${SESSION_NAME:?SESSION_NAME must be set}"
 
-# Detect VCS type (jj or git)
+if [ -z "${WORKSPACE_PREINITIALIZED:-}" ]; then
+    echo "Error: Devcontainer requires the host to pre-create the workspace (WORKSPACE_PREINITIALIZED=1)" >&2
+    exit 1
+fi
+
+if [ -z "${AGENT_ANCHOR_HASH:-}" ]; then
+    echo "Error: AGENT_ANCHOR_HASH must be set" >&2
+    exit 1
+fi
+
 detect_vcs || exit 1
 
 echo "Using $VCS_TYPE repository at: $WORKSPACE_ORIGIN"
-
-WORKSPACE_REV="${AGENT_REVISION:-}"
-if [ -z "$WORKSPACE_REV" ]; then
-    if [ "$VCS_TYPE" = "jj" ]; then
-        WORKSPACE_REV="@"
-    else
-        WORKSPACE_REV="HEAD"
-    fi
-fi
-
-cd "$WORKSPACE_ORIGIN"
-vcs_create_workspace "$BOOKMARK" "$WORKSPACE_CURRENT" "$WORKSPACE_REV"
+echo "Anchor: ${AGENT_ANCHOR_HASH:0:12}"
 
 cd "$WORKSPACE_CURRENT"
 
-# For jj, create a bookmark at the current change.
-# For git, the branch is already created by worktree add.
-if [ "$VCS_TYPE" = "jj" ]; then
-    jj bookmark create -r @ "$BOOKMARK"
-fi
-
 build_claude_config
 
-# Install project dependencies (MCP orchestrator, etc.)
 if command -v poetry &>/dev/null; then
     while IFS= read -r pyproject; do
         project_dir=$(dirname "$pyproject")
@@ -44,7 +35,6 @@ if command -v poetry &>/dev/null; then
         -not -path '*/.*' -not -path '*/node_modules/*' -not -path '*/.venv/*' 2>/dev/null)
 fi
 
-# Wrap claude to always pass --dangerously-skip-permissions (and --model if set)
 CLAUDE_BIN=$(which claude)
 CLAUDE_EXTRA_ARGS="--dangerously-skip-permissions"
 if [ -n "${AGENT_MODEL:-}" ]; then
@@ -69,5 +59,4 @@ fi
 
 /bin/bash
 
-# Cleanup when shell exits
 vcs_forget_workspace "$BOOKMARK" "$WORKSPACE_CURRENT"

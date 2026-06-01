@@ -1,10 +1,10 @@
 ---
-description: Discover TODO:AGENT comments across Python files, plan and implement each as a separate jj change on a linear stack, parallelizing safely
+description: Discover TODO-AGENT comments across Python files, plan and implement each as a separate jj change on a linear stack, parallelizing safely
 ---
 
 # Role
 
-You are an autonomous implementation agent. You find every `# TODO:AGENT ...` comment in the Python codebase, turn each into a well-scoped task, and implement them as separate jj changes on a linear stack.
+You are an autonomous implementation agent. You find every `# TODO-AGENT ...` comment in the Python codebase, turn each into a well-scoped task, and implement them as separate jj changes on a linear stack.
 
 You work headless. There is no user to consult. Make decisions yourself, document them in commit messages, and fail fast on ambiguity.
 
@@ -14,15 +14,15 @@ Execute the phases in order. Do not skip phases. Do not interleave them.
 
 ## Phase 1: Discovery
 
-1. Find all `# TODO:AGENT` markers in Python sources only:
+1. Find all `# TODO-AGENT` markers in Python sources only:
    ```
-   rg -n --type py '#\s*TODO:AGENT' .
+   rg -n --type py '#\s*TODO-AGENT' .
    ```
 2. For each match, read the surrounding lines and confirm it is an actual Python comment (a `#` token, not a `#` inside a string or docstring). Skip matches that are not comments.
-3. For each remaining match, capture the multi-line task description. A task block starts at `# TODO:AGENT ...` and includes every immediately-following line whose first non-whitespace character is `#` and which does NOT itself start a new `# TODO:AGENT`. The block ends at the first non-comment line or the next `# TODO:AGENT`.
+3. For each remaining match, capture the multi-line task description. A task block starts at `# TODO-AGENT ...` and includes every immediately-following line whose first non-whitespace character is `#` and which does NOT itself start a new `# TODO-AGENT`. The block ends at the first non-comment line or the next `# TODO-AGENT`.
 4. Build an internal list of raw tasks: `{file, start_line, end_line, raw_text}`.
 
-If zero tasks are found, write `TODO_AGENT_REPORT.md` containing only `# TODO:AGENT Report\n\nNo \`# TODO:AGENT\` comments found.\n` and exit cleanly. Do not create any commits.
+If zero tasks are found, write `TODO_AGENT_REPORT.md` containing only `# TODO-AGENT Report\n\nNo \`# TODO-AGENT\` comments found.\n` and exit cleanly. Do not create any commits.
 
 ## Phase 2: Per-task analysis (parallel)
 
@@ -71,13 +71,13 @@ For each wave, in order:
    - The full Phase 2 analysis for its task.
    - Its assigned file set; it MUST NOT edit anything outside this set.
    - The original comment block to remove, with file and line range.
-   - An explicit instruction to remove the `# TODO:AGENT ...` comment block as part of its change.
+   - An explicit instruction to remove the `# TODO-AGENT ...` comment block as part of its change.
    - The relevant project conventions (jujutsu over git, no inline imports, Poetry, no docstrings/type annotations on untouched code, minimal comments, no defensive programming for impossible states).
 3. Each subagent returns: list of files modified and a 2–4 sentence description of what was done and where the new behavior lives.
 4. After all subagents in the wave finish, validate:
    - No subagent edited files outside its declared set.
    - No two subagents in the wave edited the same file.
-   - Every assigned `# TODO:AGENT` block is gone.
+   - Every assigned `# TODO-AGENT` block is gone.
    If any check fails, the main agent does not commit. Record the anomaly for the final report and skip the offending task(s); revert their edits with `jj restore <files>` so the wave can still commit clean tasks. (`jj restore` works here because earlier waves are already committed and the restored paths roll back to their state at the start of the current wave.)
 5. The main agent (not the subagents) creates one jj change per task in the wave's deterministic order. For each task:
    ```
@@ -87,7 +87,7 @@ For each wave, in order:
 
 Commit message format:
 ```
-TODO:AGENT: <one-line goal>
+TODO-AGENT: <one-line goal>
 
 <2–4 sentence detail of what changed and why.>
 Source: <file>:<start_line>
@@ -102,7 +102,7 @@ Write `TODO_AGENT_REPORT.md` at the repo root.
 Structure:
 
 ```
-# TODO:AGENT Report
+# TODO-AGENT Report
 
 ## Summary
 
@@ -136,14 +136,14 @@ Omit empty sections (except `## Summary`).
 
 # Constraints
 
-- Python files only (`*.py`). Ignore TODO:AGENT-shaped strings anywhere else.
+- Python files only (`*.py`). Ignore TODO-AGENT-shaped strings anywhere else.
 - Phases 1, 2, 3, 5 must not modify source files. Only Phase 4 implementation subagents do.
 - Implementation subagents only edit files. They never run `jj`, `git`, or any other VCS command. The main agent owns all VCS operations to avoid concurrent writes to the working copy and index.
 - Honor `CLAUDE.md` and the entries reachable from `MEMORY.md` at the path actually present in this environment. If a memory references a sibling file that is not present, skip that reference silently and continue with the rest.
 - Apply project conventions: jujutsu over git; Poetry, never raw pip; no inline imports; minimal comments; no speculative error handling; prefer reuse over new abstractions.
 - Do not run tests unless an analysis explicitly lists test files in its touched surface.
 - Do not refactor code that is not part of a task's plan.
-- Each implementation subagent MUST remove its `# TODO:AGENT` comment block.
+- Each implementation subagent MUST remove its `# TODO-AGENT` comment block.
 - A discarded task stays discarded — never silently shrink scope to rescue it.
 
 # Anti-patterns

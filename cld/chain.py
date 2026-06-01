@@ -11,12 +11,13 @@ from pathlib import Path
 from string import Template
 from typing import Iterator
 
-from cld.agent import launch_agent
+from cld.agent import agent_workspace_path, launch_agent
 from cld.agent_runtime import wait_for_agent, read_agent_cost, format_duration
 from cld.config import Config
-from cld.docker import cld_tmpdir, find_repo_root
+from cld.docker import find_repo_root
 from cld.log import get_logger
 from cld.vcs import get_backend
+from cld.vcs.anchor import assert_descendant, create_editable_root, resolve_anchor
 
 log = get_logger(__name__)
 
@@ -144,9 +145,9 @@ def persona_resolve(name: str, repo_root: Path, cld_root: Path) -> Path:
 
 
 def _stage_persona_without_frontmatter(
-    persona_path: Path, chain: Chain, step: ChainStep, repo_root: Path,
+    persona_path: Path, chain: Chain, step: ChainStep, scratch_dir: Path,
 ) -> Path:
-    """Strip YAML frontmatter from a persona and stage it under .cld/.
+    """Strip YAML frontmatter from a persona and stage it under .cld-run/.
 
     Claude's CLI rejects system prompts that start with `---` (it tries to
     parse the frontmatter as YAML). The cld personas use frontmatter for
@@ -158,7 +159,7 @@ def _stage_persona_without_frontmatter(
         end = stripped.find("---", 3)
         if end != -1:
             text = stripped[end + 3:].lstrip()
-    staged = cld_tmpdir(repo_root) / f"persona-{chain.name}-{step.name}.md"
+    staged = scratch_dir / f"persona-{chain.name}-{step.name}.md"
     staged.write_text(text)
     return staged
 
@@ -232,13 +233,13 @@ def compose_task(
     step: ChainStep,
     initial_task: str | None,
     prior_outputs: list[tuple[str, str]],
-    repo_root: Path,
+    scratch_dir: Path,
     cld_root: Path,
 ) -> Path:
     """Compose the task file for this step.
 
-    Returns the path to the staged task file under <repo_root>/.cld/.
-    The agent should be launched with this as task_file=.
+    Returns the path to the staged task file under ``scratch_dir`` (the chain
+    workspace's .cld-run/). The agent should be launched with this as task_file=.
     """
     sections = []
 
@@ -264,7 +265,7 @@ def compose_task(
     sections.append(footer)
 
     full = "\n\n".join(sections) + "\n"
-    staged = cld_tmpdir(repo_root) / f"chain-{chain.name}-{step.name}.md"
+    staged = scratch_dir / f"chain-{chain.name}-{step.name}.md"
     staged.write_text(full)
     return staged
 
@@ -281,11 +282,10 @@ def step_session(chain: Chain, step: ChainStep, group_idx: int | None = None) ->
     return f"{prefix}_{step.name}"
 
 
-def initialise_chain_branch(chain: Chain, vcs, revision: str) -> str:
-    """Create the persistent chain branch at *revision* and return its name."""
+def initialise_chain_branch(chain: Chain, vcs, anchor_hash: str, workspace_path: Path) -> str:
+    """Create the persistent chain branch as an editable_root child of anchor."""
     branch = chain_branch(chain)
-    start = vcs.resolve_revision(revision)
-    vcs.create_branch(branch, start)
+    create_editable_root(vcs, anchor_hash, workspace_path, branch)
     return branch
 
 
@@ -294,6 +294,7 @@ def advance_chain_branch(
     vcs,
     successful_session: str,
     transient_sessions: list[str],
+    anchor_hash: str,
 ) -> None:
     """Advance the chain branch to a step's tip, then delete the transients.
 
@@ -303,6 +304,7 @@ def advance_chain_branch(
       (includes successful_session itself).
     """
     branch = chain_branch(chain)
+    assert_descendant(vcs, anchor_hash, successful_session)
     vcs.set_branch(branch, successful_session)
     for s in transient_sessions:
         try:
@@ -334,15 +336,16 @@ def execute_step(
     prior_outputs: list[tuple[str, str]],
     repo_root: Path,
     cld_root: Path,
+    scratch_dir: Path,
 ) -> StepResult:
     """Launch one agent for one step, wait for completion, return its result."""
     persona_path = persona_resolve(step.persona, repo_root, cld_root)
-    persona_path = _stage_persona_without_frontmatter(persona_path, chain, step, repo_root)
+    persona_path = _stage_persona_without_frontmatter(persona_path, chain, step, scratch_dir)
     task_file = compose_task(
         chain=chain, step=step,
         initial_task=initial_task,
         prior_outputs=prior_outputs,
-        repo_root=repo_root, cld_root=cld_root,
+        scratch_dir=scratch_dir, cld_root=cld_root,
     )
     log.debug("composed task file: %s", task_file)
     if log.isEnabledFor(logging.DEBUG):
@@ -387,6 +390,7 @@ class ChainResult:
     total_cost_usd: float
     total_duration_seconds: float
     failure_reason: str    # "" when success
+    anchor_hash: str = ""
 
 
 def run_chain(
@@ -407,9 +411,12 @@ def run_chain(
     log.info("Chain '%s' starting with %d step(s)", chain.name, len(chain.steps))
     log.debug("run_chain: name=%s file=%s steps=%d", chain.name, chain_file, len(chain.steps))
 
-    default_rev = "@" if vcs.name == "jj" else "HEAD"
-    start = revision or default_rev
-    initialise_chain_branch(chain, vcs, start)
+    anchor = resolve_anchor(vcs, revision)
+    chain_ws = agent_workspace_path(repo_root, chain_branch(chain))
+    initialise_chain_branch(chain, vcs, anchor, chain_ws)
+    scratch_dir = chain_ws / ".cld-run"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    log.info("Chain anchor: %s", anchor[:12])
 
     initial_text = _merge_initial(initial_task, inline_prompt)
 
@@ -429,6 +436,7 @@ def run_chain(
                     prior_outputs=prior_outputs,
                     initial_task=step_initial,
                     repo_root=repo_root, cld_root=cld_root,
+                    scratch_dir=scratch_dir,
                 )
                 results.extend(group_results)
                 failures = [r for r in group_results if r.status not in ("success", "no_changes", "unknown")]
@@ -446,6 +454,7 @@ def run_chain(
                     chain, vcs,
                     successful_session=first_success.session,
                     transient_sessions=[r.session for r in group_results],
+                    anchor_hash=anchor,
                 )
                 continue
             step = item
@@ -470,6 +479,7 @@ def run_chain(
                 prior_outputs=prior_outputs,
                 repo_root=repo_root,
                 cld_root=cld_root,
+                scratch_dir=scratch_dir,
             )
             results.append(result)
             log.info(
@@ -501,6 +511,7 @@ def run_chain(
             advance_chain_branch(
                 chain, vcs, successful_session=session,
                 transient_sessions=[session],
+                anchor_hash=anchor,
             )
             log.debug("chain branch advanced to %s", session)
     except KeyboardInterrupt:
@@ -518,6 +529,7 @@ def run_chain(
         total_cost_usd=total_cost,
         total_duration_seconds=total_dur,
         failure_reason=failure_reason,
+        anchor_hash=anchor,
     )
 
 
@@ -551,16 +563,17 @@ def print_chain_report(result: ChainResult, vcs) -> None:
                 print("      | ... (see branch for full failure)")
 
     print()
+    print(f"  Anchor:   {result.anchor_hash[:12]}")
     print(f"  Branch:   {result.chain_branch}")
     print(f"  Total:    {format_duration(result.total_duration_seconds)}, "
           f"${result.total_cost_usd:.4f}")
     if vcs.name == "jj":
-        print(f"  Inspect:  jj log -r '{result.chain_branch}'")
-        print(f"  Diff:     jj diff -r {result.chain_branch}")
+        print(f"  Inspect:  jj log -r '{result.anchor_hash}..{result.chain_branch}'")
+        print(f"  Diff:     jj diff --from {result.anchor_hash} --to {result.chain_branch}")
         print(f"  Merge:    jj squash --from {result.chain_branch}")
     else:
-        print(f"  Inspect:  git log {result.chain_branch}")
-        print(f"  Diff:     git diff {result.chain_branch}")
+        print(f"  Inspect:  git log {result.anchor_hash}..{result.chain_branch}")
+        print(f"  Diff:     git diff {result.anchor_hash}..{result.chain_branch}")
         print(f"  Merge:    git merge {result.chain_branch}")
     print()
 
@@ -582,18 +595,19 @@ def _run_parallel(
     initial_task: str | None,
     repo_root: Path,
     cld_root: Path,
+    scratch_dir: Path,
 ) -> list[StepResult]:
     """Launch all siblings (serialized launch), wait concurrently, return results."""
     sessions: list[tuple[ChainStep, str, Path]] = []
     for sibling in group.siblings:
         session = step_session(chain, sibling, group_idx=group_idx)
         persona_path = persona_resolve(sibling.persona, repo_root, cld_root)
-        persona_path = _stage_persona_without_frontmatter(persona_path, chain, sibling, repo_root)
+        persona_path = _stage_persona_without_frontmatter(persona_path, chain, sibling, scratch_dir)
         task_file = compose_task(
             chain=chain, step=sibling,
             initial_task=initial_task,
             prior_outputs=prior_outputs,
-            repo_root=repo_root, cld_root=cld_root,
+            scratch_dir=scratch_dir, cld_root=cld_root,
         )
         model = sibling.model or chain.defaults.model or cfg.chain_default_model or ""
         log.debug("parallel sibling '%s' launching session=%s", sibling.name, session)

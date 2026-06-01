@@ -67,7 +67,7 @@ def agent(
     task_file: Optional[str] = typer.Argument(None, help="Path to task markdown file"),
     name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
     model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
-    revision: str = typer.Option("", "-r", "--revision", help="Revision to base workspace on (default: last committed change -- @- for jj, HEAD for git)"),
+    revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change -- @ for jj, HEAD for git)"),
     prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (appended to task file if both given)"),
 ):
     """Launch an autonomous Claude agent."""
@@ -105,7 +105,7 @@ def devcontainer(
     task_file: Optional[str] = typer.Argument(None, help="Path to task markdown file"),
     name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
     model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
-    revision: str = typer.Option("", "-r", "--revision", help="Revision to base workspace on (default: last committed change -- @- for jj, HEAD for git)"),
+    revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change -- @ for jj, HEAD for git)"),
     prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (appended to task file if both given)"),
     extra_args: Optional[list[str]] = typer.Argument(None, help="Extra args passed to container"),
 ):
@@ -140,10 +140,24 @@ def devcontainer(
         ),
     )
 
-    repo_root, workspace_rev = find_repo_context()
+    repo_root, _workspace_rev = find_repo_context()
     session = build_session_name("cld", name)
 
+    from cld.agent import agent_workspace_path
+    from cld.vcs import get_backend
+    from cld.vcs.anchor import create_editable_root, resolve_anchor
+
+    vcs = get_backend()
+    anchor_hash = resolve_anchor(vcs, revision)
+    ws_path = agent_workspace_path(repo_root, session)
+    create_editable_root(vcs, anchor_hash, ws_path, session)
+    log.info(f"Anchor: {anchor_hash[:12]}")
+
     args = build_container_args(repo_root, session, cfg, interactive=True)
+    host_ws = to_host_path(str(ws_path), cfg)
+    args += ["-v", f"{host_ws}:/workspace/current"]
+    args += ["-e", "WORKSPACE_PREINITIALIZED=1"]
+    args += ["-e", f"AGENT_ANCHOR_HASH={anchor_hash}"]
     if task_path:
         host_task = to_host_path(str(task_path.resolve()), cfg)
         args += ["-v", f"{host_task}:/config/task.md:ro"]
@@ -151,9 +165,6 @@ def devcontainer(
         args += ["-e", f"AGENT_INLINE_PROMPT={prompt}"]
     if model:
         args += ["-e", f"AGENT_MODEL={model}"]
-    effective_revision = revision or workspace_rev
-    if effective_revision:
-        args += ["-e", f"AGENT_REVISION={effective_revision}"]
 
     skipped = []
     for rel in cfg.home_mounts_devcontainer:
@@ -183,6 +194,7 @@ def review(
     trunk_branch: Optional[str] = typer.Argument(default=None, help="Trunk branch to diff against (auto-detected if omitted)"),
     name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
     model: str = typer.Option("", "-m", "--model", help="Claude model"),
+    revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change -- @ for jj, HEAD for git)"),
 ):
     """Launch a code review agent."""
     cfg = Config.from_env()
@@ -206,7 +218,7 @@ def review(
         trunk_branch or "<auto>",
         model or "<default>",
     )
-    launch_review(cfg, feature_branch, trunk_branch, name=name, model=model)
+    launch_review(cfg, feature_branch, trunk_branch, name=name, model=model, revision=revision)
 
 
 @app.command()

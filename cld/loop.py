@@ -8,16 +8,13 @@ import time
 from pathlib import Path
 from string import Template
 
-from cld.agent import launch_agent
+from cld.agent import agent_workspace_path, launch_agent
 from cld.agent_runtime import format_duration, read_agent_cost, wait_for_agent
 from cld.config import Config
-from cld.docker import (
-    build_session_name,
-    cld_tmpdir,
-    find_repo_root,
-)
+from cld.docker import build_session_name
 from cld.log import get_logger
 from cld.vcs import VcsBackend, get_backend
+from cld.vcs.anchor import assert_descendant, create_editable_root, resolve_anchor
 
 log = get_logger(__name__)
 
@@ -100,16 +97,14 @@ def _describe_review_change(
 
 def _compose_iter_prompt(
     task_file: Path | None, inline_prompt: str | None,
-    review_content: str | None, iteration: int, repo_root: Path,
+    review_content: str | None, iteration: int, scratch_dir: Path,
 ) -> tuple[Path | None, str | None]:
     """Build the task prompt inputs for an implementation iteration.
 
-    Returns ``(task_file, inline_prompt)`` to forward to ``launch_agent``.
-    First iteration: forwards the user's inputs unchanged so the agent
-    entrypoint combines them the same way ``cld agent`` does. Subsequent
-    iterations: combines the original task with previous review findings into a
-    staged file under ``.cld/`` and forwards it as ``task_file``, avoiding env-
-    var bloat as findings accumulate.
+    First iteration: forwards the user's inputs unchanged so the agent entrypoint
+    combines them the same way ``cld agent`` does. Subsequent iterations:
+    combines the original task with previous review findings into a staged file
+    under the loop workspace's ``.cld-run/``.
     """
     if iteration == 1 or not review_content:
         return task_file, inline_prompt
@@ -122,7 +117,7 @@ def _compose_iter_prompt(
         f"Address all Critical and Major findings. Minor findings are optional.\n\n"
         f"{review_content}\n"
     )
-    staged = cld_tmpdir(repo_root) / f"loop-impl-iter{iteration}.md"
+    staged = scratch_dir / f"loop-impl-iter{iteration}.md"
     staged.write_text(combined)
     return staged, None
 
@@ -137,14 +132,15 @@ def _load_task_text(task_file: Path | None, inline_prompt: str | None) -> str:
 
 
 def _compose_review_prompt(
-    start_commit: str, loop_branch: str, iteration: int, vcs: VcsBackend,
+    start_commit: str, loop_branch: str, iteration: int,
+    vcs: VcsBackend, scratch_dir: Path,
 ) -> Path:
     """Build the task prompt for a review iteration.
 
     Generates a diff from *start_commit* to the current loop branch tip,
-    saves it as a patch file, and fills in the review template.
+    saves it as a patch file in the loop workspace's ``.cld-run/``, and
+    fills in the review template.
     """
-    repo_root = vcs.repo_root
     diff_content = vcs.diff_between(start_commit, loop_branch)
     if diff_content.startswith("Error:"):
         log.error(f"Failed to generate diff: {diff_content}")
@@ -153,25 +149,21 @@ def _compose_review_prompt(
         log.error("Generated diff is empty -- nothing to review")
         sys.exit(1)
 
-    diff_file = cld_tmpdir(repo_root) / f"loop-diff-iter{iteration}.patch"
+    diff_file = scratch_dir / f"loop-diff-iter{iteration}.patch"
     diff_file.write_text(diff_content)
 
     template_path = Path(__file__).resolve().parent / "prompts/loop-review.md"
     template = Template(template_path.read_text())
 
     content = template.safe_substitute(
-        DIFF_FILE_PATH=f"/workspace/origin/.cld/{diff_file.name}",
+        DIFF_FILE_PATH=f"/workspace/current/.cld-run/{diff_file.name}",
         OUTPUT_FILE=f"CODE_REVIEW_iter{iteration}.md",
         ITERATION=str(iteration),
     )
 
-    task = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".md", prefix=f"loop-review-iter{iteration}-",
-        delete=False, dir=cld_tmpdir(repo_root),
-    )
-    task.write(content)
-    task.close()
-    return Path(task.name)
+    task_file = scratch_dir / f"loop-review-iter{iteration}.md"
+    task_file.write_text(content)
+    return task_file
 
 
 # --- Output formatting ---
@@ -196,7 +188,7 @@ def _print_iteration_result(iteration: int, max_iter: int, severity: dict) -> No
 
 def _print_exit_report(
     loop_branch: str, iteration: int, max_iter: int, reason: str,
-    vcs: VcsBackend, total_cost_usd: float = 0.0,
+    vcs: VcsBackend, anchor: str, total_cost_usd: float = 0.0,
 ) -> None:
     """Print the final summary with VCS-appropriate commands for the user."""
     vcs_name = vcs.name
@@ -205,16 +197,17 @@ def _print_exit_report(
     print(f"Loop completed: {iteration}/{max_iter} iterations ({reason})")
     print("=" * 48)
     print()
+    print(f"Anchor:    {anchor[:12]}")
     print(f"Branch:    {loop_branch}")
     if vcs_name == "jj":
-        print(f"History:   jj log -r '{loop_branch}::@'")
-        print(f"Diff:      jj diff -r '{loop_branch}'")
+        print(f"History:   jj log -r '{anchor}..{loop_branch}'")
+        print(f"Diff:      jj diff --from {anchor} --to {loop_branch}")
         if iteration > 0:
             print(f"Review:    jj file show -r '{loop_branch}' CODE_REVIEW_iter{iteration}.md")
         print(f"Merge:     jj squash --from '{loop_branch}'")
     else:
-        print(f"History:   git log {loop_branch}")
-        print(f"Diff:      git diff {loop_branch}~1..{loop_branch}")
+        print(f"History:   git log {anchor}..{loop_branch}")
+        print(f"Diff:      git diff {anchor}..{loop_branch}")
         if iteration > 0:
             print(f"Review:    git show {loop_branch}:CODE_REVIEW_iter{iteration}.md")
         print(f"Merge:     git merge {loop_branch}")
@@ -266,16 +259,6 @@ def _prompt_user(severity: dict, review_content: str) -> tuple[str, str]:
 # --- Cleanup ---
 
 
-def _cleanup_temp_files(repo_root: Path) -> None:
-    """Remove temporary files created during loop iterations."""
-    tmp = repo_root / ".cld"
-    if not tmp.is_dir():
-        return
-    for pattern in ("loop-impl-*", "loop-review-*", "loop-diff-*", "review-diff-*", "review-task-*"):
-        for f in tmp.glob(pattern):
-            f.unlink(missing_ok=True)
-
-
 # --- Main loop ---
 
 
@@ -301,12 +284,15 @@ def run_loop(
     vcs = get_backend()
     repo_root = vcs.repo_root
     loop_branch = build_session_name("loop", name)
-    default_rev = "@" if vcs.name == "jj" else "HEAD"
-    start_commit = vcs.resolve_revision(revision or default_rev)
+    anchor = resolve_anchor(vcs, revision)
+    loop_ws = agent_workspace_path(repo_root, loop_branch)
+    create_editable_root(vcs, anchor, loop_ws, loop_branch)
+    loop_vcs = type(vcs)(repo_root=repo_root, workspace_path=loop_ws)
+    scratch_dir = loop_ws / ".cld-run"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    start_commit = anchor
 
-    vcs.create_branch(loop_branch, start_commit)
-
-    log.info(f"Loop '{loop_branch}' started at {start_commit[:12]}")
+    log.info(f"Loop '{loop_branch}' started at anchor {anchor[:12]}")
 
     review_content: str | None = None
     final_reason = "max iterations reached"
@@ -320,8 +306,13 @@ def run_loop(
 
             # --- IMPLEMENT ---
             impl_task_file, impl_inline = _compose_iter_prompt(
-                task_file, inline_prompt, review_content, iteration, repo_root,
+                task_file, inline_prompt, review_content, iteration, scratch_dir,
             )
+            if impl_task_file is not None and iteration > 1:
+                # Commit the composed input on loop_branch so it appears in the
+                # per-iteration agent's workspace at /workspace/current/.cld-run/.
+                loop_vcs.commit(f"[loop impl {iteration}] inputs")
+                loop_vcs.set_branch(loop_branch, "@-" if vcs.name == "jj" else "HEAD")
             impl_session = f"{loop_branch}_impl{iteration}"
 
             _print_phase(iteration, max_iterations, "implementing...", impl_session)
@@ -358,11 +349,16 @@ def run_loop(
                 break
 
             _describe_impl_change(impl_session, iteration, task_file, inline_prompt, review_content, vcs)
+            assert_descendant(vcs, anchor, impl_session)
             vcs.set_branch(loop_branch, impl_session)
             vcs.delete_branch(impl_session)
 
             # --- REVIEW ---
-            review_task = _compose_review_prompt(start_commit, loop_branch, iteration, vcs)
+            review_task = _compose_review_prompt(start_commit, loop_branch, iteration, vcs, scratch_dir)
+            # Commit the review scratch (diff + task) on loop_branch so it appears
+            # in the review agent's workspace at /workspace/current/.cld-run/.
+            loop_vcs.commit(f"[loop review {iteration}] inputs")
+            loop_vcs.set_branch(loop_branch, "@-" if vcs.name == "jj" else "HEAD")
             review_session = f"{loop_branch}_review{iteration}"
 
             _print_phase(iteration, max_iterations, "reviewing...", review_session)
@@ -402,6 +398,7 @@ def run_loop(
 
             _describe_review_change(review_session, iteration, severity, vcs)
             if review_summary.get("status") == "success":
+                assert_descendant(vcs, anchor, review_session)
                 vcs.set_branch(loop_branch, review_session)
             vcs.delete_branch(review_session)
 
@@ -426,5 +423,4 @@ def run_loop(
             log_warn(f"Stopping container {current_cid[:12]}...")
             subprocess.run(["docker", "stop", "--time=10", current_cid], capture_output=True)
 
-    _print_exit_report(loop_branch, final_iteration, max_iterations, final_reason, vcs, total_cost_usd)
-    _cleanup_temp_files(repo_root)
+    _print_exit_report(loop_branch, final_iteration, max_iterations, final_reason, vcs, anchor, total_cost_usd)

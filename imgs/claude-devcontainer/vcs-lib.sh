@@ -200,6 +200,22 @@ vcs_squash_into_parent() {
     fi
 }
 
+# --- Anchor immutability guard ----------------------------------------------
+
+vcs_assert_descendant() {
+    # Exit 0 if REV descends from ANCHOR, non-zero otherwise.
+    # Args: $1=anchor  $2=rev
+    local anchor="$1" rev="$2"
+
+    if [ "$VCS_TYPE" = "jj" ]; then
+        local out
+        out=$(jj log -r "ancestors($rev) & $anchor" --no-graph -T 'commit_id' -n 1 2>/dev/null)
+        [ -n "$out" ]
+    else
+        git merge-base --is-ancestor "$anchor" "$rev" >/dev/null 2>&1
+    fi
+}
+
 # --- After-commit branch update ---------------------------------------------
 
 vcs_update_branch_after_commit() {

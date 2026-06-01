@@ -110,12 +110,22 @@ Container-side env vars consumed by shell entrypoints (NOT read by Python `Confi
 |---|---|---|
 | `SESSION_NAME` | `build_container_args` -> container | Branch/workspace name |
 | `INSTRUCTION_FILE` | agent launch -> container | Task file path |
-| `AGENT_MODEL` / `AGENT_REVISION` | launcher -> container | Claude model / revision for workspace init |
+| `AGENT_MODEL` | launcher -> container | Claude model |
+| `AGENT_ANCHOR_HASH` | launcher -> container | Anchor commit hash; in-container guard enforces all session changes descend from it |
+| `WORKSPACE_PREINITIALIZED` | launcher -> container | Always `1`; host pre-creates the workspace as an empty editable_root child of the anchor |
 | `AGENT_COMMIT_MSG_LLM` / `AGENT_SYSTEM_PROMPT_FILE` | user -> container | Optional agent overrides |
 | `MYSQL_DEFAULTS_FILE` | `build_container_args` -> container | Credentials path inside container |
 | `WORKSPACE_ORIGIN` | `container-init.sh` -> Python | `/workspace/origin` (read by `vcs/detect.py`) |
 
 **Logging.** `cld/log.py` configures a stderr handler on the `cld.*` logger hierarchy. All modules use `log = get_logger(__name__)`. Logs go to stderr only — stdout is reserved for user-facing deliverables (final reports, list rows, prompts). Levels: DEBUG (verbose, every subprocess + VCS call), INFO (default; major lifecycle events), WARNING (recoverable issues), ERROR (failed operations).
+
+## Anchor change contract
+
+Every subcommand (`agent`, `devcontainer`, `review`, `loop`, `chain run`) shares one notion of an **anchor change**: an immutable revision from which all command-created changes descend. Default is the current change (`@` / `HEAD`); override with `-r`/`--revision`. The host pins the anchor to a commit hash, creates a single empty **editable root** child as a per-session workspace under `<repo>/.cld/workspaces/<session>/`, and starts the container with `AGENT_ANCHOR_HASH` set. The in-container `vcs_assert_descendant` guard (in `vcs-lib.sh`) refuses to commit or squash if `@` no longer descends from the anchor.
+
+Host-side scratch files (composed task inputs, diff patches, persona stagings) live inside the per-session workspace at `.cld-run/<file>` — never in the caller's main working copy. `.cld-run/` is a reserved directory name inside agent workspaces; it is not gitignored, so each scratch file is structurally rooted in the anchor tree.
+
+Three helpers in `cld/vcs/anchor.py` form the entire shared contract: `resolve_anchor`, `create_editable_root`, `assert_descendant`.
 
 ## Agent Output
 

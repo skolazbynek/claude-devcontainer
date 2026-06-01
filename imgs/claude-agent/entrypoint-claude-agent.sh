@@ -37,36 +37,22 @@ if [ ! -f "$TASK_FILE_MOUNT" ] && [ -z "$AGENT_INLINE_PROMPT" ]; then
     exit 1
 fi
 
-# Stage host configs (jj user.email/name, claude config, etc.) before any
-# VCS operation; jj workspace add creates a working-copy change that needs
+if [ -z "${WORKSPACE_PREINITIALIZED:-}" ]; then
+    echo "Error: Agent container requires the host to pre-create the workspace (WORKSPACE_PREINITIALIZED=1)" >&2
+    exit 1
+fi
+
+if [ -z "${AGENT_ANCHOR_HASH:-}" ]; then
+    echo "Error: AGENT_ANCHOR_HASH must be set" >&2
+    exit 1
+fi
+
+# Stage host configs before any VCS operation; jj working-copy changes need
 # user.email/user.name from ~/.config/jj.
 copy_host_configs
 
-# Detect VCS type (jj or git)
 detect_vcs || exit 1
-
-# --- Workspace setup ---
-
-if [ -z "${WORKSPACE_PREINITIALIZED:-}" ]; then
-    # Legacy path: host did not pre-initialize (e.g. direct container invocation).
-    cd "$WORKSPACE_ORIGIN"
-    WORKSPACE_REV="${AGENT_REVISION:-}"
-    if [ -z "$WORKSPACE_REV" ]; then
-        if [ "$VCS_TYPE" = "jj" ]; then
-            WORKSPACE_REV="@"
-        else
-            WORKSPACE_REV="HEAD"
-        fi
-    fi
-    vcs_create_workspace "$AGENT_NAME" "$WORKSPACE_CURRENT" "$WORKSPACE_REV" 2>&1
-    cd "$WORKSPACE_CURRENT"
-    if [ "$VCS_TYPE" = "jj" ]; then
-        jj bookmark create -r @ "$AGENT_NAME" 2>&1
-    fi
-else
-    # Fast path: workspace was created by the host before container start.
-    cd "$WORKSPACE_CURRENT"
-fi
+cd "$WORKSPACE_CURRENT"
 
 OUTPUT_DIR="$WORKSPACE_CURRENT/agent-output-$AGENT_NAME"
 LOG_FILE="$OUTPUT_DIR/agent.log"
@@ -74,9 +60,6 @@ RESULT_FILE="$OUTPUT_DIR/result.json"
 SUMMARY_FILE="$OUTPUT_DIR/summary.json"
 mkdir -p "$OUTPUT_DIR"
 
-# Compose the effective task file inside the agent workspace so it lives on
-# the agent's change rather than the host's working copy. If only a mounted
-# task file is provided (no inline prompt), use it directly.
 if [ -n "$AGENT_INLINE_PROMPT" ]; then
     INSTRUCTION_FILE="$OUTPUT_DIR/task.md"
     if [ -f "$TASK_FILE_MOUNT" ]; then
@@ -89,7 +72,7 @@ else
     INSTRUCTION_FILE="$TASK_FILE_MOUNT"
 fi
 
-log "Agent $AGENT_NAME started (VCS: $VCS_TYPE)"
+log "Agent $AGENT_NAME started (VCS: $VCS_TYPE, anchor: ${AGENT_ANCHOR_HASH:0:12})"
 
 # --- Configure MCP servers ---
 
@@ -116,7 +99,6 @@ $INSTRUCTIONS"
 START_TIME=$(date +%s)
 log "Executing Claude..."
 
-# Progress monitor - logs every 30s while Claude runs
 (while sleep 30; do log "Still running... $(($(date +%s) - START_TIME))s elapsed"; done) &
 PROGRESS_PID=$!
 
@@ -172,6 +154,14 @@ if vcs_has_changes; then
     fi
     log "Commit message: $COMMIT_MSG"
 
+    if ! vcs_assert_descendant "$AGENT_ANCHOR_HASH" "@"; then
+        log_error "Pre-commit anchor check failed; @ is not a descendant of $AGENT_ANCHOR_HASH"
+        printf 'anchor_violation: @ is not a descendant of %s\n' "$AGENT_ANCHOR_HASH" \
+            > "$WORKSPACE_CURRENT/AGENT-FAILURE.md"
+        TASK_STATUS="anchor_violation"
+        exit 4
+    fi
+
     if ! vcs_commit "$COMMIT_MSG" 2>&1 | tee -a "$LOG_FILE"; then
         log_error "Failed to commit changes"
         TASK_STATUS="commit_failed"
@@ -187,16 +177,13 @@ else
     TASK_STATUS="no_changes"
 fi
 
-# Check for AGENT-FAILURE.md written by the agent
 FAILURE_JSON_STR="null"
 if [ -f "$WORKSPACE_CURRENT/AGENT-FAILURE.md" ]; then
     log "AGENT-FAILURE.md detected - task failed"
     FAILURE_JSON_STR=$(jq -Rs . < "$WORKSPACE_CURRENT/AGENT-FAILURE.md")
     cp "$WORKSPACE_CURRENT/AGENT-FAILURE.md" "$OUTPUT_DIR/AGENT-FAILURE.md" 2>/dev/null || true
-    TASK_STATUS="failed"
+    [ "$TASK_STATUS" = "success" ] && TASK_STATUS="failed"
 fi
-
-# --- Generate summary ---
 
 cat > "$SUMMARY_FILE" <<EOF
 {
@@ -204,6 +191,7 @@ cat > "$SUMMARY_FILE" <<EOF
   "agent_name": "$AGENT_NAME",
   "branch": "$AGENT_NAME",
   "commit_hash": "$COMMIT_HASH",
+  "anchor_hash": "$AGENT_ANCHOR_HASH",
   "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "duration_seconds": $DURATION,
   "claude_exit_code": $CLAUDE_EXIT,
@@ -224,10 +212,13 @@ EOF
 
 log "Summary written to $SUMMARY_FILE"
 
-# Squash summary into the agent's commit
 if [ "$TASK_STATUS" = "success" ] || [ "$TASK_STATUS" = "failed" ]; then
-    vcs_squash_into_parent 2>&1 | tee -a "$LOG_FILE" || \
-        log_error "Failed to include summary in commit (non-fatal)"
+    if vcs_assert_descendant "$AGENT_ANCHOR_HASH" "$AGENT_NAME"; then
+        vcs_squash_into_parent 2>&1 | tee -a "$LOG_FILE" || \
+            log_error "Failed to include summary in commit (non-fatal)"
+    else
+        log_error "Post-commit anchor check failed; skipping summary squash"
+    fi
 fi
 
 log "Agent execution complete"
