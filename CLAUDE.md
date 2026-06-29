@@ -70,7 +70,7 @@ docker build -f imgs/claude-agent/Dockerfile.claude-agent -t claude-agent:latest
 cld devcontainer [-n name]
 
 # Autonomous agent
-cld agent [-n name] [-m model] [-r revision] [-p prompt] [task-file.md]
+cld agent [-n name] [-m model] [-r revision] [-p prompt] [task-file.md|@<name>]
 
 # Code review agent
 cld review [-n name] [-m model] <feature-branch> <trunk-branch>
