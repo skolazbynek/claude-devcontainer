@@ -14,7 +14,7 @@ from typing import Optional
 import typer
 
 from cld.agent import launch_agent, launch_review
-from cld.chain import ParallelGroup, chain_state_dir, load_chain, print_chain_report, run_chain, validate_chain
+from cld.chain import ParallelGroup, apply_name_override, chain_state_dir, load_chain, print_chain_report, run_chain, validate_chain
 from cld.chain_state import ChainState, StateWriter, write_state, _utcnow_iso
 from cld.config import Config
 from cld.docker import (
@@ -420,6 +420,7 @@ def chain_run(
     cld_root = Path(__file__).resolve().parent.parent
     chain = load_chain(chain_path)
     validate_chain(chain, repo_root, cld_root)
+    chain = apply_name_override(chain, name)
 
     # Pin the anchor in the foreground (like `cld agent`) so it tracks where the
     # user is at invocation, not where the detached child happens to boot.
@@ -457,6 +458,7 @@ def chain_run(
             "inline_prompt": prompt,
             "revision": revision,
             "model": model,
+            "name": name,
         },
     )
     write_state(state_dir / "state.json", initial_state.to_dict())
@@ -527,6 +529,7 @@ def _chain_runner(
             initial_task=task_text,
             inline_prompt=state.inputs.get("inline_prompt") or None,
             revision=state.inputs.get("revision", ""),
+            name_suffix=state.inputs.get("name", ""),
             state_writer=writer,
             anchor_hash=state.anchor_hash,
         )

@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 from typer.testing import CliRunner
 
-from cld.chain import chain_branch, load_chain, run_chain, validate_chain
+from cld.chain import apply_name_override, chain_branch, load_chain, run_chain, validate_chain
 from cld.chain_state import ChainState, _utcnow_iso, write_state
 from cld.cli import _collect_chain_rows, app
 from cld.config import Config
@@ -79,6 +79,57 @@ class TestLoadValidate:
         validate_chain(chain, tmp_path, _CLD_ROOT)
         assert len(chain.steps) == 1
         assert len(chain.steps[0].siblings) == 2
+
+
+class TestNameOverride:
+    def test_apply_name_override_replaces_name(self, tmp_path):
+        f = _write_chain(
+            tmp_path / "c.yaml", "demo",
+            "  - name: build\n    persona: implementer\n",
+        )
+        chain = load_chain(f)
+        overridden = apply_name_override(chain, "myrun")
+        assert overridden.name == "myrun"
+        assert chain_branch(overridden) == "chain_myrun"
+
+    def test_apply_name_override_empty_is_noop(self, tmp_path):
+        f = _write_chain(
+            tmp_path / "c.yaml", "demo",
+            "  - name: build\n    persona: implementer\n",
+        )
+        chain = load_chain(f)
+        assert apply_name_override(chain, "").name == "demo"
+
+    def test_apply_name_override_rejects_bad_chars(self, tmp_path):
+        f = _write_chain(
+            tmp_path / "c.yaml", "demo",
+            "  - name: build\n    persona: implementer\n",
+        )
+        chain = load_chain(f)
+        with pytest.raises(ValueError):
+            apply_name_override(chain, "bad name!")
+
+    def test_run_chain_name_suffix_overrides_branch(self, vcs_repo, monkeypatch):
+        vcs = vcs_repo
+        la_mock = _install_chain_mocks(monkeypatch, vcs, [{"status": "success"}])
+        f = _write_chain(
+            vcs.repo_root / "c.yaml", "demo",
+            "  - name: build\n    persona: implementer\n",
+        )
+
+        def fake(cfg, *, revision="", session_name=None, **kw):
+            _make_fake_agent_commit(
+                vcs, revision, session_name,
+                {"chain-outputs/myrun/build.md": "X\n"},
+            )
+            return {"session_name": session_name}
+
+        la_mock.side_effect = fake
+        result = run_chain(Config(), f, inline_prompt="x", name_suffix="myrun")
+        assert result.chain_name == "myrun"
+        assert result.chain_branch == "chain_myrun"
+        session_used = la_mock.call_args.kwargs["session_name"]
+        assert session_used == "chain_myrun_build"
 
 
 # --- run_chain core -----------------------------------------------------------

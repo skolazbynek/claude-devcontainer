@@ -6,7 +6,7 @@ import logging
 import re
 import time
 import yaml
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from string import Template
 from typing import TYPE_CHECKING, Iterator
@@ -273,6 +273,22 @@ def compose_task(
     return staged
 
 
+def apply_name_override(chain: Chain, override: str) -> Chain:
+    """Return a copy of *chain* whose `name` is replaced by *override*.
+
+    Used to honour `cld chain run -n <name>`: the user-provided name takes
+    over chain.name so it flows into branches, sessions, workspaces, state
+    dirs, output paths and report banners uniformly.
+    """
+    if not override:
+        return chain
+    if not _NAME_RE.match(override):
+        raise ValueError(
+            f"chain name override '{override}' must match {_NAME_RE.pattern}"
+        )
+    return replace(chain, name=override)
+
+
 def chain_branch(chain: Chain) -> str:
     return f"chain_{chain.name}"
 
@@ -417,6 +433,7 @@ def run_chain(
 
     chain = load_chain(chain_file)
     validate_chain(chain, repo_root, cld_root)
+    chain = apply_name_override(chain, name_suffix)
     log.info("Chain '%s' starting with %d step(s)", chain.name, len(chain.steps))
     log.debug("run_chain: name=%s file=%s steps=%d", chain.name, chain_file, len(chain.steps))
 
