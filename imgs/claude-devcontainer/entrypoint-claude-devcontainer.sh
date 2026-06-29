@@ -25,6 +25,8 @@ cd "$WORKSPACE_CURRENT"
 
 build_claude_config
 
+link_workspace_files
+
 if command -v poetry &>/dev/null; then
     while IFS= read -r pyproject; do
         project_dir=$(dirname "$pyproject")

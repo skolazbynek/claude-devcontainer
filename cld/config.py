@@ -57,6 +57,7 @@ _TOML_KEYS = {
     "chain_default_model",
     "log_level",
     "log_color",
+    "ignore_gitignore",
 }
 
 
@@ -178,6 +179,9 @@ class Config:
     chain_max_parallel: int = 4
     chain_default_model: str = ""
 
+    # Workspace setup: gitignored files to symlink into workspace
+    ignore_gitignore: tuple[str, ...] = ()
+
     # Diagnostics
     debug: bool = False
     log_level: str = "INFO"
@@ -222,4 +226,5 @@ class Config:
             trunk_candidates=tuple(layered.get("trunk_candidates", ("main", "master", "trunk"))),
             chain_max_parallel=_env_int("CLD_CHAIN_MAX_PARALLEL", int(layered.get("chain_max_parallel", 4))),
             chain_default_model=_env_str("CLD_CHAIN_DEFAULT_MODEL", layered.get("chain_default_model", "")),
+            ignore_gitignore=tuple(layered.get("ignore_gitignore", ())),
         )

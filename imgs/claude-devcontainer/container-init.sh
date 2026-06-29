@@ -13,6 +13,23 @@ if [ -n "${MYSQL_DEFAULTS_FILE:-}" ] && [ -f "$MYSQL_DEFAULTS_FILE" ]; then
     chmod +x /tmp/bin/mysql
 fi
 
+# Symlink workspace-root files (e.g., .env) from origin into workspace.
+# WORKSPACE_FILES is colon-separated, e.g., ".env:.envrc"
+link_workspace_files() {
+    local files="${WORKSPACE_FILES:-}"
+    [ -z "$files" ] && return 0
+
+    local IFS=':'
+    for file in $files; do
+        if [ -f "$WORKSPACE_ORIGIN/$file" ]; then
+            ln -sf "$WORKSPACE_ORIGIN/$file" "$WORKSPACE_CURRENT/$file"
+            echo "[INFO] Linked $file from origin"
+        else
+            echo "[WARN] $file not found in origin, skipping"
+        fi
+    done
+}
+
 # Copy staged host config tree into $HOME.
 # Every RO $HOME mount is staged under /tmp/host-config/<rel> by the launcher;
 # we overlay that tree onto $HOME so the container has writable copies and

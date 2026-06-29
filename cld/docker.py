@@ -319,6 +319,12 @@ def build_container_args(
     args += ["-e", f"SESSION_NAME={session_name}"]
     log.info(f"Session name: {session_name}")
 
+    # Workspace setup: gitignored files to symlink into workspace
+    if cfg.ignore_gitignore:
+        workspace_files = ":".join(cfg.ignore_gitignore)
+        args += ["-e", f"WORKSPACE_FILES={workspace_files}"]
+        log.debug(f"Workspace files to link: {workspace_files}")
+
     # Docker socket (conditional)
     docker_sock = Path("/var/run/docker.sock")
     sock_present = docker_sock.is_socket()

@@ -1,0 +1,21 @@
+name: deep-research
+description: multiple research agents in parallel
+
+defaults:
+  model: opus
+
+steps:
+  - parallel:
+    - name: researcher-1
+      persona: researcher
+    - name: researcher-2
+      persona: researcher
+    - name: researcher-3
+      persona: researcher
+
+  - name: combinator
+    persona: reviewer
+    model: sonnet
+    prompt: |
+      Three prior researchers produced findings. Your job is to review them and consolidate them for a review by a human.
+      Compile a list of findings with those that have appeared multiple times ranked at top.
