@@ -13,7 +13,7 @@ from typing import Optional
 
 import typer
 
-from cld.agent import launch_agent, launch_review
+from cld.agent import agent_workspace_path, launch_agent, launch_review
 from cld.chain import ParallelGroup, apply_name_override, chain_state_dir, load_chain, print_chain_report, run_chain, validate_chain
 from cld.chain_state import ChainState, StateWriter, write_state, _utcnow_iso
 from cld.config import Config
@@ -31,9 +31,10 @@ from cld.docker import (
     to_host_path,
 )
 from cld.log import get_logger, setup_logging
+from cld.prompts import resolve_prompt_ref
 from cld.loop import run_loop
 from cld.vcs import get_backend
-from cld.vcs.anchor import resolve_anchor
+from cld.vcs.anchor import create_editable_root, resolve_anchor
 
 log = get_logger(__name__)
 
@@ -71,20 +72,34 @@ def main(
 @app.command()
 @_handle_errors
 def agent(
-    task_file: Optional[str] = typer.Argument(None, help="Path to task markdown file"),
+    task_file: Optional[str] = typer.Argument(None, help="Path to task markdown file, or @<name> to resolve from prompts/"),
     name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
     model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
     revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change -- @ for jj, HEAD for git)"),
     prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (appended to task file if both given)"),
 ):
     """Launch an autonomous Claude agent."""
-    task_path = Path(task_file) if task_file else None
-    if task_path and not task_path.is_file():
-        typer.echo(f"Error: Task file not found: {task_file}", err=True)
-        raise typer.Exit(1)
+    task_path: Path | None = None
+
+    if task_file and task_file.startswith("@"):
+        cld_root = Path(__file__).resolve().parent.parent
+        repo_root = find_repo_root()
+        try:
+            task_path = resolve_prompt_ref(task_file[1:], repo_root, cld_root)
+        except (FileNotFoundError, ValueError) as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+        log.info("resolved @%s -> %s", task_file[1:], task_path)
+    elif task_file:
+        task_path = Path(task_file)
+        if not task_path.is_file():
+            typer.echo(f"Error: Task file not found: {task_file}", err=True)
+            raise typer.Exit(1)
+
     if not task_path and not prompt:
         typer.echo("Error: Provide a task file, --prompt, or both", err=True)
         raise typer.Exit(1)
+
     cfg = Config.from_env()
     setup_logging(cfg)
     log.info(
@@ -95,6 +110,7 @@ def agent(
         str(task_path) if task_path else "<none>",
         "<provided>" if prompt else "<none>",
     )
+
     launch_agent(
         cfg,
         task_file=task_path,

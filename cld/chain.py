@@ -16,6 +16,7 @@ from cld.agent_runtime import wait_for_agent, read_agent_cost, format_duration
 from cld.config import Config
 from cld.docker import find_repo_root
 from cld.log import get_logger
+from cld.prompts import stage_persona_without_frontmatter
 from cld.vcs import get_backend
 from cld.vcs.anchor import assert_descendant, create_editable_root, resolve_anchor
 
@@ -146,25 +147,6 @@ def persona_resolve(name: str, repo_root: Path, cld_root: Path) -> Path:
         f"or {cld_root}/prompts/personas/"
     )
 
-
-def _stage_persona_without_frontmatter(
-    persona_path: Path, chain: Chain, step: ChainStep, scratch_dir: Path,
-) -> Path:
-    """Strip YAML frontmatter from a persona and stage it under .cld-run/.
-
-    Claude's CLI rejects system prompts that start with `---` (it tries to
-    parse the frontmatter as YAML). The cld personas use frontmatter for
-    `cld chain list` discovery; we strip it before passing as system prompt.
-    """
-    text = persona_path.read_text()
-    if text.lstrip().startswith("---"):
-        stripped = text.lstrip()
-        end = stripped.find("---", 3)
-        if end != -1:
-            text = stripped[end + 3:].lstrip()
-    staged = scratch_dir / f"persona-{chain.name}-{step.name}.md"
-    staged.write_text(text)
-    return staged
 
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -359,7 +341,7 @@ def execute_step(
 ) -> StepResult:
     """Launch one agent for one step, wait for completion, return its result."""
     persona_path = persona_resolve(step.persona, repo_root, cld_root)
-    persona_path = _stage_persona_without_frontmatter(persona_path, chain, step, scratch_dir)
+    persona_path = stage_persona_without_frontmatter(persona_path, scratch_dir)
     task_file = compose_task(
         chain=chain, step=step,
         initial_task=initial_task,
@@ -647,7 +629,7 @@ def _run_parallel(
     for sibling in group.siblings:
         session = step_session(chain, sibling, group_idx=group_idx)
         persona_path = persona_resolve(sibling.persona, repo_root, cld_root)
-        persona_path = _stage_persona_without_frontmatter(persona_path, chain, sibling, scratch_dir)
+        persona_path = stage_persona_without_frontmatter(persona_path, scratch_dir)
         task_file = compose_task(
             chain=chain, step=sibling,
             initial_task=initial_task,
