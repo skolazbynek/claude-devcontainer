@@ -1,15 +1,21 @@
 """CLI entry point for cld."""
 
+import calendar
 import functools
+import json
 import os
+import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Optional
 
 import typer
 
 from cld.agent import launch_agent, launch_review
-from cld.chain import ParallelGroup, load_chain, print_chain_report, run_chain, validate_chain
+from cld.chain import ParallelGroup, chain_state_dir, load_chain, print_chain_report, run_chain, validate_chain
+from cld.chain_state import ChainState, StateWriter, write_state, _utcnow_iso
 from cld.config import Config
 from cld.docker import (
     agent_extra_paths,
@@ -27,6 +33,7 @@ from cld.docker import (
 from cld.log import get_logger, setup_logging
 from cld.loop import run_loop
 from cld.vcs import get_backend
+from cld.vcs.anchor import resolve_anchor
 
 log = get_logger(__name__)
 
@@ -370,8 +377,12 @@ def chain_run(
     name: str = typer.Option("", "-n", "--name", help="Chain session name suffix"),
     model: str = typer.Option("", "-m", "--model", help="Override default model"),
     revision: str = typer.Option("", "-r", "--revision", help="Starting revision"),
+    no_detach: bool = typer.Option(
+        False, "--no-detach", "--foreground",
+        help="Run synchronously in the foreground (do not detach).",
+    ),
 ):
-    """Run a multi-agent chain end to end."""
+    """Run a multi-agent chain end to end (detached by default)."""
     chain_path = _resolve_chain_path(chain_file)
     if not chain_path.is_file():
         typer.echo(f"Error: chain file not found: {chain_file}", err=True)
@@ -387,19 +398,154 @@ def chain_run(
     cfg = Config.from_env()
     setup_logging(cfg)
     log.info(
-        "chain run: file=%s, name=%s, model=%s",
-        chain_file,
-        name or "<auto>",
-        model or "<default>",
+        "chain run: file=%s, name=%s, model=%s, no_detach=%s",
+        chain_file, name or "<auto>", model or "<default>", no_detach,
     )
-    initial = task_path.read_text() if task_path else None
-    result = run_chain(
-        cfg, chain_path,
-        initial_task=initial, inline_prompt=prompt or None,
-        revision=revision, name_suffix=name,
+
+    if no_detach:
+        if model:
+            os.environ["CLD_CHAIN_DEFAULT_MODEL"] = model
+            cfg = Config.from_env()
+        initial = task_path.read_text() if task_path else None
+        result = run_chain(
+            cfg, chain_path,
+            initial_task=initial, inline_prompt=prompt or None,
+            revision=revision, name_suffix=name,
+        )
+        print_chain_report(result, get_backend())
+        raise typer.Exit(0 if result.success else 1)
+
+    # --- Detached mode ---
+    repo_root = find_repo_root()
+    cld_root = Path(__file__).resolve().parent.parent
+    chain = load_chain(chain_path)
+    validate_chain(chain, repo_root, cld_root)
+
+    # Pin the anchor in the foreground (like `cld agent`) so it tracks where the
+    # user is at invocation, not where the detached child happens to boot.
+    # Resolve before GC so a bad -r errors without disturbing any prior archive.
+    anchor_hash = resolve_anchor(get_backend(), revision)
+    log.info("Chain anchor: %s", anchor_hash[:12])
+
+    state_dir = chain_state_dir(repo_root, chain.name)
+    _gc_or_refuse(state_dir, chain.name)
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    initial_state = ChainState(
+        schema_version=1,
+        kind="chain",
+        chain_name=chain.name,
+        chain_session=f"chain_{chain.name}",
+        chain_branch=f"chain_{chain.name}",
+        chain_file=str(chain_path.resolve()),
+        anchor_hash=anchor_hash,
+        pid=0,
+        started_at=_utcnow_iso(),
+        finished_at=None,
+        log_file=str(state_dir / "chain.log"),
+        status="running",
+        total_steps=len(chain.steps),
+        current_index=0,
+        current_kind="pending",
+        current_step_name="",
+        current_step_sessions=[],
+        completed_steps=[],
+        total_cost_usd=0.0,
+        failure_reason="",
+        inputs={
+            "task_file": str(task_path.resolve()) if task_path else "",
+            "inline_prompt": prompt,
+            "revision": revision,
+            "model": model,
+        },
     )
-    print_chain_report(result, get_backend())
-    raise typer.Exit(0 if result.success else 1)
+    write_state(state_dir / "state.json", initial_state.to_dict())
+
+    child_env = os.environ.copy()
+    if model:
+        child_env["CLD_CHAIN_DEFAULT_MODEL"] = model
+
+    pid = _spawn_chain_runner(state_dir, repo_root, child_env)
+    (state_dir / "pid").write_text(f"{pid}\n")
+
+    # Record the child pid immediately so `cld chain status` doesn't briefly
+    # report the chain as stale (pid 0) during the window before the child boots.
+    initial_state.pid = pid
+    write_state(state_dir / "state.json", initial_state.to_dict())
+
+    _print_chain_launch_banner(chain.name, pid, state_dir)
+
+
+def _spawn_chain_runner(state_dir: Path, repo_root: Path, child_env: dict) -> int:
+    """Detach the background chain runner; return its pid."""
+    log_fh = open(state_dir / "chain.log", "ab", buffering=0)
+    child = subprocess.Popen(
+        [sys.executable, "-m", "cld", "chain", "_chain-runner", str(state_dir)],
+        stdout=log_fh, stderr=log_fh,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        cwd=str(repo_root),
+        env=child_env,
+    )
+    log_fh.close()
+    return child.pid
+
+
+@chain_app.command("_chain-runner", hidden=True)
+def _chain_runner(
+    state_dir: str = typer.Argument(...),
+):
+    """Internal: execute a previously-staged chain run."""
+    state_dir_path = Path(state_dir)
+    state = ChainState.load(state_dir_path / "state.json")
+
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    writer = StateWriter(state_dir_path / "state.json", state)
+
+    writer.update(pid=os.getpid())
+
+    model_override = state.inputs.get("model", "")
+    if model_override:
+        os.environ["CLD_CHAIN_DEFAULT_MODEL"] = model_override
+        cfg = Config.from_env()
+
+    task_text: str | None = None
+    task_file_path = state.inputs.get("task_file", "")
+    if task_file_path:
+        try:
+            task_text = Path(task_file_path).read_text()
+        except OSError as e:
+            log.error("Could not read task file %s: %s", task_file_path, e)
+            writer.mark_finished("failed", reason=f"Cannot read task file: {e}")
+            raise typer.Exit(1)
+
+    try:
+        result = run_chain(
+            cfg,
+            Path(state.chain_file),
+            initial_task=task_text,
+            inline_prompt=state.inputs.get("inline_prompt") or None,
+            revision=state.inputs.get("revision", ""),
+            state_writer=writer,
+            anchor_hash=state.anchor_hash,
+        )
+        final_status = "success" if result.success else "failed"
+        reason = result.failure_reason if not result.success else ""
+        try:
+            writer.mark_finished(final_status, reason=reason)
+        except Exception as write_err:
+            log.error("Failed to write final chain state: %s", write_err)
+        print_chain_report(result, get_backend())
+        raise typer.Exit(0 if result.success else 1)
+    except typer.Exit:
+        raise
+    except KeyboardInterrupt:
+        writer.mark_finished("interrupted", reason="SIGINT")
+        raise
+    except BaseException as e:
+        writer.mark_finished("failed", reason=f"{type(e).__name__}: {e}")
+        raise
 
 
 @chain_app.command("validate")
@@ -492,6 +638,168 @@ def chain_dry_run(
         else:
             model = item.model or chain.defaults.model
             typer.echo(f"  {i}. {item.name} (persona={item.persona}, model={model})")
+
+
+@chain_app.command("status")
+@_handle_errors
+def chain_status(
+    all_: bool = typer.Option(False, "-a", "--all", help="Include terminated chains."),
+    json_out: bool = typer.Option(False, "--json", help="Output as JSON."),
+    watch: float = typer.Option(0.0, "-w", "--watch", help="Refresh every N seconds; 0 = single shot."),
+):
+    """List status of running (and optionally all) chains in this repo."""
+    _render_status(all_, json_out, watch)
+
+
+@chain_app.command("ps", hidden=True)
+@_handle_errors
+def chain_ps(
+    all_: bool = typer.Option(False, "-a", "--all", help="Include terminated chains."),
+    json_out: bool = typer.Option(False, "--json", help="Output as JSON."),
+    watch: float = typer.Option(0.0, "-w", "--watch", help="Refresh every N seconds; 0 = single shot."),
+):
+    """Alias for 'cld chain status'."""
+    _render_status(all_, json_out, watch)
+
+
+def _render_status(all_: bool, json_out: bool, watch: float) -> None:
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    repo_root = find_repo_root()
+    chains_dir = repo_root / ".cld" / "chains"
+
+    def render_once() -> None:
+        rows = _collect_chain_rows(chains_dir, include_terminal=all_)
+        if json_out:
+            typer.echo(json.dumps(rows, indent=2))
+            return
+        _print_status_table(rows)
+
+    if not watch:
+        render_once()
+        return
+
+    while True:
+        if sys.stdout.isatty():
+            os.system("clear")
+        render_once()
+        time.sleep(watch)
+
+
+def _is_pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _collect_chain_rows(chains_dir: Path, include_terminal: bool) -> list[dict]:
+    rows = []
+    if not chains_dir.is_dir():
+        return rows
+    for state_file in sorted(chains_dir.glob("*/state.json")):
+        if state_file.parent.name.endswith(".prev"):
+            continue  # archived previous run, not a current chain
+        try:
+            state = ChainState.load(state_file)
+        except Exception:
+            continue
+        display_status = state.status
+        if state.status == "running" and not _is_pid_alive(state.pid):
+            display_status = "stale"
+        if not include_terminal and display_status not in ("running", "stale"):
+            continue
+        started_ago = _format_age(state.started_at)
+        stage = f"{state.current_index + 1}/{state.total_steps}" if state.status == "running" else "-"
+        rows.append({
+            "name": state.chain_name,
+            "stage": stage,
+            "current": state.current_step_name or "-",
+            "status": display_status,
+            "started": started_ago,
+            "cost_usd": state.total_cost_usd,
+            "pid": state.pid,
+            "log_file": state.log_file,
+        })
+    return rows
+
+
+def _print_status_table(rows: list[dict]) -> None:
+    if not rows:
+        typer.echo("No chains found.")
+        return
+    headers = ("NAME", "STAGE", "CURRENT", "STATUS", "STARTED", "COST")
+    name_w = max(len(headers[0]), *(len(r["name"]) for r in rows))
+    stage_w = max(len(headers[1]), *(len(r["stage"]) for r in rows))
+    cur_w = max(len(headers[2]), *(len(r["current"]) for r in rows))
+    status_w = max(len(headers[3]), *(len(r["status"]) for r in rows))
+    started_w = max(len(headers[4]), *(len(r["started"]) for r in rows))
+    typer.echo(
+        f"{'NAME':<{name_w}}  {'STAGE':<{stage_w}}  {'CURRENT':<{cur_w}}  "
+        f"{'STATUS':<{status_w}}  {'STARTED':<{started_w}}  COST"
+    )
+    for r in rows:
+        typer.echo(
+            f"{r['name']:<{name_w}}  {r['stage']:<{stage_w}}  {r['current']:<{cur_w}}  "
+            f"{r['status']:<{status_w}}  {r['started']:<{started_w}}  ${r['cost_usd']:.2f}"
+        )
+
+
+def _format_age(iso_ts: str) -> str:
+    try:
+        t = time.strptime(iso_ts, "%Y-%m-%dT%H:%M:%SZ")
+        then = calendar.timegm(t)
+        secs = int(time.time()) - then
+    except Exception:
+        return iso_ts
+    if secs < 60:
+        return f"{secs}s ago"
+    if secs < 3600:
+        return f"{secs // 60}m ago"
+    if secs < 86400:
+        return f"{secs // 3600}h ago"
+    return f"{secs // 86400}d ago"
+
+
+def _gc_or_refuse(state_dir: Path, chain_name: str) -> None:
+    """Handle an existing state dir: refuse if running+alive, GC if terminal/stale."""
+    state_file = state_dir / "state.json"
+    if not state_file.exists():
+        return
+    try:
+        state = ChainState.load(state_file)
+    except Exception:
+        # Corrupt state: rename and proceed
+        _rename_to_prev(state_dir)
+        return
+    if state.status == "running" and _is_pid_alive(state.pid):
+        raise RuntimeError(
+            f"Chain '{chain_name}' is already running (pid {state.pid}). "
+            f"Use 'cld chain status' to inspect or kill it first."
+        )
+    _rename_to_prev(state_dir)
+
+
+def _rename_to_prev(state_dir: Path) -> None:
+    prev = state_dir.parent / (state_dir.name + ".prev")
+    if prev.exists():
+        shutil.rmtree(prev)
+    state_dir.rename(prev)
+
+
+def _print_chain_launch_banner(chain_name: str, pid: int, state_dir: Path) -> None:
+    log_file = state_dir / "chain.log"
+    typer.echo(f"\nChain '{chain_name}' detached.")
+    typer.echo(f"  Runner PID:       {pid}")
+    typer.echo(f"  Log file:         {log_file}")
+    typer.echo(f"  Follow progress:  tail -f {log_file}")
+    typer.echo(f"  Status:           cld chain status")
+    typer.echo(f"  Wait:             while kill -0 {pid} 2>/dev/null; do sleep 5; done")
 
 
 def _resolve_chain_path(arg: str) -> Path:

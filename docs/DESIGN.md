@@ -19,9 +19,3 @@ Example UX: (naming can be different later)
 - `cld devcontainer`: starts standard devcontainer (same as now)
 - `cld devcontainer --master`: start master devcontainer in this repo, or if it's already running, returns to it's entrypoint (/workspace/current).
 - `cld devcontainer shutdown [--all]`: shutdown master devcontainer in this repo (or all devcontainer across all repos if --all was specified)
-
-3: Claude sandbox mode shouldn't be used at all inside devcontainer/agent. They are already sandboxed environments. 
-
-4: I should have an access to the `cld` commands inside a devcontainer the exact same way as on host and they should work the exact same way.
-
-5: `cld chain` should run in background after first initialization and log output with behaviour same as `cld agent`. A subcommand should be added (something along the lines of `cld chain status`) that will list the current status of all running chains within this repo. The status should contain on which stage out of total they are running.

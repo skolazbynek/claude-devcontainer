@@ -9,7 +9,7 @@ import yaml
 from dataclasses import dataclass
 from pathlib import Path
 from string import Template
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
 
 from cld.agent import agent_workspace_path, launch_agent
 from cld.agent_runtime import wait_for_agent, read_agent_cost, format_duration
@@ -18,6 +18,9 @@ from cld.docker import find_repo_root
 from cld.log import get_logger
 from cld.vcs import get_backend
 from cld.vcs.anchor import assert_descendant, create_editable_root, resolve_anchor
+
+if TYPE_CHECKING:
+    from cld.chain_state import StateWriter
 
 log = get_logger(__name__)
 
@@ -393,6 +396,10 @@ class ChainResult:
     anchor_hash: str = ""
 
 
+def chain_state_dir(repo_root: Path, chain_name: str) -> Path:
+    return repo_root / ".cld" / "chains" / f"chain_{chain_name}"
+
+
 def run_chain(
     cfg: Config,
     chain_file: Path,
@@ -401,6 +408,8 @@ def run_chain(
     inline_prompt: str | None = None,
     revision: str = "",
     name_suffix: str = "",
+    state_writer: "StateWriter | None" = None,
+    anchor_hash: str = "",
 ) -> ChainResult:
     repo_root = find_repo_root()
     cld_root = Path(__file__).resolve().parent.parent
@@ -411,12 +420,15 @@ def run_chain(
     log.info("Chain '%s' starting with %d step(s)", chain.name, len(chain.steps))
     log.debug("run_chain: name=%s file=%s steps=%d", chain.name, chain_file, len(chain.steps))
 
-    anchor = resolve_anchor(vcs, revision)
+    anchor = anchor_hash or resolve_anchor(vcs, revision)
     chain_ws = agent_workspace_path(repo_root, chain_branch(chain))
     initialise_chain_branch(chain, vcs, anchor, chain_ws)
     scratch_dir = chain_ws / ".cld-run"
     scratch_dir.mkdir(parents=True, exist_ok=True)
     log.info("Chain anchor: %s", anchor[:12])
+
+    if state_writer is not None:
+        state_writer.set_anchor(anchor)
 
     initial_text = _merge_initial(initial_task, inline_prompt)
 
@@ -429,6 +441,10 @@ def run_chain(
             if isinstance(item, ParallelGroup):
                 log.info("Parallel group %d: launching %d siblings", i, len(item.siblings))
                 log.debug("parallel group (%d siblings) launching", len(item.siblings))
+                if state_writer is not None:
+                    sibling_names = ",".join(s.name for s in item.siblings)
+                    sibling_sessions = [step_session(chain, s, group_idx=i) for s in item.siblings]
+                    state_writer.mark_step_start(i, "parallel", sibling_names, sibling_sessions)
                 prior_outputs = _gather_prior_outputs(chain, item, results, i)
                 step_initial = initial_text or None
                 group_results = _run_parallel(
@@ -440,6 +456,11 @@ def run_chain(
                 )
                 results.extend(group_results)
                 failures = [r for r in group_results if r.status not in ("success", "no_changes", "unknown")]
+                if state_writer is not None:
+                    group_status = "failed" if failures else "success"
+                    group_cost = sum(r.cost_usd for r in group_results)
+                    group_dur = sum(r.duration_seconds for r in group_results)
+                    state_writer.mark_step_done(sibling_names, group_status, group_dur, group_cost)
                 if failures:
                     failure_reason = (
                         f"parallel group {i} had {len(failures)} failed siblings: "
@@ -469,6 +490,8 @@ def run_chain(
                 i + 1, len(chain.steps), step.name, step.persona, model_eff,
                 chain_branch(chain), session,
             )
+            if state_writer is not None:
+                state_writer.mark_step_start(i, "step", step.name, [session])
             prior_outputs = _gather_prior_outputs(chain, step, results, i)
             step_initial = initial_text or None
 
@@ -491,6 +514,11 @@ def run_chain(
                 step.name, result.status, result.cost_usd, result.duration_seconds,
                 len(result.output_text),
             )
+            if state_writer is not None:
+                state_writer.mark_step_done(
+                    step.name, result.status,
+                    result.duration_seconds, result.cost_usd,
+                )
 
             _TERMINAL_FAILURES = {"failed", "commit_failed", "timeout"}
             if result.status in _TERMINAL_FAILURES:
