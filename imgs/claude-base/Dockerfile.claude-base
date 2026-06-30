@@ -75,8 +75,11 @@ COPY imgs/claude-devcontainer/container-init.sh imgs/claude-devcontainer/vcs-lib
 RUN chmod +x container-init.sh vcs-lib.sh && \
     chown claude:claude container-init.sh vcs-lib.sh
 
-# Bake in cld package and prompts
+# Bake in cld package and prompts. PYTHONPATH makes `import cld` work for any
+# in-container invocation (e.g. baked MCP servers run as scripts), since the
+# package is COPY'd rather than installed.
 COPY --chown=claude:claude cld/ /opt/cld/cld/
 COPY --chown=claude:claude prompts/ /opt/cld/prompts/
+ENV PYTHONPATH=/opt/cld
 
 USER claude

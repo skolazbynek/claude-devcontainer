@@ -23,9 +23,12 @@ from cld.docker import (
     build_container_args,
     build_session_name,
     devcontainer_extra_paths,
+    docker_master_list,
+    docker_master_status,
     ensure_image,
     find_repo_context,
     find_repo_root,
+    master_container_name,
     require_docker,
     stage_home_ro,
     to_host_path,
@@ -66,7 +69,7 @@ def main(
     version: bool = typer.Option(False, "--version", callback=_version_callback, is_eager=True, help="Show version and exit"),
 ):
     if ctx.invoked_subcommand is None:
-        ctx.invoke(devcontainer, task_file=None, name="", model="", revision="", prompt="", extra_args=None)
+        _run_devcontainer(None, "", "", "", "", None, False)
 
 
 @app.command()
@@ -122,17 +125,16 @@ def agent(
 
 
 
-@app.command()
-@_handle_errors
-def devcontainer(
-    task_file: Optional[str] = typer.Argument(None, help="Path to task markdown file"),
-    name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
-    model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
-    revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change -- @ for jj, HEAD for git)"),
-    prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (appended to task file if both given)"),
-    extra_args: Optional[list[str]] = typer.Argument(None, help="Extra args passed to container"),
-):
-    """Launch an interactive Claude devcontainer."""
+def _run_devcontainer(
+    task_file: str | None,
+    name: str,
+    model: str,
+    revision: str,
+    prompt: str,
+    extra_args: list[str] | None,
+    master: bool,
+) -> None:
+    """Core devcontainer launch logic shared by the callback and main fallback."""
     require_docker()
     task_path = Path(task_file) if task_file else None
     if task_path and not task_path.is_file():
@@ -140,6 +142,11 @@ def devcontainer(
         raise typer.Exit(1)
     cfg = Config.from_env()
     setup_logging(cfg)
+
+    if master:
+        _run_master_devcontainer(task_path, name, model, revision, prompt, cfg)
+        return
+
     log.info(
         "devcontainer: name=%s, model=%s, revision=%s, task_file=%s, prompt=%s",
         name or "<auto>",
@@ -165,10 +172,6 @@ def devcontainer(
 
     repo_root, _workspace_rev = find_repo_context()
     session = build_session_name("cld", name)
-
-    from cld.agent import agent_workspace_path
-    from cld.vcs import get_backend
-    from cld.vcs.anchor import create_editable_root, resolve_anchor
 
     vcs = get_backend()
     anchor_hash = resolve_anchor(vcs, revision)
@@ -208,6 +211,240 @@ def devcontainer(
     print()
 
     os.execvp("docker", ["docker", "run"] + args)
+
+
+def _is_workspace_valid(vcs, session: str, ws_path: Path) -> bool:
+    """Return True if *ws_path* is currently registered as a workspace in the VCS."""
+    if vcs.name == "jj":
+        result = vcs.run([
+            "--no-pager", "workspace", "list", "--color=never",
+            "--ignore-working-copy", "-T", 'name ++ "\\n"',
+        ])
+        if result.returncode != 0:
+            return False
+        return session in result.stdout.strip().splitlines()
+    else:
+        result = vcs.run(["worktree", "list", "--porcelain"])
+        if result.returncode != 0:
+            return False
+        ws_str = str(ws_path.resolve())
+        return any(
+            line.startswith("worktree ") and line[len("worktree "):].strip() == ws_str
+            for line in result.stdout.splitlines()
+        )
+
+
+def _wait_for_master_ready(name: str, timeout: int = 30) -> bool:
+    """Poll container until /run/cld-master-ready exists. Returns False on timeout."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        result = subprocess.run(
+            ["docker", "exec", name, "test", "-f", "/run/cld-master-ready"],
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            return True
+        time.sleep(1)
+    return False
+
+
+def _run_master_devcontainer(
+    task_path: Path | None,
+    name: str,
+    model: str,
+    revision: str,
+    prompt: str,
+    cfg: Config,
+) -> None:
+    """Master-mode devcontainer: start-or-attach, then exec into the container."""
+    if name:
+        typer.echo("Error: --master and -n/--name are mutually exclusive", err=True)
+        raise typer.Exit(1)
+
+    cld_root = Path(__file__).resolve().parent.parent
+    ensure_image(
+        cfg.devcontainer_image,
+        cld_root / "imgs/claude-devcontainer/Dockerfile.claude-devcontainer",
+        cld_root,
+        extra_paths=devcontainer_extra_paths(cld_root),
+        parent_image=(
+            cfg.base_image,
+            cld_root / "imgs/claude-base/Dockerfile.claude-base",
+            cld_root,
+            base_extra_paths(cld_root),
+        ),
+    )
+
+    repo_root, _ = find_repo_context()
+    session = master_container_name(repo_root)
+    status = docker_master_status(session)
+    log.info("master devcontainer: name=%s, status=%s", session, status)
+
+    if status in ("running", "stopped"):
+        if prompt or task_path:
+            typer.echo(
+                "Error: --master re-attach: -p/--prompt and task_file cannot be used "
+                "when the container already exists (prompt was consumed at first launch)",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if revision:
+            log.warning("--master: re-attaching to existing container; -r/--revision ignored")
+        if status == "stopped":
+            log.info("Starting stopped master container: %s", session)
+            subprocess.run(["docker", "start", session], check=True)
+        log.info("Attaching to master container: %s", session)
+        os.execvp("docker", ["docker", "exec", "-it", session, "/bin/bash", "-l"])
+
+    # absent — create a new master container
+    ws_path = agent_workspace_path(repo_root, session)
+    vcs = get_backend()
+
+    if ws_path.exists():
+        if _is_workspace_valid(vcs, session, ws_path):
+            log.info("Orphan workspace found; reusing: %s", ws_path)
+            anchor_hash = resolve_anchor(vcs, revision)
+        else:
+            log.warning("Orphan workspace at %s is stale; removing and recreating", ws_path)
+            try:
+                vcs.forget_workspace(session, str(ws_path))
+            except Exception as e:
+                log.warning("Could not deregister stale workspace: %s", e)
+            shutil.rmtree(ws_path, ignore_errors=True)
+            anchor_hash = resolve_anchor(vcs, revision)
+            create_editable_root(vcs, anchor_hash, ws_path, session)
+    else:
+        anchor_hash = resolve_anchor(vcs, revision)
+        create_editable_root(vcs, anchor_hash, ws_path, session)
+
+    log.info("Anchor: %s", anchor_hash[:12])
+
+    args = build_container_args(repo_root, session, cfg, interactive=False, master=True)
+    host_ws = to_host_path(str(ws_path), cfg)
+    args += ["-v", f"{host_ws}:/workspace/current"]
+    args += ["-e", "WORKSPACE_PREINITIALIZED=1"]
+    args += ["-e", f"AGENT_ANCHOR_HASH={anchor_hash}"]
+    if task_path:
+        host_task = to_host_path(str(task_path.resolve()), cfg)
+        args += ["-v", f"{host_task}:/config/task.md:ro"]
+    if prompt:
+        args += ["-e", f"AGENT_INLINE_PROMPT={prompt}"]
+    if model:
+        args += ["-e", f"AGENT_MODEL={model}"]
+
+    skipped = []
+    for rel in cfg.home_mounts_devcontainer:
+        mnt = stage_home_ro(rel, cfg)
+        if mnt:
+            args += mnt
+        else:
+            skipped.append(rel)
+    if skipped:
+        log.warning("Optional host paths not found (skipped): %s", ", ".join(skipped))
+
+    args += [cfg.devcontainer_image]
+
+    log.info("Starting master devcontainer (detached)...")
+    subprocess.run(["docker", "run", "-d"] + args, check=True)
+
+    log.info("Waiting for container to be ready...")
+    if not _wait_for_master_ready(session):
+        typer.echo(
+            f"Error: Master container '{session}' did not become ready within 30 s. "
+            "Check: docker logs " + session,
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    log.info("Master container ready; attaching...")
+    os.execvp("docker", ["docker", "exec", "-it", session, "/bin/bash", "-l"])
+
+
+dc_app = typer.Typer(help="Launch or manage the interactive devcontainer.")
+app.add_typer(
+    dc_app,
+    name="devcontainer",
+    invoke_without_command=True,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+
+
+@dc_app.callback(invoke_without_command=True)
+@_handle_errors
+def devcontainer(
+    ctx: typer.Context,
+    name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
+    model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
+    revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change -- @ for jj, HEAD for git)"),
+    prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (appended to task file if both given)"),
+    master: bool = typer.Option(False, "--master", help="Start or attach to the persistent master devcontainer for this repo"),
+):
+    """Launch an interactive Claude devcontainer (or manage the master container)."""
+    if ctx.invoked_subcommand is not None:
+        return
+    # Positional args (task_file, extra docker args) come in via ctx.args
+    # because the group uses allow_extra_args=True.
+    remaining = list(ctx.args)
+    task_file = remaining[0] if remaining else None
+    extra_args = remaining[1:] if len(remaining) > 1 else None
+    _run_devcontainer(task_file, name, model, revision, prompt, extra_args, master)
+
+
+@dc_app.command("shutdown")
+@_handle_errors
+def devcontainer_shutdown(
+    all_: bool = typer.Option(False, "--all", help="Stop all master containers on this host"),
+):
+    """Stop and remove the master devcontainer for the current repo (or all with --all)."""
+    require_docker()
+    cfg = Config.from_env()
+    setup_logging(cfg)
+
+    if all_:
+        containers = docker_master_list()
+        if not containers:
+            typer.echo("No master containers found.")
+            return
+        failed = False
+        for c in containers:
+            if not _shutdown_master_container(c["name"], c["repo_root"], c["session"]):
+                failed = True
+        if failed:
+            raise typer.Exit(1)
+        return
+
+    repo_root, _ = find_repo_context()
+    master_name = master_container_name(repo_root)
+    if docker_master_status(master_name) == "absent":
+        typer.echo("No master container found for this repo.")
+        return
+    if not _shutdown_master_container(master_name, str(repo_root), master_name):
+        raise typer.Exit(1)
+
+
+def _shutdown_master_container(name: str, repo_root_str: str, session: str) -> bool:
+    """Stop, remove, and clean up the workspace for a master container. Returns True on success."""
+    log.info("Stopping master container: %s", name)
+    subprocess.run(["docker", "stop", name], capture_output=True)
+    subprocess.run(["docker", "rm", name], capture_output=True)
+
+    repo_root = Path(repo_root_str)
+    ws_path = agent_workspace_path(repo_root, session)
+    success = True
+
+    if repo_root.exists():
+        try:
+            vcs = get_backend(repo_root)
+            vcs.forget_workspace(session, str(ws_path))
+        except Exception as e:
+            log.warning("Failed to deregister workspace %s: %s", session, e)
+            success = False
+
+    if ws_path.exists():
+        shutil.rmtree(ws_path, ignore_errors=True)
+
+    typer.echo(f"Stopped and removed master container: {name}")
+    return success
 
 
 @app.command()

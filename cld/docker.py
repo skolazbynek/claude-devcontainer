@@ -240,6 +240,7 @@ def build_container_args(
     cfg: Config,
     *,
     interactive: bool = False,
+    master: bool = False,
 ) -> list[str]:
     """Build the base ``docker run`` argument list every launcher needs.
 
@@ -256,9 +257,19 @@ def build_container_args(
     if interactive:
         args += ["-it"]
 
+    if master:
+        args += [
+            "--name", session_name,
+            "--label", "org.cld.kind=master",
+            "--label", f"org.cld.repo-root={host_repo_root}",
+            "--label", f"org.cld.session={session_name}",
+            "-e", "MASTER_MODE=1",
+        ]
+    else:
+        args += ["--rm"]
+
     # Security and resources
     args += [
-        "--rm",
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
         "--cpus=2.0",
@@ -358,6 +369,56 @@ def build_container_args(
 
     log.debug("Container args: %s", mask_secrets(repr(args)))
     return args
+
+
+def master_container_name(repo_root: Path) -> str:
+    """Deterministic container name for the master devcontainer of *repo_root*."""
+    sha = hashlib.sha1(str(repo_root).encode()).hexdigest()[:8]
+    return f"cld_master_{repo_root.name}_{sha}"
+
+
+def docker_master_status(name: str) -> str:
+    """Return 'running', 'stopped', or 'absent' for the named container."""
+    result = subprocess.run(
+        ["docker", "inspect", "--format", "{{.State.Status}}", name],
+        capture_output=True, text=True,
+    )
+    log_subprocess(log, ["docker", "inspect", name], result)
+    if result.returncode != 0:
+        return "absent"
+    return "running" if result.stdout.strip() == "running" else "stopped"
+
+
+def docker_master_list() -> list[dict]:
+    """Return all master containers with their org.cld.* labels."""
+    result = subprocess.run(
+        ["docker", "ps", "-a",
+         "--filter", "label=org.cld.kind=master",
+         "--format", "{{.Names}}"],
+        capture_output=True, text=True,
+    )
+    log_subprocess(log, ["docker", "ps", "-a", "--filter", "label=org.cld.kind=master"], result)
+    if result.returncode != 0:
+        return []
+    containers: list[dict] = []
+    for name in result.stdout.strip().splitlines():
+        if not name:
+            continue
+        inspect = subprocess.run(
+            ["docker", "inspect", name, "--format",
+             '{{index .Labels "org.cld.repo-root"}}|{{index .Labels "org.cld.session"}}'],
+            capture_output=True, text=True,
+        )
+        log_subprocess(log, ["docker", "inspect", name], inspect)
+        if inspect.returncode != 0:
+            continue
+        parts = inspect.stdout.strip().split("|", 1)
+        containers.append({
+            "name": name,
+            "repo_root": parts[0] if parts else "",
+            "session": parts[1] if len(parts) > 1 else "",
+        })
+    return containers
 
 
 def stage_home_ro(rel_path: str, cfg: Config) -> list[str]:

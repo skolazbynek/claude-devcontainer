@@ -55,8 +55,21 @@ elif [ -f "$TASK_FILE_MOUNT" ]; then
     COMPOSED_PROMPT="$(cat "$TASK_FILE_MOUNT")"
 fi
 
+if [ -n "${MASTER_MODE:-}" ]; then
+    # Signal readiness as soon as setup is done, before the optional first-launch
+    # prompt, so the host can attach immediately no matter how long the prompt runs.
+    touch /run/cld-master-ready
+fi
+
 if [ -n "$COMPOSED_PROMPT" ]; then
+    [ -n "${MASTER_MODE:-}" ] && \
+        echo "[INFO] Running first-launch prompt; attach anytime with 'cld devcontainer --master'."
     claude -- "$COMPOSED_PROMPT" || true
+fi
+
+if [ -n "${MASTER_MODE:-}" ]; then
+    # PID 1 idles; user shells arrive via `docker exec` from the host.
+    exec sleep infinity
 fi
 
 /bin/bash
