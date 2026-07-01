@@ -58,6 +58,7 @@ _TOML_KEYS = {
     "log_level",
     "log_color",
     "ignore_gitignore",
+    "ssh_auth_sock",
 }
 
 
@@ -124,6 +125,15 @@ def _load_dotenv(path: Path | None = None) -> None:
             os.environ[key.strip()] = value.strip()
 
 
+def _resolve_ssh_auth_sock(layered: dict) -> str | None:
+    """Tri-state resolution: env takes precedence over TOML; absent -> None."""
+    if "CLD_SSH_AUTH_SOCK" in os.environ:
+        return os.environ["CLD_SSH_AUTH_SOCK"]
+    if "ssh_auth_sock" in layered:
+        return layered["ssh_auth_sock"]
+    return None
+
+
 @dataclass(frozen=True)
 class Config:
     """All runtime-tunable settings.
@@ -182,6 +192,12 @@ class Config:
     # Workspace setup: gitignored files to symlink into workspace
     ignore_gitignore: tuple[str, ...] = ()
 
+    # SSH agent forwarding for devcontainer sessions.
+    # None (unset) = auto-detect from $SSH_AUTH_SOCK on the host.
+    # "" (explicitly empty) = disable forwarding entirely.
+    # "/path/to/socket" = use that host socket path explicitly.
+    ssh_auth_sock: str | None = None
+
     # Diagnostics
     debug: bool = False
     log_level: str = "INFO"
@@ -227,4 +243,5 @@ class Config:
             chain_max_parallel=_env_int("CLD_CHAIN_MAX_PARALLEL", int(layered.get("chain_max_parallel", 4))),
             chain_default_model=_env_str("CLD_CHAIN_DEFAULT_MODEL", layered.get("chain_default_model", "")),
             ignore_gitignore=tuple(layered.get("ignore_gitignore", ())),
+            ssh_auth_sock=_resolve_ssh_auth_sock(layered),
         )

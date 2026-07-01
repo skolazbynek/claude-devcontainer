@@ -31,6 +31,7 @@ from cld.docker import (
     master_container_name,
     require_docker,
     stage_home_ro,
+    stage_ssh_agent,
     to_host_path,
 )
 from cld.log import get_logger, setup_logging
@@ -203,6 +204,8 @@ def _run_devcontainer(
     if skipped:
         log.warning(f"Optional host paths not found (skipped): {', '.join(skipped)}")
 
+    args += stage_ssh_agent(cfg)
+
     args += [cfg.devcontainer_image]
     if extra_args:
         args += extra_args
@@ -341,6 +344,8 @@ def _run_master_devcontainer(
             skipped.append(rel)
     if skipped:
         log.warning("Optional host paths not found (skipped): %s", ", ".join(skipped))
+
+    args += stage_ssh_agent(cfg)
 
     args += [cfg.devcontainer_image]
 

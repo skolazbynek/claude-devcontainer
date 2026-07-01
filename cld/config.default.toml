@@ -39,3 +39,8 @@ home_mounts_devcontainer = [
 
 # Branch names tried in order when auto-detecting trunk for `cld review`.
 trunk_candidates = ["dev", "main", "master"]
+
+# SSH agent forwarding into devcontainer sessions.
+# Omit this key to auto-detect from the host's $SSH_AUTH_SOCK.
+# Set to "" to disable forwarding. Set to an explicit socket path to override.
+# ssh_auth_sock = ""

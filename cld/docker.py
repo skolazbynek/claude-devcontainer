@@ -421,6 +421,36 @@ def docker_master_list() -> list[dict]:
     return containers
 
 
+_CONTAINER_SSH_AUTH_SOCK = "/run/host-ssh-agent.sock"
+
+
+def stage_ssh_agent(cfg: Config) -> list[str]:
+    """Return -v/-e args to forward the host ssh-agent socket into a devcontainer.
+
+    Tri-state on ``cfg.ssh_auth_sock``:
+      - ``""`` (explicit) -> disabled, return [].
+      - ``None`` (unset)  -> auto-detect from $SSH_AUTH_SOCK.
+      - path              -> use that host socket path.
+    Never fatal: on any resolution or validation failure, warn and skip.
+    """
+    if cfg.ssh_auth_sock == "":
+        log.debug("SSH agent forward: explicitly disabled via ssh_auth_sock=''")
+        return []
+    sock = cfg.ssh_auth_sock or os.environ.get("SSH_AUTH_SOCK", "")
+    if not sock:
+        log.debug("SSH agent forward: no SSH_AUTH_SOCK available -- skipping")
+        return []
+    if not Path(sock).is_socket():
+        log.warning("SSH_AUTH_SOCK=%s is not a socket -- skipping agent forward", sock)
+        return []
+    host_sock = to_host_path(sock, cfg)
+    log.info("SSH agent socket forwarded: %s -> %s", sock, _CONTAINER_SSH_AUTH_SOCK)
+    return [
+        "-v", f"{host_sock}:{_CONTAINER_SSH_AUTH_SOCK}",
+        "-e", f"SSH_AUTH_SOCK={_CONTAINER_SSH_AUTH_SOCK}",
+    ]
+
+
 def stage_home_ro(rel_path: str, cfg: Config) -> list[str]:
     """Stage ``$HOME/<rel_path>`` RO under ``/tmp/host-config/<rel_path>``.
 
