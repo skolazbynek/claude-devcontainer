@@ -34,6 +34,18 @@ def resolve_anchor(vcs: VcsBackend, revision: str) -> str:
     return vcs.resolve_revision(revision)
 
 
+def _anchor_record_path(repo_root: Path, session: str) -> Path:
+    return repo_root / ".cld" / "anchors" / session
+
+
+def read_workspace_anchor(repo_root: Path, session: str) -> str | None:
+    """Return the anchor hash recorded when the workspace was created, or None."""
+    p = _anchor_record_path(repo_root, session)
+    if not p.is_file():
+        return None
+    return p.read_text().strip() or None
+
+
 def create_editable_root(
     vcs: VcsBackend,
     anchor_hash: str,
@@ -86,6 +98,10 @@ def create_editable_root(
                     rel_to_repo = None
                 if rel_to_repo is not None:
                     dotgit.write_text(f"gitdir: {WORKSPACE_BASE}/origin/{rel_to_repo}\n")
+
+    record = _anchor_record_path(vcs.repo_root, branch)
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(anchor_hash)
 
 
 def assert_descendant(vcs: VcsBackend, anchor_hash: str, candidate: str) -> None:

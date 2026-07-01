@@ -38,7 +38,7 @@ from cld.log import get_logger, setup_logging
 from cld.prompts import resolve_prompt_ref
 from cld.loop import run_loop
 from cld.vcs import get_backend
-from cld.vcs.anchor import create_editable_root, resolve_anchor
+from cld.vcs.anchor import create_editable_root, read_workspace_anchor, resolve_anchor
 
 log = get_logger(__name__)
 
@@ -306,7 +306,16 @@ def _run_master_devcontainer(
     if ws_path.exists():
         if _is_workspace_valid(vcs, session, ws_path):
             log.info("Orphan workspace found; reusing: %s", ws_path)
-            anchor_hash = resolve_anchor(vcs, revision)
+            recorded = read_workspace_anchor(repo_root, session)
+            if recorded:
+                anchor_hash = recorded
+                log.info("Restored recorded anchor: %s", anchor_hash[:12])
+            else:
+                anchor_hash = resolve_anchor(vcs, revision)
+                log.warning(
+                    "No anchor record for existing workspace; resolving from current @ (may drift): %s",
+                    anchor_hash[:12],
+                )
         else:
             log.warning("Orphan workspace at %s is stale; removing and recreating", ws_path)
             try:
@@ -314,7 +323,10 @@ def _run_master_devcontainer(
             except Exception as e:
                 log.warning("Could not deregister stale workspace: %s", e)
             shutil.rmtree(ws_path, ignore_errors=True)
-            anchor_hash = resolve_anchor(vcs, revision)
+            recorded = read_workspace_anchor(repo_root, session)
+            anchor_hash = recorded or resolve_anchor(vcs, revision)
+            if recorded:
+                log.info("Restored recorded anchor for recreated workspace: %s", anchor_hash[:12])
             create_editable_root(vcs, anchor_hash, ws_path, session)
     else:
         anchor_hash = resolve_anchor(vcs, revision)
@@ -427,11 +439,42 @@ def devcontainer_shutdown(
         raise typer.Exit(1)
 
 
-def _shutdown_master_container(name: str, repo_root_str: str, session: str) -> bool:
-    """Stop, remove, and clean up the workspace for a master container. Returns True on success."""
+@dc_app.command("restart")
+@_handle_errors
+def devcontainer_restart():
+    """Restart the master devcontainer for this repo, picking up cld image/code changes.
+
+    Stops and removes the existing container, then relaunches. The jj/git
+    workspace is preserved along with all uncommitted work; only in-container
+    state (installed packages, shell history, running processes) is wiped.
+    """
+    require_docker()
+    cfg = Config.from_env()
+    setup_logging(cfg)
+
+    repo_root, _ = find_repo_context()
+    master_name = master_container_name(repo_root)
+    if docker_master_status(master_name) == "absent":
+        typer.echo(
+            "No master container to restart. Start one with: cld devcontainer --master",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    _stop_and_remove_master(master_name)
+    _run_master_devcontainer(None, "", "", "", "", cfg)
+
+
+def _stop_and_remove_master(name: str) -> None:
+    """Stop and remove a master container. Idempotent."""
     log.info("Stopping master container: %s", name)
     subprocess.run(["docker", "stop", name], capture_output=True)
     subprocess.run(["docker", "rm", name], capture_output=True)
+
+
+def _shutdown_master_container(name: str, repo_root_str: str, session: str) -> bool:
+    """Stop, remove, and clean up the workspace for a master container. Returns True on success."""
+    _stop_and_remove_master(name)
 
     repo_root = Path(repo_root_str)
     ws_path = agent_workspace_path(repo_root, session)
@@ -447,6 +490,10 @@ def _shutdown_master_container(name: str, repo_root_str: str, session: str) -> b
 
     if ws_path.exists():
         shutil.rmtree(ws_path, ignore_errors=True)
+
+    anchor_record = repo_root / ".cld" / "anchors" / session
+    if anchor_record.exists():
+        anchor_record.unlink()
 
     typer.echo(f"Stopped and removed master container: {name}")
     return success

@@ -69,6 +69,11 @@ docker build -f imgs/claude-agent/Dockerfile.claude-agent -t claude-agent:latest
 # Interactive devcontainer
 cld devcontainer [-n name]
 
+# Master devcontainer lifecycle (persistent per-repo container)
+cld devcontainer --master           # start-or-attach
+cld devcontainer restart            # tear down + relaunch, preserving workspace; picks up cld image/code changes
+cld devcontainer shutdown [--all]   # stop + remove + drop workspace
+
 # Autonomous agent
 cld agent [-n name] [-m model] [-r revision] [-p prompt] [task-file.md|@<name>]
 
@@ -140,7 +145,7 @@ Every subcommand (`agent`, `devcontainer`, `review`, `loop`, `chain run`) shares
 
 Host-side scratch files (composed task inputs, diff patches, persona stagings) live inside the per-session workspace at `.cld-run/<file>` — never in the caller's main working copy. `.cld-run/` is a reserved directory name inside agent workspaces; it is not gitignored, so each scratch file is structurally rooted in the anchor tree.
 
-Three helpers in `cld/vcs/anchor.py` form the entire shared contract: `resolve_anchor`, `create_editable_root`, `assert_descendant`.
+Three helpers in `cld/vcs/anchor.py` form the entire shared contract: `resolve_anchor`, `create_editable_root`, `assert_descendant`. `create_editable_root` also persists the anchor hash to `<repo>/.cld/anchors/<session>` so a workspace can be re-attached (e.g. by `cld devcontainer restart`) without recomputing the anchor from a possibly-moved `@`; `read_workspace_anchor(repo_root, session)` returns the recorded hash (or `None`).
 
 ## Agent Output
 
