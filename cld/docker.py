@@ -19,6 +19,7 @@ log = get_logger(__name__)
 CONTAINER_USER = "claude"
 CONTAINER_HOME = f"/home/{CONTAINER_USER}"
 WORKSPACE_BASE = "/workspace"
+MAILBOX_MOUNT = "/var/cld/mailboxes"
 
 # All RO $HOME mounts are staged under /tmp/host-config/<rel> and copied into
 # $HOME by the entrypoint (see copy_host_configs in container-init.sh).
@@ -241,13 +242,22 @@ def build_container_args(
     *,
     interactive: bool = False,
     master: bool = False,
+    agent: bool = False,
 ) -> list[str]:
     """Build the base ``docker run`` argument list every launcher needs.
 
     Sets up security constraints, volume mounts (repo, claude config,
     docker socket, mysql), and environment variables. Devcontainer-only
     mounts (gitconfig, bashrc, nvim) are added by the launcher in cli.py.
+
+    ``master`` and ``agent`` are mutually exclusive persistent-container
+    roles (the latter is the headless messaging agent, unrelated to the
+    one-shot `cld agent` command); either one adds the ``org.cld.kind``
+    label set and mounts the shared mailbox tree.
     """
+    if master and agent:
+        raise ValueError("master and agent are mutually exclusive roles")
+
     home = os.path.expanduser("~")
     host_home = to_host_path(home, cfg)
     host_repo_root = to_host_path(str(repo_root), cfg)
@@ -257,13 +267,14 @@ def build_container_args(
     if interactive:
         args += ["-it"]
 
-    if master:
+    if master or agent:
+        kind = "master" if master else "agent"
         args += [
             "--name", session_name,
-            "--label", "org.cld.kind=master",
+            "--label", f"org.cld.kind={kind}",
             "--label", f"org.cld.repo-root={host_repo_root}",
             "--label", f"org.cld.session={session_name}",
-            "-e", "MASTER_MODE=1",
+            "-e", f"{'MASTER_MODE' if master else 'AGENT_MODE'}=1",
         ]
     else:
         args += ["--rm"]
@@ -367,6 +378,33 @@ def build_container_args(
         else:
             log.warning(f"CLD_MYSQL_CONFIG set but file not found: {cfg.mysql_config}")
 
+    # Mailbox tree (master/agent persistent roles only) -- shared RW mount so
+    # every master and agent container sees the same mailbox filesystem.
+    if master or agent:
+        mailbox_root = Path(cfg.mailbox_root).expanduser()
+        host_mailbox_root = to_host_path(str(mailbox_root), cfg)
+        if host_mailbox_root == str(mailbox_root):
+            # Bare host: our own filesystem view already *is* the host view.
+            mailbox_root.mkdir(parents=True, exist_ok=True)
+        else:
+            # Nested (cld running inside another container, sibling-container
+            # pattern): the real host path isn't in our filesystem view.
+            # Deliberately do NOT reach across the docker socket to create it
+            # there -- container isolation from the host is a hard
+            # requirement even though the socket happens to be shared for
+            # launching sibling containers. If the path doesn't already exist
+            # on the real host, `docker run` will auto-create it as root and
+            # the non-root container user won't be able to write into it.
+            log.warning(
+                "Mailbox root %s is outside this process's filesystem view "
+                "(nested cld). If it doesn't already exist on the real host, "
+                "create it there manually before continuing: "
+                "mkdir -p %s && chown %d:%d %s",
+                host_mailbox_root, host_mailbox_root, os.getuid(), os.getgid(), host_mailbox_root,
+            )
+        args += ["-v", f"{host_mailbox_root}:{MAILBOX_MOUNT}:rw"]
+        log.info("Mailbox mounted: %s -> %s", host_mailbox_root, MAILBOX_MOUNT)
+
     log.debug("Container args: %s", mask_secrets(repr(args)))
     return args
 
@@ -377,7 +415,16 @@ def master_container_name(repo_root: Path) -> str:
     return f"cld_master_{repo_root.name}_{sha}"
 
 
-def docker_master_status(name: str) -> str:
+def agent_container_name(repo_root: Path) -> str:
+    """Deterministic container name for the repo agent of *repo_root*.
+
+    Unlike ``master_container_name`` this skips the sha8 disambiguator: at
+    most one agent per repo basename may run host-wide (see design doc Q4).
+    """
+    return f"cld_agent_{repo_root.name}"
+
+
+def _docker_status(name: str) -> str:
     """Return 'running', 'stopped', or 'absent' for the named container."""
     result = subprocess.run(
         ["docker", "inspect", "--format", "{{.State.Status}}", name],
@@ -389,15 +436,22 @@ def docker_master_status(name: str) -> str:
     return "running" if result.stdout.strip() == "running" else "stopped"
 
 
-def docker_master_list() -> list[dict]:
-    """Return all master containers with their org.cld.* labels."""
+def docker_master_status(name: str) -> str:
+    return _docker_status(name)
+
+
+def docker_agent_status(name: str) -> str:
+    return _docker_status(name)
+
+
+def _docker_kind_list(kind: str) -> list[dict]:
+    """Return all containers of *kind* ('master' or 'agent') with their org.cld.* labels."""
+    label_filter = f"label=org.cld.kind={kind}"
     result = subprocess.run(
-        ["docker", "ps", "-a",
-         "--filter", "label=org.cld.kind=master",
-         "--format", "{{.Names}}"],
+        ["docker", "ps", "-a", "--filter", label_filter, "--format", "{{.Names}}"],
         capture_output=True, text=True,
     )
-    log_subprocess(log, ["docker", "ps", "-a", "--filter", "label=org.cld.kind=master"], result)
+    log_subprocess(log, ["docker", "ps", "-a", "--filter", label_filter], result)
     if result.returncode != 0:
         return []
     containers: list[dict] = []
@@ -419,6 +473,16 @@ def docker_master_list() -> list[dict]:
             "session": parts[1] if len(parts) > 1 else "",
         })
     return containers
+
+
+def docker_master_list() -> list[dict]:
+    """Return all master containers with their org.cld.* labels."""
+    return _docker_kind_list("master")
+
+
+def docker_agent_list() -> list[dict]:
+    """Return all repo agent containers with their org.cld.* labels."""
+    return _docker_kind_list("agent")
 
 
 _CONTAINER_SSH_AUTH_SOCK = "/run/host-ssh-agent.sock"

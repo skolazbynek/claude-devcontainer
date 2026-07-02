@@ -6,6 +6,7 @@ import pytest
 
 from cld.config import Config, _load_dotenv
 from cld.docker import (
+    agent_container_name,
     to_host_path,
     build_session_name,
     find_repo_root,
@@ -49,6 +50,16 @@ class TestFindJjRoot:
     def test_exits_when_not_found(self, tmp_path):
         with pytest.raises(SystemExit):
             find_repo_root(tmp_path)
+
+
+class TestAgentContainerName:
+    def test_no_sha_disambiguator(self, tmp_path):
+        repo = tmp_path / "myrepo"
+        assert agent_container_name(repo) == "cld_agent_myrepo"
+
+    def test_deterministic(self, tmp_path):
+        repo = tmp_path / "myrepo"
+        assert agent_container_name(repo) == agent_container_name(repo)
 
 
 class TestLoadDotenv:

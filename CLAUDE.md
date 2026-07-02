@@ -7,7 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Tooling for running Claude Code in Docker containers with VCS workspace isolation. Supports **jujutsu (jj)** natively and falls back to **git** when jj is not installed.
 
 - **Devcontainer** (`cld devcontainer`) -- Interactive session with neovim, jj/git, poetry. Drops into bash with `--dangerously-skip-permissions`.
-- **Agent** (`cld agent`) -- Headless autonomous agent. Takes a task file and/or inline prompt, runs detached, commits results to a VCS branch.
+- **Agent** (`cld agent`) -- Headless *one-shot* autonomous agent. Takes a task file and/or inline prompt, runs detached, commits results to a VCS branch, then its container exits (`--rm`).
+- **Repo Agent** (`cld devcontainer --agent`) -- Headless *persistent* devcontainer variant, one per repo. Not to be confused with `cld agent` above: it stays up indefinitely with one long-lived Claude session, receiving tasks via the mailbox/messenger transport instead of a single task file. See "Messenger" below and `docs/design-agent-messaging.md`.
 - **Agent Review** (`cld review`) -- Generates a diff between branches and runs a code review via the agent pipeline.
 
 ## Architecture
@@ -27,8 +28,13 @@ cld/                             -- Python package (host-side CLI + shared logic
     detect.py                    -- auto-detection: jj preferred, git fallback
   mcp/
     orchestrator.py              -- MCP server for orchestrating Docker agents
+    messenger.py                 -- MCP server for the mailbox transport (send/list_inbox/read_message/archive/list_agents)
+  messenger/
+    mailbox.py                   -- Filesystem mailbox transport (pure, unit-testable with tmpdirs)
+    agent_loop.py                -- Repo agent supervisor daemon (`python -m cld.messenger.agent_loop`)
 scripts/
   mcp/run-orchestrator.sh        -- Thin venv wrapper for MCP server
+  mcp/run-messenger.sh           -- Thin venv wrapper for the messenger MCP server
 imgs/
   claude-base/                   -- Common base image (debian, git, jj, poetry, docker CLI, mysql client, claude). No editor, no entrypoint.
   claude-devcontainer/           -- Devcontainer image (FROM base, adds neovim + vim + entrypoint)
@@ -74,6 +80,13 @@ cld devcontainer --master           # start-or-attach
 cld devcontainer restart            # tear down + relaunch, preserving workspace; picks up cld image/code changes
 cld devcontainer shutdown [--all]   # stop + remove + drop workspace
 
+# Repo agent lifecycle (persistent headless per-repo container; add --agent to any of the above)
+cld devcontainer --agent                     # start (idempotent per repo); never attaches
+cld devcontainer restart  --agent            # tear down + relaunch, preserving workspace
+cld devcontainer shutdown --agent [--all]    # stop + remove + drop workspace
+cld devcontainer status   --agent            # print supervisor state.json summary
+cld devcontainer logs     --agent [-n N]     # tail the container's log (= supervisor stderr)
+
 # Autonomous agent
 cld agent [-n name] [-m model] [-r revision] [-p prompt] [task-file.md|@<name>]
 
@@ -88,7 +101,7 @@ All Python-side runtime tunables live in `cld/config.py:Config` (frozen dataclas
 
 **Resolution order (lowest → highest priority):** dataclass defaults < user TOML (`~/.config/cld/config.toml`) < project TOML (`<repo_root>/.cld.config`, walked up from cwd) < `.env` in cwd < `CLD_*` env vars.
 
-TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `devcontainer_image`, `agent_image`, `mysql_config`, `ssl_certs_path`, `agent_timeout`, `poll_interval`, `debug`, `home_mounts_always`, `home_mounts_devcontainer`, `trunk_candidates`, `chain_max_parallel`, `chain_default_model`, `log_level`, `log_color`, `ignore_gitignore`). Array fields accept TOML arrays of strings. Unknown keys are warned about on stderr and ignored. `host_project_dir` / `host_home` are container-internal and not configurable via TOML.
+TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `devcontainer_image`, `agent_image`, `mysql_config`, `ssl_certs_path`, `agent_timeout`, `poll_interval`, `debug`, `home_mounts_always`, `home_mounts_devcontainer`, `trunk_candidates`, `chain_max_parallel`, `chain_default_model`, `log_level`, `log_color`, `ignore_gitignore`, `mailbox_root`, `agent_max_turns`, `agent_kickoff_persona`). Array fields accept TOML arrays of strings. Unknown keys are warned about on stderr and ignored. `host_project_dir` / `host_home` are container-internal and not configurable via TOML.
 
 `CLD_*` env vars (read by `Config.from_env`):
 
@@ -110,6 +123,9 @@ TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `de
 | `CLD_DEBUG` | `false` | Diagnostics flag. Back-compat alias: when truthy and `CLD_LOG_LEVEL` is unset, equivalent to `CLD_LOG_LEVEL=DEBUG`. |
 | `CLD_IGNORE_GITIGNORE` | `""` | Colon-separated list of gitignored files to symlink from origin into workspace (e.g. `.env:.envrc`). Set in `.cld.config` as array: `ignore_gitignore = [".env"]`. |
 | `CLD_SSH_AUTH_SOCK` | unset | SSH agent forwarding into `cld devcontainer`. Tri-state: **unset** = auto-detect from host `$SSH_AUTH_SOCK`; **empty** (`""`) = explicitly disable; **path** = use that socket. Forwarded to `/run/host-ssh-agent.sock` inside the container; devcontainer only (never headless `cld agent` / `cld review`). |
+| `CLD_MAILBOX_ROOT` | `~/.cld/mailboxes` | Host root of the inter-container mailbox tree; bind-mounted RW into every master and agent container. |
+| `CLD_AGENT_MAX_TURNS` | `30` | Per-message turn cap passed to the agent supervisor's `claude -p --max-turns`. |
+| `CLD_AGENT_KICKOFF_PERSONA` | `repo-agent` | Persona name (resolved like chain personas) used to kick off a new repo-agent Claude session. |
 
 Container-side env vars consumed by shell entrypoints (NOT read by Python `Config`; left unprefixed because shell scripts read them by name):
 
@@ -170,6 +186,20 @@ Internal notes:
 - `launch_agent` calls `cld.agent.launch_agent()` directly (not via subprocess) so it shares image-management, env, and path-translation logic.
 - Non-host-visible task files are staged into `repo_root/.agent-tasks/` so they can be bind-mounted.
 - The orchestrator never squashes or merges into external branches; result aggregation is the caller's job.
+
+## Messenger (inter-container agent messaging)
+
+Full design: `docs/design-agent-messaging.md`. One-line summary: one repo agent per repo, `send()`/`list_inbox()`/`read_message()`/`archive()` via the `messenger` MCP server, replies come back on your next turn, the agent remembers everything across messages (one persistent `claude -p --resume` session).
+
+- `cld/messenger/mailbox.py` -- pure filesystem transport (atomic `tmp/` write + `rename()` into `inbox/`; `archive/`; append-only `outbox.log`). No MCP/Docker-daemon coupling beyond `list_containers()`'s `docker ps` calls, so it's unit-testable with `tmp_path`.
+- `cld/messenger/agent_loop.py` -- the repo agent's supervisor daemon (`python -m cld.messenger.agent_loop`, execed as PID 1 by the entrypoint's `AGENT_MODE` branch). State machine: `KICKOFF` (once, via `prompts/personas/repo-agent.md`) -> `IDLE` (poll `inbox/` every 1 s) -> `PROCESSING` (one message, strict FIFO via oldest mtime) -> `IDLE`, until `SIGTERM`. Writes `state.json` into its own mailbox dir after every transition.
+- `cld/mcp/messenger.py` -- FastMCP server wrapping `mailbox.py`; every tool operates on the calling container's own mailbox, identified by `SESSION_NAME`.
+- **Reply guarantee:** the supervisor snapshots its own `outbox.log` line count before invoking Claude and checks it grew afterward (not the tool call itself) -- if not, it synthesizes a fallback reply so every incoming message gets exactly one reply, even if Claude's turn forgets to call `send()`.
+- **Mailbox mount:** `/var/cld/mailboxes` in-container (`cld.docker.MAILBOX_MOUNT`), bind-mounted from `cfg.mailbox_root` on the host (`~/.cld/mailboxes` by default) whenever `build_container_args(..., master=True)` or `(..., agent=True)`. `cfg.mailbox_root` is a **host-side** path only -- in-container code always uses the fixed `MAILBOX_MOUNT` constant, never `Config.mailbox_root`.
+- **Empirical note on `claude -p --output-format json`:** verified against a live Claude Code 2.1.198 build (see top of `agent_loop.py`) -- the cost field is `total_cost_usd`, not `cost_usd` as the existing stub fixtures under `tests/fixtures/stub-*` assume; `--max-turns` works despite being undocumented in `claude --help` output.
+- **Naming collision to keep straight:** `cld agent` (one-shot, `claude-agent` image, `--rm`) vs. the new `cld devcontainer --agent` repo agent (persistent, `claude-devcontainer` image, `AGENT_MODE=1`). They share no code path except `build_container_args`/`agent_workspace_path`.
+- **Deviation from the design doc, verified empirically:** readiness sentinels live at `/tmp/cld-{master,agent}-ready`, not `/run/...` as originally specced -- `/run` is root-owned `755` in the base image, so a non-root container (`--user <uid>:<gid>`) can never `touch` a file there (pre-existing bug shared with `--master`, fixed for both here).
+- **Nested mailbox root is the user's problem, by design.** When `cld` itself runs nested inside another container (its own `CLD_HOST_PROJECT_DIR`/`CLD_HOST_HOME` set), `build_container_args` cannot create the mailbox root on the real host -- doing so via a throwaway `docker run` over the shared docker socket was considered and **rejected**: reaching across that socket to touch the host filesystem breaks the container-isolation guarantee even though the socket is shared for launching sibling containers. Instead, `build_container_args` only `mkdir`s when it can verify its own filesystem view *is* the host view (`to_host_path` is a no-op); otherwise it logs a warning with the exact `mkdir -p && chown` command to run on the real host and proceeds to mount the (possibly not-yet-existing) path as-is. `container-init.sh`'s `ensure_own_mailbox` fails loudly in-container (and aborts `AGENT_MODE` startup) if that path turns out to be missing or wrong-owned, rather than silently degrading.
 
 ## Chain Orchestrator
 

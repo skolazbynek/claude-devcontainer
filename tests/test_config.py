@@ -12,6 +12,7 @@ def _clear_env(monkeypatch):
     for var in (
         "CLD_BASE_IMAGE", "CLD_DEVCONTAINER_IMAGE", "CLD_AGENT_IMAGE",
         "CLD_MYSQL_CONFIG", "CLD_AGENT_TIMEOUT", "CLD_POLL_INTERVAL", "CLD_DEBUG",
+        "CLD_MAILBOX_ROOT", "CLD_AGENT_MAX_TURNS", "CLD_AGENT_KICKOFF_PERSONA",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -78,6 +79,30 @@ class TestTomlLayering:
         assert cfg.agent_timeout == 42
         assert cfg.poll_interval == 7
         assert cfg.debug is True
+
+
+class TestMessengerConfig:
+    def test_defaults(self, tmp_path):
+        cfg = Config.from_env(user_config=tmp_path / "u", project_config=tmp_path / "p")
+        assert cfg.mailbox_root.endswith(".cld/mailboxes")
+        assert cfg.agent_max_turns == 30
+        assert cfg.agent_kickoff_persona == "repo-agent"
+
+    def test_toml_overrides(self, tmp_path):
+        proj = _write(
+            tmp_path / ".cld.config",
+            'mailbox_root = "/custom/mailboxes"\nagent_max_turns = 10\nagent_kickoff_persona = "custom-persona"\n',
+        )
+        cfg = Config.from_env(user_config=tmp_path / "u", project_config=proj)
+        assert cfg.mailbox_root == "/custom/mailboxes"
+        assert cfg.agent_max_turns == 10
+        assert cfg.agent_kickoff_persona == "custom-persona"
+
+    def test_env_overrides_toml(self, tmp_path, monkeypatch):
+        proj = _write(tmp_path / ".cld.config", 'mailbox_root = "/toml/mailboxes"\n')
+        monkeypatch.setenv("CLD_MAILBOX_ROOT", "/env/mailboxes")
+        cfg = Config.from_env(user_config=tmp_path / "u", project_config=proj)
+        assert cfg.mailbox_root == "/env/mailboxes"
 
 
 class TestFindProjectConfig:

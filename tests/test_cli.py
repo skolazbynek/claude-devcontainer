@@ -1,11 +1,13 @@
 """Tests for CLI argument validation via typer's CliRunner."""
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
-from cld.cli import app
+from cld.cli import app, _persistent_container_name, _persistent_container_status
+from cld.docker import agent_container_name, master_container_name
 
 
 runner = CliRunner()
@@ -183,6 +185,181 @@ class TestDevcontainerCommand:
         result = runner.invoke(app, ["devcontainer", "--help"])
         assert result.exit_code == 0
         assert "devcontainer" in result.output.lower()
+
+
+class TestPersistentContainerHelpers:
+    def test_name_master(self, tmp_path):
+        assert _persistent_container_name("master", tmp_path) == master_container_name(tmp_path)
+
+    def test_name_agent(self, tmp_path):
+        assert _persistent_container_name("agent", tmp_path) == agent_container_name(tmp_path)
+
+    def test_status_delegates_to_master(self):
+        with patch("cld.cli.docker_master_status", return_value="running") as m:
+            assert _persistent_container_status("master", "x") == "running"
+            m.assert_called_once_with("x")
+
+    def test_status_delegates_to_agent(self):
+        with patch("cld.cli.docker_agent_status", return_value="stopped") as a:
+            assert _persistent_container_status("agent", "y") == "stopped"
+            a.assert_called_once_with("y")
+
+
+class TestDevcontainerAgentFlag:
+    def test_master_and_agent_mutually_exclusive(self):
+        result = runner.invoke(app, ["devcontainer", "--master", "--agent"])
+        assert result.exit_code == 1
+        assert "mutually exclusive" in result.output
+
+    def test_agent_rejects_name(self, tmp_path):
+        with patch("cld.cli.find_repo_context", return_value=(tmp_path, "")):
+            result = runner.invoke(app, ["devcontainer", "--agent", "-n", "foo"])
+        assert result.exit_code == 1
+        assert "mutually exclusive" in result.output
+
+    def test_agent_rejects_prompt(self, tmp_path):
+        with patch("cld.cli.find_repo_context", return_value=(tmp_path, "")):
+            result = runner.invoke(app, ["devcontainer", "--agent", "-p", "hello"])
+        assert result.exit_code == 1
+        assert "does not take a task file or -p/--prompt" in result.output
+
+    def test_agent_starts_new_container_without_attaching(self, tmp_path):
+        repo_root = tmp_path / "myrepo"
+        repo_root.mkdir()
+        vcs_mock = MagicMock()
+        with patch("cld.cli.require_docker"), \
+             patch("cld.cli.ensure_image"), \
+             patch("cld.cli.find_repo_context", return_value=(repo_root, "")), \
+             patch("cld.cli.docker_agent_status", return_value="absent"), \
+             patch("cld.cli.get_backend", return_value=vcs_mock), \
+             patch("cld.cli.resolve_anchor", return_value="abc123"), \
+             patch("cld.cli.create_editable_root"), \
+             patch("cld.cli.agent_workspace_path", return_value=repo_root / ".cld" / "ws"), \
+             patch("cld.cli.build_container_args", return_value=["--rm"]) as bca, \
+             patch("cld.cli.stage_home_ro", return_value=[]), \
+             patch("cld.cli.stage_ssh_agent", return_value=[]), \
+             patch("cld.cli.subprocess.run") as run_mock, \
+             patch("cld.cli.os.execvp") as execvp_mock, \
+             patch("cld.cli._wait_for_container_ready", return_value=True):
+            result = runner.invoke(app, ["devcontainer", "--agent"])
+        assert result.exit_code == 0, result.output
+        assert "started for" in result.output
+        assert not execvp_mock.called
+        assert bca.call_args.kwargs["agent"] is True
+        assert bca.call_args.kwargs["master"] is False
+        run_calls = [c.args[0] for c in run_mock.call_args_list]
+        assert any(c[:3] == ["docker", "run", "-d"] for c in run_calls)
+
+    def test_agent_reattach_running_does_not_attach(self, tmp_path):
+        with patch("cld.cli.require_docker"), \
+             patch("cld.cli.ensure_image"), \
+             patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
+             patch("cld.cli.docker_agent_status", return_value="running"), \
+             patch("cld.cli.os.execvp") as execvp_mock:
+            result = runner.invoke(app, ["devcontainer", "--agent"])
+        assert result.exit_code == 0, result.output
+        assert not execvp_mock.called
+        assert "is running" in result.output
+
+    def test_agent_reattach_rejects_revision_warning_only(self, tmp_path, caplog):
+        with patch("cld.cli.require_docker"), \
+             patch("cld.cli.ensure_image"), \
+             patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
+             patch("cld.cli.docker_agent_status", return_value="stopped"), \
+             patch("cld.cli.subprocess.run") as run_mock:
+            result = runner.invoke(app, ["devcontainer", "--agent", "-r", "somerev"])
+        assert result.exit_code == 0, result.output
+        assert any(c.args[0][:2] == ["docker", "start"] for c in run_mock.call_args_list)
+
+
+class TestDevcontainerStatusCommand:
+    def test_absent(self, tmp_path):
+        with patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
+             patch("cld.cli.docker_agent_status", return_value="absent"):
+            result = runner.invoke(app, ["devcontainer", "status", "--agent"])
+        assert result.exit_code == 0, result.output
+        assert "absent" in result.output
+
+    def test_reads_state_json(self, tmp_path, monkeypatch):
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        name = agent_container_name(repo_root)
+        mailbox_root = tmp_path / "mailboxes"
+        (mailbox_root / name).mkdir(parents=True)
+        state = {
+            "phase": "idle", "session_id": "sid123", "msg_count": 3,
+            "cost_usd_total": 1.2345, "current": None,
+        }
+        (mailbox_root / name / "state.json").write_text(json.dumps(state))
+        monkeypatch.setenv("CLD_MAILBOX_ROOT", str(mailbox_root))
+
+        with patch("cld.cli.find_repo_context", return_value=(repo_root, "")), \
+             patch("cld.cli.docker_agent_status", return_value="running"):
+            result = runner.invoke(app, ["devcontainer", "status", "--agent"])
+        assert result.exit_code == 0, result.output
+        assert "idle" in result.output
+        assert "sid123" in result.output
+        assert "3" in result.output
+
+    def test_master_status_skips_state_json(self, tmp_path):
+        with patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
+             patch("cld.cli.docker_master_status", return_value="absent"):
+            result = runner.invoke(app, ["devcontainer", "status"])
+        assert result.exit_code == 0, result.output
+        assert "Supervisor" not in result.output
+
+
+class TestDevcontainerLogsCommand:
+    def test_absent_errors(self, tmp_path):
+        with patch("cld.cli.require_docker"), \
+             patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
+             patch("cld.cli.docker_agent_status", return_value="absent"):
+            result = runner.invoke(app, ["devcontainer", "logs", "--agent"])
+        assert result.exit_code == 1
+        assert "No agent container found" in result.output
+
+    def test_tails_docker_logs(self, tmp_path):
+        fake_result = MagicMock(stdout="log line 1\nlog line 2\n", stderr="")
+        with patch("cld.cli.require_docker"), \
+             patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
+             patch("cld.cli.docker_agent_status", return_value="running"), \
+             patch("cld.cli.subprocess.run", return_value=fake_result) as run_mock:
+            result = runner.invoke(app, ["devcontainer", "logs", "--agent", "-n", "50"])
+        assert result.exit_code == 0, result.output
+        assert "log line 1" in result.output
+        called_args = run_mock.call_args.args[0]
+        assert called_args[:2] == ["docker", "logs"]
+        assert "50" in called_args
+
+
+class TestDevcontainerShutdownAgent:
+    def test_absent(self, tmp_path):
+        with patch("cld.cli.require_docker"), \
+             patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
+             patch("cld.cli.docker_agent_status", return_value="absent"):
+            result = runner.invoke(app, ["devcontainer", "shutdown", "--agent"])
+        assert result.exit_code == 0, result.output
+        assert "No agent container found" in result.output
+
+    def test_all_uses_docker_agent_list_not_master(self):
+        with patch("cld.cli.require_docker"), \
+             patch("cld.cli.docker_agent_list", return_value=[]) as agent_list, \
+             patch("cld.cli.docker_master_list") as master_list:
+            result = runner.invoke(app, ["devcontainer", "shutdown", "--agent", "--all"])
+        assert result.exit_code == 0, result.output
+        assert agent_list.called
+        assert not master_list.called
+        assert "No agent containers found" in result.output
+
+
+class TestDevcontainerRestartAgent:
+    def test_absent_errors_with_agent_hint(self, tmp_path):
+        with patch("cld.cli.require_docker"), \
+             patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
+             patch("cld.cli.docker_agent_status", return_value="absent"):
+            result = runner.invoke(app, ["devcontainer", "restart", "--agent"])
+        assert result.exit_code == 1
+        assert "--agent" in result.output
 
 
 class TestBuildCommand:

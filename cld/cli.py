@@ -18,11 +18,14 @@ from cld.chain import ParallelGroup, apply_name_override, chain_state_dir, load_
 from cld.chain_state import ChainState, StateWriter, write_state, _utcnow_iso
 from cld.config import Config
 from cld.docker import (
+    agent_container_name,
     agent_extra_paths,
     base_extra_paths,
     build_container_args,
     build_session_name,
     devcontainer_extra_paths,
+    docker_agent_list,
+    docker_agent_status,
     docker_master_list,
     docker_master_status,
     ensure_image,
@@ -70,7 +73,7 @@ def main(
     version: bool = typer.Option(False, "--version", callback=_version_callback, is_eager=True, help="Show version and exit"),
 ):
     if ctx.invoked_subcommand is None:
-        _run_devcontainer(None, "", "", "", "", None, False)
+        _run_devcontainer(None, "", "", "", "", None, False, False)
 
 
 @app.command()
@@ -134,9 +137,13 @@ def _run_devcontainer(
     prompt: str,
     extra_args: list[str] | None,
     master: bool,
+    agent: bool,
 ) -> None:
     """Core devcontainer launch logic shared by the callback and main fallback."""
     require_docker()
+    if master and agent:
+        typer.echo("Error: --master and --agent are mutually exclusive", err=True)
+        raise typer.Exit(1)
     task_path = Path(task_file) if task_file else None
     if task_path and not task_path.is_file():
         typer.echo(f"Error: Task file not found: {task_file}", err=True)
@@ -145,7 +152,10 @@ def _run_devcontainer(
     setup_logging(cfg)
 
     if master:
-        _run_master_devcontainer(task_path, name, model, revision, prompt, cfg)
+        _run_persistent_devcontainer("master", task_path, name, model, revision, prompt, cfg)
+        return
+    if agent:
+        _run_persistent_devcontainer("agent", task_path, name, model, revision, prompt, cfg)
         return
 
     log.info(
@@ -237,12 +247,12 @@ def _is_workspace_valid(vcs, session: str, ws_path: Path) -> bool:
         )
 
 
-def _wait_for_master_ready(name: str, timeout: int = 30) -> bool:
-    """Poll container until /run/cld-master-ready exists. Returns False on timeout."""
+def _wait_for_container_ready(name: str, sentinel: str, timeout: int = 30) -> bool:
+    """Poll container until *sentinel* file exists inside it. Returns False on timeout."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         result = subprocess.run(
-            ["docker", "exec", name, "test", "-f", "/run/cld-master-ready"],
+            ["docker", "exec", name, "test", "-f", sentinel],
             capture_output=True,
         )
         if result.returncode == 0:
@@ -251,7 +261,19 @@ def _wait_for_master_ready(name: str, timeout: int = 30) -> bool:
     return False
 
 
-def _run_master_devcontainer(
+def _persistent_container_name(role: str, repo_root: Path) -> str:
+    return master_container_name(repo_root) if role == "master" else agent_container_name(repo_root)
+
+
+def _persistent_container_status(role: str, name: str) -> str:
+    return docker_master_status(name) if role == "master" else docker_agent_status(name)
+
+
+_READY_SENTINEL = {"master": "/tmp/cld-master-ready", "agent": "/tmp/cld-agent-ready"}
+
+
+def _run_persistent_devcontainer(
+    role: str,
     task_path: Path | None,
     name: str,
     model: str,
@@ -259,9 +281,21 @@ def _run_master_devcontainer(
     prompt: str,
     cfg: Config,
 ) -> None:
-    """Master-mode devcontainer: start-or-attach, then exec into the container."""
+    """Master/agent-mode devcontainer: start-or-attach the one persistent container per repo.
+
+    Master attaches an interactive shell; the headless agent role never attaches
+    (see docs/design-agent-messaging.md) -- it starts (or confirms it's running)
+    and returns.
+    """
     if name:
-        typer.echo("Error: --master and -n/--name are mutually exclusive", err=True)
+        typer.echo(f"Error: --{role} and -n/--name are mutually exclusive", err=True)
+        raise typer.Exit(1)
+    if role == "agent" and (task_path or prompt):
+        typer.echo(
+            "Error: --agent does not take a task file or -p/--prompt "
+            "(the repo agent has no first-launch prompt; message it after it starts)",
+            err=True,
+        )
         raise typer.Exit(1)
 
     cld_root = Path(__file__).resolve().parent.parent
@@ -279,27 +313,30 @@ def _run_master_devcontainer(
     )
 
     repo_root, _ = find_repo_context()
-    session = master_container_name(repo_root)
-    status = docker_master_status(session)
-    log.info("master devcontainer: name=%s, status=%s", session, status)
+    session = _persistent_container_name(role, repo_root)
+    status = _persistent_container_status(role, session)
+    log.info("%s devcontainer: name=%s, status=%s", role, session, status)
 
     if status in ("running", "stopped"):
         if prompt or task_path:
             typer.echo(
-                "Error: --master re-attach: -p/--prompt and task_file cannot be used "
+                f"Error: --{role} re-attach: -p/--prompt and task_file cannot be used "
                 "when the container already exists (prompt was consumed at first launch)",
                 err=True,
             )
             raise typer.Exit(1)
         if revision:
-            log.warning("--master: re-attaching to existing container; -r/--revision ignored")
+            log.warning("--%s: re-attaching to existing container; -r/--revision ignored", role)
         if status == "stopped":
-            log.info("Starting stopped master container: %s", session)
+            log.info("Starting stopped %s container: %s", role, session)
             subprocess.run(["docker", "start", session], check=True)
-        log.info("Attaching to master container: %s", session)
-        os.execvp("docker", ["docker", "exec", "-it", session, "/bin/bash", "-l"])
+        if role == "master":
+            log.info("Attaching to master container: %s", session)
+            os.execvp("docker", ["docker", "exec", "-it", session, "/bin/bash", "-l"])
+        typer.echo(f"Agent '{session}' is running. Message it via the messenger MCP's send() tool.")
+        return
 
-    # absent — create a new master container
+    # absent — create a new persistent container
     ws_path = agent_workspace_path(repo_root, session)
     vcs = get_backend()
 
@@ -334,7 +371,10 @@ def _run_master_devcontainer(
 
     log.info("Anchor: %s", anchor_hash[:12])
 
-    args = build_container_args(repo_root, session, cfg, interactive=False, master=True)
+    args = build_container_args(
+        repo_root, session, cfg, interactive=False,
+        master=(role == "master"), agent=(role == "agent"),
+    )
     host_ws = to_host_path(str(ws_path), cfg)
     args += ["-v", f"{host_ws}:/workspace/current"]
     args += ["-e", "WORKSPACE_PREINITIALIZED=1"]
@@ -361,20 +401,26 @@ def _run_master_devcontainer(
 
     args += [cfg.devcontainer_image]
 
-    log.info("Starting master devcontainer (detached)...")
+    log.info("Starting %s devcontainer (detached)...", role)
     subprocess.run(["docker", "run", "-d"] + args, check=True)
 
     log.info("Waiting for container to be ready...")
-    if not _wait_for_master_ready(session):
+    if not _wait_for_container_ready(session, _READY_SENTINEL[role]):
         typer.echo(
-            f"Error: Master container '{session}' did not become ready within 30 s. "
+            f"Error: {role.capitalize()} container '{session}' did not become ready within 30 s. "
             "Check: docker logs " + session,
             err=True,
         )
         raise typer.Exit(1)
 
-    log.info("Master container ready; attaching...")
-    os.execvp("docker", ["docker", "exec", "-it", session, "/bin/bash", "-l"])
+    if role == "master":
+        log.info("Master container ready; attaching...")
+        os.execvp("docker", ["docker", "exec", "-it", session, "/bin/bash", "-l"])
+
+    typer.echo(f"Agent '{session}' started for {repo_root}.")
+    typer.echo("  Status: cld devcontainer status --agent")
+    typer.echo("  Logs:   cld devcontainer logs --agent")
+    typer.echo(f"  Send:   messenger MCP send(to=\"{repo_root.name}\", ...) from another container")
 
 
 dc_app = typer.Typer(help="Launch or manage the interactive devcontainer.")
@@ -395,8 +441,9 @@ def devcontainer(
     revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change -- @ for jj, HEAD for git)"),
     prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (appended to task file if both given)"),
     master: bool = typer.Option(False, "--master", help="Start or attach to the persistent master devcontainer for this repo"),
+    agent: bool = typer.Option(False, "--agent", help="Start the persistent headless repo agent for this repo (see docs/design-agent-messaging.md)"),
 ):
-    """Launch an interactive Claude devcontainer (or manage the master container)."""
+    """Launch an interactive Claude devcontainer (or manage the master/agent persistent containers)."""
     if ctx.invoked_subcommand is not None:
         return
     # Positional args (task_file, extra docker args) come in via ctx.args
@@ -404,45 +451,49 @@ def devcontainer(
     remaining = list(ctx.args)
     task_file = remaining[0] if remaining else None
     extra_args = remaining[1:] if len(remaining) > 1 else None
-    _run_devcontainer(task_file, name, model, revision, prompt, extra_args, master)
+    _run_devcontainer(task_file, name, model, revision, prompt, extra_args, master, agent)
 
 
 @dc_app.command("shutdown")
 @_handle_errors
 def devcontainer_shutdown(
-    all_: bool = typer.Option(False, "--all", help="Stop all master containers on this host"),
+    all_: bool = typer.Option(False, "--all", help="Stop all containers of this role on this host"),
+    agent: bool = typer.Option(False, "--agent", help="Target the repo agent instead of the master"),
 ):
-    """Stop and remove the master devcontainer for the current repo (or all with --all)."""
+    """Stop and remove the master (or agent) devcontainer for the current repo (or all with --all)."""
     require_docker()
     cfg = Config.from_env()
     setup_logging(cfg)
+    role = "agent" if agent else "master"
 
     if all_:
-        containers = docker_master_list()
+        containers = docker_agent_list() if agent else docker_master_list()
         if not containers:
-            typer.echo("No master containers found.")
+            typer.echo(f"No {role} containers found.")
             return
         failed = False
         for c in containers:
-            if not _shutdown_master_container(c["name"], c["repo_root"], c["session"]):
+            if not _shutdown_persistent_container(role, c["name"], c["repo_root"], c["session"]):
                 failed = True
         if failed:
             raise typer.Exit(1)
         return
 
     repo_root, _ = find_repo_context()
-    master_name = master_container_name(repo_root)
-    if docker_master_status(master_name) == "absent":
-        typer.echo("No master container found for this repo.")
+    container_name = _persistent_container_name(role, repo_root)
+    if _persistent_container_status(role, container_name) == "absent":
+        typer.echo(f"No {role} container found for this repo.")
         return
-    if not _shutdown_master_container(master_name, str(repo_root), master_name):
+    if not _shutdown_persistent_container(role, container_name, str(repo_root), container_name):
         raise typer.Exit(1)
 
 
 @dc_app.command("restart")
 @_handle_errors
-def devcontainer_restart():
-    """Restart the master devcontainer for this repo, picking up cld image/code changes.
+def devcontainer_restart(
+    agent: bool = typer.Option(False, "--agent", help="Restart the repo agent instead of the master"),
+):
+    """Restart the master (or agent) devcontainer for this repo, picking up cld image/code changes.
 
     Stops and removes the existing container, then relaunches. The jj/git
     workspace is preserved along with all uncommitted work; only in-container
@@ -451,30 +502,96 @@ def devcontainer_restart():
     require_docker()
     cfg = Config.from_env()
     setup_logging(cfg)
+    role = "agent" if agent else "master"
 
     repo_root, _ = find_repo_context()
-    master_name = master_container_name(repo_root)
-    if docker_master_status(master_name) == "absent":
+    container_name = _persistent_container_name(role, repo_root)
+    if _persistent_container_status(role, container_name) == "absent":
         typer.echo(
-            "No master container to restart. Start one with: cld devcontainer --master",
+            f"No {role} container to restart. Start one with: cld devcontainer --{role}",
             err=True,
         )
         raise typer.Exit(1)
 
-    _stop_and_remove_master(master_name)
-    _run_master_devcontainer(None, "", "", "", "", cfg)
+    _stop_and_remove_container(container_name)
+    _run_persistent_devcontainer(role, None, "", "", "", "", cfg)
 
 
-def _stop_and_remove_master(name: str) -> None:
-    """Stop and remove a master container. Idempotent."""
-    log.info("Stopping master container: %s", name)
+@dc_app.command("status")
+@_handle_errors
+def devcontainer_status(
+    agent: bool = typer.Option(False, "--agent", help="Report the repo agent instead of the master"),
+):
+    """Print status of the persistent master or agent devcontainer for this repo."""
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    role = "agent" if agent else "master"
+
+    repo_root, _ = find_repo_context()
+    container_name = _persistent_container_name(role, repo_root)
+    docker_status = _persistent_container_status(role, container_name)
+    typer.echo(f"{role.capitalize()}: {container_name}")
+    typer.echo(f"  Container: {docker_status}")
+
+    if role != "agent":
+        return
+
+    state_path = Path(cfg.mailbox_root).expanduser() / container_name / "state.json"
+    if not state_path.is_file():
+        typer.echo("  Supervisor state: unavailable (not started yet, or mailbox_root misconfigured)")
+        return
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        typer.echo(f"  Supervisor state: unreadable ({e})")
+        return
+    typer.echo(f"  Phase:       {state.get('phase')}")
+    typer.echo(f"  Session ID:  {state.get('session_id')}")
+    typer.echo(f"  Messages:    {state.get('msg_count')}")
+    typer.echo(f"  Cost so far: ${state.get('cost_usd_total', 0.0):.4f}")
+    current = state.get("current")
+    if current:
+        typer.echo(f"  Processing:  {current.get('subject')} (from {current.get('from')}, id {current.get('id')})")
+
+
+@dc_app.command("logs")
+@_handle_errors
+def devcontainer_logs(
+    tail: int = typer.Option(80, "-n", "--tail", help="Number of lines to show"),
+    agent: bool = typer.Option(False, "--agent", help="Target the repo agent instead of the master"),
+):
+    """Tail the master or agent container's log output."""
+    require_docker()
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    role = "agent" if agent else "master"
+
+    repo_root, _ = find_repo_context()
+    container_name = _persistent_container_name(role, repo_root)
+    if _persistent_container_status(role, container_name) == "absent":
+        typer.echo(f"No {role} container found for this repo.", err=True)
+        raise typer.Exit(1)
+
+    result = subprocess.run(
+        ["docker", "logs", "--tail", str(tail), container_name],
+        capture_output=True, text=True,
+    )
+    if result.stdout:
+        typer.echo(result.stdout, nl=False)
+    if result.stderr:
+        typer.echo(result.stderr, nl=False, err=True)
+
+
+def _stop_and_remove_container(name: str) -> None:
+    """Stop and remove a container. Idempotent."""
+    log.info("Stopping container: %s", name)
     subprocess.run(["docker", "stop", name], capture_output=True)
     subprocess.run(["docker", "rm", name], capture_output=True)
 
 
-def _shutdown_master_container(name: str, repo_root_str: str, session: str) -> bool:
-    """Stop, remove, and clean up the workspace for a master container. Returns True on success."""
-    _stop_and_remove_master(name)
+def _shutdown_persistent_container(role: str, name: str, repo_root_str: str, session: str) -> bool:
+    """Stop, remove, and clean up the workspace for a master/agent container. Returns True on success."""
+    _stop_and_remove_container(name)
 
     repo_root = Path(repo_root_str)
     ws_path = agent_workspace_path(repo_root, session)
@@ -495,7 +612,7 @@ def _shutdown_master_container(name: str, repo_root_str: str, session: str) -> b
     if anchor_record.exists():
         anchor_record.unlink()
 
-    typer.echo(f"Stopped and removed master container: {name}")
+    typer.echo(f"Stopped and removed {role} container: {name}")
     return success
 
 

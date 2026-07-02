@@ -2,11 +2,20 @@
 
 import os
 import subprocess
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from cld.config import Config
-from cld.docker import build_container_args, ensure_image, require_docker
+from cld.docker import (
+    build_container_args,
+    docker_agent_list,
+    docker_agent_status,
+    docker_master_list,
+    ensure_image,
+    require_docker,
+)
 from tests.conftest import skip_no_docker
 
 
@@ -82,6 +91,71 @@ class TestBuildContainerArgs:
     def test_non_interactive_mode_no_it_flag(self, jj_repo):
         args = build_container_args(jj_repo.repo_root, "test-session", Config())
         assert "-it" not in args
+
+    def test_master_and_agent_mutually_exclusive(self, jj_repo):
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            build_container_args(jj_repo.repo_root, "test-session", Config(), master=True, agent=True)
+
+    def test_plain_mode_has_no_mailbox_mount(self, jj_repo):
+        args = build_container_args(jj_repo.repo_root, "test-session", Config())
+        volume_args = [args[i+1] for i in range(len(args)-1) if args[i] == "-v"]
+        assert not any("/var/cld/mailboxes" in v for v in volume_args)
+
+    def test_master_mode_mounts_mailbox_and_labels(self, jj_repo, tmp_path):
+        cfg = Config(mailbox_root=str(tmp_path / "mailboxes"))
+        args = build_container_args(jj_repo.repo_root, "cld_master_x_abcd1234", cfg, master=True)
+        volume_args = [args[i+1] for i in range(len(args)-1) if args[i] == "-v"]
+        env_pairs = [args[i+1] for i in range(len(args)-1) if args[i] == "-e"]
+        assert any(v.endswith(":/var/cld/mailboxes:rw") for v in volume_args)
+        assert "org.cld.kind=master" in args
+        assert "MASTER_MODE=1" in env_pairs
+        assert (tmp_path / "mailboxes").is_dir()
+
+    def test_agent_mode_mounts_mailbox_and_labels(self, jj_repo, tmp_path):
+        cfg = Config(mailbox_root=str(tmp_path / "mailboxes"))
+        args = build_container_args(jj_repo.repo_root, "cld_agent_x", cfg, agent=True)
+        volume_args = [args[i+1] for i in range(len(args)-1) if args[i] == "-v"]
+        env_pairs = [args[i+1] for i in range(len(args)-1) if args[i] == "-e"]
+        assert any(v.endswith(":/var/cld/mailboxes:rw") for v in volume_args)
+        assert "org.cld.kind=agent" in args
+        assert "AGENT_MODE=1" in env_pairs
+
+    def test_nested_mailbox_mount_does_not_mkdir_or_touch_docker(self, jj_repo, caplog):
+        """When host_project_dir/host_home make us 'nested' (cld running inside
+        another container), the real host path isn't in our filesystem view.
+        We must NOT mkdir our own -- wrong -- local path, and must NOT reach
+        across the docker socket to create it on the real host either
+        (container isolation from the host is a hard requirement, even though
+        the socket happens to be shared for launching sibling containers).
+        Just mount the translated path and warn -- see CLAUDE.md's Messenger
+        deviation note."""
+        from cld.docker import CONTAINER_HOME
+        mailbox_path = f"{CONTAINER_HOME}/.cld/mailboxes-test-nested-xyz"
+        cfg = Config(
+            mailbox_root=mailbox_path,
+            host_project_dir="/host/project",
+            host_home="/host/home",
+        )
+        assert not Path(mailbox_path).exists()
+        with patch("cld.docker.subprocess.run") as run_mock:
+            args = build_container_args(jj_repo.repo_root, "cld_agent_x", cfg, agent=True)
+        assert not run_mock.called
+        assert not Path(mailbox_path).exists()
+        volume_args = [args[i+1] for i in range(len(args)-1) if args[i] == "-v"]
+        assert "/host/home/.cld/mailboxes-test-nested-xyz:/var/cld/mailboxes:rw" in volume_args
+        assert "outside this process's filesystem view" in caplog.text
+
+
+@skip_no_docker
+class TestDockerAgentHelpers:
+    def test_status_absent_for_unknown_name(self):
+        assert docker_agent_status("cld_agent_definitely_not_running_xyz") == "absent"
+
+    def test_list_returns_list(self):
+        # No real agent containers running in this environment; just verify
+        # the docker label query round-trips without error.
+        assert isinstance(docker_agent_list(), list)
+        assert isinstance(docker_master_list(), list)
 
 
 @skip_no_docker

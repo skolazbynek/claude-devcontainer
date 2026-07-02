@@ -59,6 +59,9 @@ _TOML_KEYS = {
     "log_color",
     "ignore_gitignore",
     "ssh_auth_sock",
+    "mailbox_root",
+    "agent_max_turns",
+    "agent_kickoff_persona",
 }
 
 
@@ -67,6 +70,10 @@ _DEFAULT_CONFIG_TEMPLATE = Path(__file__).parent / "config.default.toml"
 
 def _user_config_path() -> Path:
     return Path.home() / ".config" / "cld" / "config.toml"
+
+
+def _default_mailbox_root() -> str:
+    return str(Path.home() / ".cld" / "mailboxes")
 
 
 def _ensure_user_config(path: Path) -> None:
@@ -198,6 +205,11 @@ class Config:
     # "/path/to/socket" = use that host socket path explicitly.
     ssh_auth_sock: str | None = None
 
+    # Inter-container agent messaging (mailboxes + repo agent supervisor)
+    mailbox_root: str = _default_mailbox_root()
+    agent_max_turns: int = 30
+    agent_kickoff_persona: str = "repo-agent"
+
     # Diagnostics
     debug: bool = False
     log_level: str = "INFO"
@@ -244,4 +256,7 @@ class Config:
             chain_default_model=_env_str("CLD_CHAIN_DEFAULT_MODEL", layered.get("chain_default_model", "")),
             ignore_gitignore=tuple(layered.get("ignore_gitignore", ())),
             ssh_auth_sock=_resolve_ssh_auth_sock(layered),
+            mailbox_root=_env_str("CLD_MAILBOX_ROOT", layered.get("mailbox_root", _default_mailbox_root())),
+            agent_max_turns=_env_int("CLD_AGENT_MAX_TURNS", int(layered.get("agent_max_turns", 30))),
+            agent_kickoff_persona=_env_str("CLD_AGENT_KICKOFF_PERSONA", layered.get("agent_kickoff_persona", "repo-agent")),
         )

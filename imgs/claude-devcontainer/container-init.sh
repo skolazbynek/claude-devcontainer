@@ -30,6 +30,23 @@ link_workspace_files() {
     done
 }
 
+# Create this container's own mailbox dirs under the shared mailbox mount.
+# No-op if the mailbox tree isn't mounted (plain devcontainer / one-shot agent sessions).
+ensure_own_mailbox() {
+    local mailbox_base="/var/cld/mailboxes"
+    [ -d "$mailbox_base" ] || return 0
+    local name="${SESSION_NAME:?SESSION_NAME must be set}"
+    if ! mkdir -p "$mailbox_base/$name/tmp" "$mailbox_base/$name/inbox" "$mailbox_base/$name/archive" 2>/tmp/mailbox-mkdir-err; then
+        cat /tmp/mailbox-mkdir-err >&2
+        echo "[ERROR] Could not write to $mailbox_base (running as uid=$(id -u) gid=$(id -g))." >&2
+        echo "        The host directory bind-mounted here is missing, stale, or owned by someone" >&2
+        echo "        else. From the HOST (not this container), find its source path and fix it:" >&2
+        echo "          docker inspect $name --format '{{range .Mounts}}{{if eq .Destination \"$mailbox_base\"}}{{.Source}}{{end}}{{end}}'" >&2
+        echo "          chown -R $(id -u):$(id -g) <path printed above>" >&2
+        return 1
+    fi
+}
+
 # Copy staged host config tree into $HOME.
 # Every RO $HOME mount is staged under /tmp/host-config/<rel> by the launcher;
 # we overlay that tree onto $HOME so the container has writable copies and
@@ -82,6 +99,13 @@ build_claude_config() {
             "type": "stdio",
             "command": "python3",
             "args": ["/opt/cld/cld/mcp/graphql.py"]
+        }')
+    fi
+    if jq -e '.mcpServers.messenger' "$HOME/.claude.json" &>/dev/null; then
+        rewrites=$(echo "$rewrites" | jq '.messenger = {
+            "type": "stdio",
+            "command": "python3",
+            "args": ["/opt/cld/cld/mcp/messenger.py"]
         }')
     fi
     if [ "$rewrites" != '{}' ]; then

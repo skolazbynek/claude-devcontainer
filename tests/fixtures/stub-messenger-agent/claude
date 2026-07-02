@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Stub claude binary for cld.messenger.agent_loop unit tests.
+
+Controlled entirely via env vars (no dependency on the cld package, so it
+stays a pure filesystem/stdout double):
+
+  STUB_ARGV_LOG      -- if set, append this invocation's argv (minus argv[0])
+                        as a JSON line, for prompt/flag assertions.
+  STUB_FAIL          -- if "1", print to stderr and exit 1.
+  STUB_SEND_REPLY    -- if "1", write a message into STUB_REPLY_TO's inbox
+                        and append to STUB_SESSION_NAME's outbox.log, so the
+                        supervisor's outbox_changed_since() check sees a reply.
+  STUB_MAILBOX_ROOT, STUB_SESSION_NAME, STUB_REPLY_TO -- used by the above.
+  STUB_COST          -- total_cost_usd to report (default "0.01").
+  STUB_RESULT_TEXT   -- "result" text to report (default "done").
+"""
+
+import json
+import os
+import sys
+import uuid
+from datetime import datetime, timezone
+
+if os.environ.get("STUB_ARGV_LOG"):
+    with open(os.environ["STUB_ARGV_LOG"], "a") as f:
+        f.write(json.dumps(sys.argv[1:]) + "\n")
+
+if os.environ.get("STUB_FAIL") == "1":
+    print("stub failure", file=sys.stderr)
+    sys.exit(1)
+
+if os.environ.get("STUB_SEND_REPLY") == "1":
+    root = os.environ["STUB_MAILBOX_ROOT"]
+    frm = os.environ["STUB_SESSION_NAME"]
+    to = os.environ["STUB_REPLY_TO"]
+    msg_id = uuid.uuid4().hex
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    msg = {"id": msg_id, "from": frm, "to": to, "subject": "Re: test", "body": "handled", "ts": ts}
+
+    inbox_dir = os.path.join(root, to, "inbox")
+    os.makedirs(inbox_dir, exist_ok=True)
+    with open(os.path.join(inbox_dir, f"{msg_id}.json"), "w") as f:
+        json.dump(msg, f)
+
+    frm_dir = os.path.join(root, frm)
+    os.makedirs(frm_dir, exist_ok=True)
+    with open(os.path.join(frm_dir, "outbox.log"), "a") as f:
+        f.write(json.dumps({"id": msg_id, "to": to, "ts": ts}) + "\n")
+
+resumed = "--resume" in sys.argv
+print(json.dumps({
+    "type": "result",
+    "session_id": "resumed-session-id" if resumed else "kickoff-session-id",
+    "total_cost_usd": float(os.environ.get("STUB_COST", "0.01")),
+    "result": os.environ.get("STUB_RESULT_TEXT", "done"),
+}))

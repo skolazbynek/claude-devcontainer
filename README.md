@@ -237,6 +237,34 @@ Builtin prompts are baked into the image at `/opt/cld/prompts/`. Workspace promp
 3. The orchestrator calls `launch_agent` to spawn sibling Docker agents.
 4. Each agent commits results to its own VCS branch; the host user merges them with `jj squash --from <branch>` (or `git merge`).
 
+## Messenger
+
+Lets any devcontainer (master or repo agent) send a message to any other and get a reply on its next turn, backed by a shared mailbox directory on the host -- no threads, no polling required from the user. Full design and mental model: `docs/design-agent-messaging.md`.
+
+```bash
+# Register for host use (user-scoped, works from any directory)
+claude mcp add -s user messenger -- /path/to/cld/scripts/mcp/run-messenger.sh
+
+# Start a persistent, headless repo agent for the current repo
+cld devcontainer --agent
+
+# From any other container (master or another agent), message it by repo basename
+# (inside Claude): mcp__messenger__send(to="my-repo", subject="...", body="...")
+```
+
+**Tools:** `send(to, subject, body)`, `list_inbox(unread_only)`, `read_message(id)`, `archive(id)`, `list_agents(kind)`.
+
+**Lifecycle:**
+```bash
+cld devcontainer --agent                     # start (idempotent per repo)
+cld devcontainer restart  --agent            # rebuild + relaunch (fresh session)
+cld devcontainer shutdown --agent [--all]    # stop + remove + cleanup
+cld devcontainer status   --agent            # supervisor phase / session / cost
+cld devcontainer logs     --agent [-n N]     # tail its log
+```
+
+The repo agent has one persistent Claude session that survives across messages -- it remembers prior conversations with a given sender, so follow-ups like "for question a, RESTRICT" resolve without re-stating context. Every message gets exactly one reply; if the agent's turn doesn't call `send()`, the supervisor synthesizes a fallback so senders are never left hanging.
+
 ## Architecture
 
 ```
@@ -252,9 +280,13 @@ cld/                               Python package (CLI + shared logic)
     git.py                         git backend (fallback)
     detect.py                      auto-detection logic
   mcp/orchestrator.py              MCP server for agent orchestration
+  mcp/messenger.py                 MCP server for the mailbox transport
+  messenger/mailbox.py             filesystem mailbox transport
+  messenger/agent_loop.py          repo agent supervisor daemon
 
 scripts/
   mcp/run-orchestrator.sh          venv wrapper for MCP server
+  mcp/run-messenger.sh             venv wrapper for the messenger MCP server
 
 imgs/
   claude-base/                     Common base image (debian, git, jj, docker cli, poetry, claude). No editor, no entrypoint.

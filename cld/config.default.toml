@@ -44,3 +44,8 @@ trunk_candidates = ["dev", "main", "master"]
 # Omit this key to auto-detect from the host's $SSH_AUTH_SOCK.
 # Set to "" to disable forwarding. Set to an explicit socket path to override.
 # ssh_auth_sock = ""
+
+# Inter-container agent messaging (mailboxes + repo agent supervisor)
+# mailbox_root = "~/.cld/mailboxes"  # host root for the mailbox tree
+# agent_max_turns = 30               # per-message turn cap for the agent supervisor
+# agent_kickoff_persona = "repo-agent"  # persona used to kick off a new agent session

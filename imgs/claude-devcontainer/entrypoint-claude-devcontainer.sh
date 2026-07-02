@@ -3,6 +3,8 @@ source /workspace/container-init.sh
 source /workspace/vcs-lib.sh
 
 copy_host_configs
+ensure_own_mailbox
+MAILBOX_OK=$?
 
 BOOKMARK="${SESSION_NAME:?SESSION_NAME must be set}"
 
@@ -58,7 +60,8 @@ fi
 if [ -n "${MASTER_MODE:-}" ]; then
     # Signal readiness as soon as setup is done, before the optional first-launch
     # prompt, so the host can attach immediately no matter how long the prompt runs.
-    touch /run/cld-master-ready
+    # /tmp (not /run, which is root-owned 755) is writable by the non-root container user.
+    touch /tmp/cld-master-ready
 fi
 
 if [ -n "$COMPOSED_PROMPT" ]; then
@@ -70,6 +73,15 @@ fi
 if [ -n "${MASTER_MODE:-}" ]; then
     # PID 1 idles; user shells arrive via `docker exec` from the host.
     exec sleep infinity
+fi
+
+if [ -n "${AGENT_MODE:-}" ]; then
+    if [ "$MAILBOX_OK" -ne 0 ]; then
+        echo "Error: repo agent cannot start without its mailbox (see error above)" >&2
+        exit 1
+    fi
+    touch /tmp/cld-agent-ready               # host readiness sentinel (/tmp is non-root writable)
+    exec python3 -m cld.messenger.agent_loop
 fi
 
 /bin/bash
