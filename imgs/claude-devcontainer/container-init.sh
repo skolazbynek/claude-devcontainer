@@ -55,7 +55,9 @@ copy_host_configs() {
     local src_root="/tmp/host-config"
     [ -d "$src_root" ] || return 0
     cp -aT "$src_root" "$HOME"
-    chmod -R u+w "$HOME" 2>/dev/null || true
+    # Only chmod the paths we just staged, not the whole $HOME (~635M of baked caches).
+    (cd "$src_root" && find . -mindepth 1 -print0) | \
+        (cd "$HOME" && xargs -0 -r chmod u+w) 2>/dev/null || true
 }
 
 # Build container-local claude.json from read-only host config.

@@ -247,7 +247,7 @@ def _is_workspace_valid(vcs, session: str, ws_path: Path) -> bool:
         )
 
 
-def _wait_for_container_ready(name: str, sentinel: str, timeout: int = 30) -> bool:
+def _wait_for_container_ready(name: str, sentinel: str, timeout: int = 60) -> bool:
     """Poll container until *sentinel* file exists inside it. Returns False on timeout."""
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -407,7 +407,7 @@ def _run_persistent_devcontainer(
     log.info("Waiting for container to be ready...")
     if not _wait_for_container_ready(session, _READY_SENTINEL[role]):
         typer.echo(
-            f"Error: {role.capitalize()} container '{session}' did not become ready within 30 s. "
+            f"Error: {role.capitalize()} container '{session}' did not become ready within 60 s. "
             "Check: docker logs " + session,
             err=True,
         )

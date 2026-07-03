@@ -81,7 +81,7 @@ if [ -n "${AGENT_MODE:-}" ]; then
         exit 1
     fi
     touch /tmp/cld-agent-ready               # host readiness sentinel (/tmp is non-root writable)
-    exec python3 -m cld.messenger.agent_loop
+    exec python3 -P -m cld.messenger.agent_loop
 fi
 
 /bin/bash

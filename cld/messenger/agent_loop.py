@@ -103,7 +103,7 @@ class AgentSupervisor:
 
     def _run_claude(self, prompt: str, *, resume: bool) -> dict:
         cmd = [
-            self.claude_bin, "-p", prompt,
+            self.claude_bin, "-p",
             "--output-format", "json",
             "--max-turns", str(self.max_turns),
             "--dangerously-skip-permissions",
@@ -116,7 +116,7 @@ class AgentSupervisor:
             cmd += ["--model", self.model]
 
         log.info("invoking claude (resume=%s, prompt_size=%d)", resume, len(prompt))
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.repo_root))
+        result = subprocess.run(cmd, capture_output=True, text=True, input=prompt, cwd=str(self.repo_root))
         if result.returncode != 0:
             raise RuntimeError(f"claude exited {result.returncode}: {result.stderr[-2000:]}")
         try:
