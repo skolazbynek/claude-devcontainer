@@ -7,20 +7,21 @@ from unittest.mock import MagicMock, patch
 from typer.testing import CliRunner
 
 from cld.cli import app, _persistent_container_name, _persistent_container_status
+from cld.config import Config
 from cld.docker import agent_container_name, master_container_name
 
 
 runner = CliRunner()
 
 
-class TestAgentCommand:
+class TestRunCommand:
     def test_no_task_no_prompt_errors(self):
-        result = runner.invoke(app, ["agent"])
+        result = runner.invoke(app, ["run"])
         assert result.exit_code == 1
         assert "Provide a task file" in result.output
 
     def test_missing_task_file_errors(self, tmp_path):
-        result = runner.invoke(app, ["agent", str(tmp_path / "nope.md")])
+        result = runner.invoke(app, ["run", str(tmp_path / "nope.md")])
         assert result.exit_code == 1
         assert "not found" in result.output
 
@@ -44,7 +45,6 @@ class TestVersion:
         assert "cld " in result.output
 
 
-
 class TestReviewCommand:
     def test_review_requires_feature_branch(self):
         result = runner.invoke(app, ["review"])
@@ -52,12 +52,15 @@ class TestReviewCommand:
 
 
 class TestReviewTrunkAutoDetection:
-    """Cover trunk-branch auto-detection in cld/cli.py:167-180."""
+    """Cover trunk-branch auto-detection in cld/cli.py."""
 
     def _invoke(self, branches_output, argv=("review", "feature")):
         backend = MagicMock()
         backend.list_branches.return_value = branches_output
+        # Force the default trunk candidates regardless of any user config.toml.
+        fake_cfg = Config(trunk_candidates=("main", "master", "trunk"))
         with patch("cld.cli.get_backend", return_value=backend), \
+             patch("cld.cli.Config.from_env", return_value=fake_cfg), \
              patch("cld.cli.launch_review") as lr:
             result = runner.invoke(app, list(argv))
         return result, backend, lr
@@ -108,8 +111,8 @@ class TestReviewTrunkAutoDetection:
         assert lr.call_args.args[2] == "explicit-trunk"
 
 
-class TestAgentAtNotation:
-    """Tests for @<name> prompt shortcut in cld agent."""
+class TestRunAtNotation:
+    """Tests for @<name> prompt shortcut in cld run."""
 
     # Use names that don't exist in the real /workspace/current/prompts/ to
     # avoid duplicate-match errors when cld_root == the live repo root.
@@ -128,7 +131,7 @@ class TestAgentAtNotation:
     def test_at_notation_unknown_name_errors(self, tmp_path):
         with patch("cld.cli.find_repo_root", return_value=tmp_path):
             (tmp_path / "prompts").mkdir(parents=True)
-            result = runner.invoke(app, ["agent", "@no-such-prompt-xuniq", "-p", "task"])
+            result = runner.invoke(app, ["run", "@no-such-prompt-xuniq", "-p", "task"])
         assert result.exit_code == 1
         assert "not found" in result.output
 
@@ -138,53 +141,53 @@ class TestAgentAtNotation:
         (tmp_path / "prompts" / "personas").mkdir()
         (tmp_path / "prompts" / "personas" / "test-xdup-zz9.md").write_text("b")
         with patch("cld.cli.find_repo_root", return_value=tmp_path):
-            result = runner.invoke(app, ["agent", "@test-xdup-zz9", "-p", "task"])
+            result = runner.invoke(app, ["run", "@test-xdup-zz9", "-p", "task"])
         assert result.exit_code == 1
         assert "Ambiguous" in result.output
 
-    def test_at_notation_task_file_calls_launch_agent(self, tmp_path):
+    def test_at_notation_task_file_calls_launch_run(self, tmp_path):
         task, _ = self._make_prompts(tmp_path)
         with patch("cld.cli.find_repo_root", return_value=tmp_path), \
-             patch("cld.cli.launch_agent") as la:
-            result = runner.invoke(app, ["agent", f"@{self._TASK_NAME}"])
+             patch("cld.cli.launch_run") as la:
+            result = runner.invoke(app, ["run", f"@{self._TASK_NAME}"])
         assert result.exit_code == 0, result.output
         assert la.called
         call_kwargs = la.call_args.kwargs
         assert call_kwargs["task_file"] == task
         assert call_kwargs.get("system_prompt_file") is None
 
-    def test_at_notation_persona_with_prompt_calls_launch_agent(self, tmp_path):
-        _, persona = self._make_prompts(tmp_path)
-        vcs_mock = MagicMock()
-        vcs_mock.repo_root = tmp_path
+    def test_at_notation_with_inline_prompt(self, tmp_path):
+        """`cld run @name -p prompt` resolves the @-ref as task_file and passes prompt."""
+        task, _ = self._make_prompts(tmp_path)
         with patch("cld.cli.find_repo_root", return_value=tmp_path), \
-             patch("cld.cli.get_backend", return_value=vcs_mock), \
-             patch("cld.cli.resolve_anchor", return_value="abc123"), \
-             patch("cld.cli.create_editable_root"), \
-             patch("cld.cli.agent_workspace_path", return_value=tmp_path / ".cld/ws"), \
-             patch("cld.cli.launch_agent") as la:
-            (tmp_path / ".cld/ws/.cld-run").mkdir(parents=True)
-            result = runner.invoke(app, ["agent", f"@{self._PERSONA_NAME}", "-p", "do the task"])
+             patch("cld.cli.launch_run") as la:
+            result = runner.invoke(app, ["run", f"@{self._TASK_NAME}", "-p", "do the task"])
         assert result.exit_code == 0, result.output
         assert la.called
         call_kwargs = la.call_args.kwargs
-        assert call_kwargs.get("system_prompt_file") is not None
-        assert call_kwargs.get("task_file") is None
+        assert call_kwargs["task_file"] == task
         assert call_kwargs["inline_prompt"] == "do the task"
 
-    def test_at_notation_persona_without_prompt_errors(self, tmp_path):
-        self._make_prompts(tmp_path)
-        with patch("cld.cli.find_repo_root", return_value=tmp_path):
-            result = runner.invoke(app, ["agent", f"@{self._PERSONA_NAME}"])
-        assert result.exit_code == 1
-        assert "Provide a task file" in result.output
 
+class TestBareDevcontainer:
+    def test_bare_invokes_run_devcontainer(self, tmp_path):
+        with patch("cld.cli._run_devcontainer") as rd:
+            result = runner.invoke(app, [])
+        assert result.exit_code == 0, result.output
+        assert rd.called
+        # Signature: (task_file, name, model, revision, prompt, extra_args)
+        args = rd.call_args.args
+        assert args[0] is None  # task_file
+        assert args[1] == ""     # name
 
-class TestDevcontainerCommand:
-    def test_devcontainer_help(self):
-        result = runner.invoke(app, ["devcontainer", "--help"])
-        assert result.exit_code == 0
-        assert "devcontainer" in result.output.lower()
+    def test_bare_with_options(self):
+        with patch("cld.cli._run_devcontainer") as rd:
+            result = runner.invoke(app, ["-n", "foo", "-m", "opus"])
+        assert result.exit_code == 0, result.output
+        assert rd.called
+        args = rd.call_args.args
+        assert args[1] == "foo"   # name
+        assert args[2] == "opus"  # model
 
 
 class TestPersistentContainerHelpers:
@@ -205,24 +208,7 @@ class TestPersistentContainerHelpers:
             a.assert_called_once_with("y")
 
 
-class TestDevcontainerAgentFlag:
-    def test_master_and_agent_mutually_exclusive(self):
-        result = runner.invoke(app, ["devcontainer", "--master", "--agent"])
-        assert result.exit_code == 1
-        assert "mutually exclusive" in result.output
-
-    def test_agent_rejects_name(self, tmp_path):
-        with patch("cld.cli.find_repo_context", return_value=(tmp_path, "")):
-            result = runner.invoke(app, ["devcontainer", "--agent", "-n", "foo"])
-        assert result.exit_code == 1
-        assert "mutually exclusive" in result.output
-
-    def test_agent_rejects_prompt(self, tmp_path):
-        with patch("cld.cli.find_repo_context", return_value=(tmp_path, "")):
-            result = runner.invoke(app, ["devcontainer", "--agent", "-p", "hello"])
-        assert result.exit_code == 1
-        assert "does not take a task file or -p/--prompt" in result.output
-
+class TestAgentSubcommand:
     def test_agent_starts_new_container_without_attaching(self, tmp_path):
         repo_root = tmp_path / "myrepo"
         repo_root.mkdir()
@@ -234,14 +220,14 @@ class TestDevcontainerAgentFlag:
              patch("cld.cli.get_backend", return_value=vcs_mock), \
              patch("cld.cli.resolve_anchor", return_value="abc123"), \
              patch("cld.cli.create_editable_root"), \
-             patch("cld.cli.agent_workspace_path", return_value=repo_root / ".cld" / "ws"), \
+             patch("cld.cli.session_workspace_path", return_value=repo_root / ".cld" / "ws"), \
              patch("cld.cli.build_container_args", return_value=["--rm"]) as bca, \
              patch("cld.cli.stage_home_ro", return_value=[]), \
              patch("cld.cli.stage_ssh_agent", return_value=[]), \
              patch("cld.cli.subprocess.run") as run_mock, \
              patch("cld.cli.os.execvp") as execvp_mock, \
              patch("cld.cli._wait_for_container_ready", return_value=True):
-            result = runner.invoke(app, ["devcontainer", "--agent"])
+            result = runner.invoke(app, ["agent"])
         assert result.exit_code == 0, result.output
         assert "started for" in result.output
         assert not execvp_mock.called
@@ -256,27 +242,27 @@ class TestDevcontainerAgentFlag:
              patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
              patch("cld.cli.docker_agent_status", return_value="running"), \
              patch("cld.cli.os.execvp") as execvp_mock:
-            result = runner.invoke(app, ["devcontainer", "--agent"])
+            result = runner.invoke(app, ["agent"])
         assert result.exit_code == 0, result.output
         assert not execvp_mock.called
         assert "is running" in result.output
 
-    def test_agent_reattach_rejects_revision_warning_only(self, tmp_path, caplog):
+    def test_agent_reattach_stopped_starts_container(self, tmp_path):
         with patch("cld.cli.require_docker"), \
              patch("cld.cli.ensure_image"), \
              patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
              patch("cld.cli.docker_agent_status", return_value="stopped"), \
              patch("cld.cli.subprocess.run") as run_mock:
-            result = runner.invoke(app, ["devcontainer", "--agent", "-r", "somerev"])
+            result = runner.invoke(app, ["agent", "-r", "somerev"])
         assert result.exit_code == 0, result.output
         assert any(c.args[0][:2] == ["docker", "start"] for c in run_mock.call_args_list)
 
 
-class TestDevcontainerStatusCommand:
+class TestAgentStatusCommand:
     def test_absent(self, tmp_path):
         with patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
              patch("cld.cli.docker_agent_status", return_value="absent"):
-            result = runner.invoke(app, ["devcontainer", "status", "--agent"])
+            result = runner.invoke(app, ["agent", "status"])
         assert result.exit_code == 0, result.output
         assert "absent" in result.output
 
@@ -295,26 +281,28 @@ class TestDevcontainerStatusCommand:
 
         with patch("cld.cli.find_repo_context", return_value=(repo_root, "")), \
              patch("cld.cli.docker_agent_status", return_value="running"):
-            result = runner.invoke(app, ["devcontainer", "status", "--agent"])
+            result = runner.invoke(app, ["agent", "status"])
         assert result.exit_code == 0, result.output
         assert "idle" in result.output
         assert "sid123" in result.output
         assert "3" in result.output
 
+
+class TestMasterStatusCommand:
     def test_master_status_skips_state_json(self, tmp_path):
         with patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
              patch("cld.cli.docker_master_status", return_value="absent"):
-            result = runner.invoke(app, ["devcontainer", "status"])
+            result = runner.invoke(app, ["master", "status"])
         assert result.exit_code == 0, result.output
         assert "Supervisor" not in result.output
 
 
-class TestDevcontainerLogsCommand:
+class TestAgentLogsCommand:
     def test_absent_errors(self, tmp_path):
         with patch("cld.cli.require_docker"), \
              patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
              patch("cld.cli.docker_agent_status", return_value="absent"):
-            result = runner.invoke(app, ["devcontainer", "logs", "--agent"])
+            result = runner.invoke(app, ["agent", "logs"])
         assert result.exit_code == 1
         assert "No agent container found" in result.output
 
@@ -324,7 +312,7 @@ class TestDevcontainerLogsCommand:
              patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
              patch("cld.cli.docker_agent_status", return_value="running"), \
              patch("cld.cli.subprocess.run", return_value=fake_result) as run_mock:
-            result = runner.invoke(app, ["devcontainer", "logs", "--agent", "-n", "50"])
+            result = runner.invoke(app, ["agent", "logs", "-n", "50"])
         assert result.exit_code == 0, result.output
         assert "log line 1" in result.output
         called_args = run_mock.call_args.args[0]
@@ -332,12 +320,12 @@ class TestDevcontainerLogsCommand:
         assert "50" in called_args
 
 
-class TestDevcontainerShutdownAgent:
+class TestAgentShutdown:
     def test_absent(self, tmp_path):
         with patch("cld.cli.require_docker"), \
              patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
              patch("cld.cli.docker_agent_status", return_value="absent"):
-            result = runner.invoke(app, ["devcontainer", "shutdown", "--agent"])
+            result = runner.invoke(app, ["agent", "shutdown"])
         assert result.exit_code == 0, result.output
         assert "No agent container found" in result.output
 
@@ -345,21 +333,21 @@ class TestDevcontainerShutdownAgent:
         with patch("cld.cli.require_docker"), \
              patch("cld.cli.docker_agent_list", return_value=[]) as agent_list, \
              patch("cld.cli.docker_master_list") as master_list:
-            result = runner.invoke(app, ["devcontainer", "shutdown", "--agent", "--all"])
+            result = runner.invoke(app, ["agent", "shutdown", "--all"])
         assert result.exit_code == 0, result.output
         assert agent_list.called
         assert not master_list.called
         assert "No agent containers found" in result.output
 
 
-class TestDevcontainerRestartAgent:
-    def test_absent_errors_with_agent_hint(self, tmp_path):
+class TestAgentRestart:
+    def test_absent_errors_with_hint(self, tmp_path):
         with patch("cld.cli.require_docker"), \
              patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
              patch("cld.cli.docker_agent_status", return_value="absent"):
-            result = runner.invoke(app, ["devcontainer", "restart", "--agent"])
+            result = runner.invoke(app, ["agent", "restart"])
         assert result.exit_code == 1
-        assert "--agent" in result.output
+        assert "agent" in result.output
 
 
 class TestBuildCommand:

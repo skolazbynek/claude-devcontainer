@@ -1,4 +1,4 @@
-"""Agent and review launch logic."""
+"""One-shot Claude agent (`cld run`) and code-review agent (`cld review`) launch logic."""
 
 import subprocess
 import sys
@@ -7,13 +7,13 @@ from string import Template
 
 from cld.config import Config
 from cld.docker import (
-    agent_extra_paths,
     base_extra_paths,
     build_container_args,
     build_session_name,
     ensure_image,
     find_repo_context,
     require_docker,
+    run_extra_paths,
     to_host_path,
     WORKSPACE_BASE,
 )
@@ -24,12 +24,12 @@ from cld.vcs.anchor import assert_descendant, create_editable_root, resolve_anch
 log = get_logger(__name__)
 
 
-def agent_workspace_path(repo_root: Path, session: str) -> Path:
-    """Host path where an agent's per-session workspace lives."""
+def session_workspace_path(repo_root: Path, session: str) -> Path:
+    """Host path where a session's isolated workspace lives (shared by run/master/agent/chain)."""
     return repo_root / ".cld" / "workspaces" / session
 
 
-def launch_agent(
+def launch_run(
     cfg: Config,
     task_file: Path | None = None,
     inline_prompt: str | None = None,
@@ -44,7 +44,7 @@ def launch_agent(
     workspace_path: Path | None = None,
     anchor_hash: str | None = None,
 ) -> dict:
-    """Launch an autonomous Claude agent in a Docker container.
+    """Launch a one-shot autonomous Claude agent in a Docker container.
 
     If ``workspace_path`` and ``anchor_hash`` are provided the caller has
     already created the editable_root workspace; otherwise this function
@@ -61,10 +61,10 @@ def launch_agent(
 
     cld_root = Path(__file__).resolve().parent.parent
     ensure_image(
-        cfg.agent_image,
-        cld_root / "imgs/claude-agent/Dockerfile.claude-agent",
-        cld_root / "imgs/claude-agent",
-        extra_paths=agent_extra_paths(cld_root),
+        cfg.run_image,
+        cld_root / "imgs/claude-run/Dockerfile.claude-run",
+        cld_root / "imgs/claude-run",
+        extra_paths=run_extra_paths(cld_root),
         parent_image=(
             cfg.base_image,
             cld_root / "imgs/claude-base/Dockerfile.claude-base",
@@ -74,11 +74,11 @@ def launch_agent(
         quiet=quiet,
     )
 
-    session = session_name or build_session_name("agent", name)
+    session = session_name or build_session_name("run", name)
 
     if workspace_path is None:
         anchor_hash = resolve_anchor(vcs, revision)
-        workspace_path = agent_workspace_path(repo_root, session)
+        workspace_path = session_workspace_path(repo_root, session)
         create_editable_root(vcs, anchor_hash, workspace_path, session)
     elif anchor_hash is None:
         raise RuntimeError("workspace_path given without anchor_hash")
@@ -115,7 +115,7 @@ def launch_agent(
         print()
 
     container_id = subprocess.run(
-        ["docker", "run", "--detach"] + args + [cfg.agent_image],
+        ["docker", "run", "--detach"] + args + [cfg.run_image],
         capture_output=True, text=True,
     )
 
@@ -172,7 +172,7 @@ def launch_review(
     session = build_session_name("review", name)
 
     anchor = resolve_anchor(vcs, revision)
-    workspace_path = agent_workspace_path(repo_root, session)
+    workspace_path = session_workspace_path(repo_root, session)
     create_editable_root(vcs, anchor, workspace_path, session)
 
     scratch = workspace_path / ".cld-run"
@@ -191,7 +191,7 @@ def launch_review(
     diff_file.write_text(diff_content)
     log.info(f"Diff saved to: {diff_file}")
 
-    template_path = cld_root / "imgs/claude-agent-review/review-template.md"
+    template_path = cld_root / "imgs/review-templates/review-template.md"
     if not template_path.is_file():
         log.error(f"Template not found: {template_path}")
         sys.exit(1)
@@ -205,7 +205,7 @@ def launch_review(
     log.info(f"Task file created: {task_file}")
     print()
 
-    return launch_agent(
+    return launch_run(
         cfg,
         task_file=task_file,
         model=model,

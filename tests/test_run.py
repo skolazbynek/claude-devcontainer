@@ -1,4 +1,4 @@
-"""Tests for cld.agent.launch_agent input validation.
+"""Tests for cld.run.launch_run input validation.
 
 Task composition (merging task file + inline prompt) was moved into the
 container entrypoint so the resulting file lands on the agent's VCS change,
@@ -11,15 +11,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from cld.agent import launch_agent
+from cld.run import launch_run
 from cld.config import Config
 
 
 class TestLaunchAgentValidation:
     def test_neither_task_file_nor_prompt_exits(self):
-        with patch("cld.agent.require_docker"):
+        with patch("cld.run.require_docker"):
             with pytest.raises(SystemExit):
-                launch_agent(Config())
+                launch_run(Config())
 
 
 def _args_contain(cmd, *args):
@@ -49,16 +49,18 @@ class TestLaunchAgentExtensions:
         docker_result.stderr = ""
 
         with (
-            patch("cld.agent.require_docker"),
-            patch("cld.agent.find_repo_context", return_value=(Path("/fake/repo"), "")),
-            patch("cld.agent.get_backend", return_value=mock_vcs),
-            patch("cld.agent.ensure_image"),
-            patch("cld.agent.build_session_name", return_value=session),
-            patch("cld.agent.build_container_args", return_value=[]),
-            patch("cld.agent._create_agent_workspace", return_value=Path("/fake/repo/.cld/workspaces") / session),
-            patch("cld.agent.subprocess.run", return_value=docker_result) as mock_run,
+            patch("cld.run.require_docker"),
+            patch("cld.run.find_repo_context", return_value=(Path("/fake/repo"), "")),
+            patch("cld.run.get_backend", return_value=mock_vcs),
+            patch("cld.run.ensure_image"),
+            patch("cld.run.build_session_name", return_value=session),
+            patch("cld.run.build_container_args", return_value=[]),
+            patch("cld.run.session_workspace_path", return_value=Path("/fake/repo/.cld/workspaces") / session),
+            patch("cld.run.resolve_anchor", return_value="deadbeef1234"),
+            patch("cld.run.create_editable_root"),
+            patch("cld.run.subprocess.run", return_value=docker_result) as mock_run,
         ):
-            launch_agent(Config(), quiet=True, **kwargs)
+            launch_run(Config(), quiet=True, **kwargs)
             return list(mock_run.call_args.args[0])
 
     def test_system_prompt_file_adds_mount_and_env(self):

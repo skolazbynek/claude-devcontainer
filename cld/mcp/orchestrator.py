@@ -83,7 +83,7 @@ def launch_agent(task_file: str, name: str = "", model: str = "", revision: str 
     model: claude model to use (e.g. 'opus', 'sonnet'). Defaults to sonnet.
     revision: revision to initialize the workspace from. Defaults to current working copy.
     """
-    from cld.agent import launch_agent as _launch_agent
+    from cld.run import launch_run as _launch_agent
 
     log.info(
         "MCP tool: launch_agent (task_kind=%s, task_size=%d, name=%s, model=%s)",

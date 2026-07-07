@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from string import Template
 
-from cld.agent import agent_workspace_path, launch_agent
+from cld.run import launch_run, session_workspace_path
 from cld.agent_runtime import format_duration, read_agent_cost, wait_for_agent
 from cld.config import Config
 from cld.docker import build_session_name
@@ -285,7 +285,7 @@ def run_loop(
     repo_root = vcs.repo_root
     loop_branch = build_session_name("loop", name)
     anchor = resolve_anchor(vcs, revision)
-    loop_ws = agent_workspace_path(repo_root, loop_branch)
+    loop_ws = session_workspace_path(repo_root, loop_branch)
     create_editable_root(vcs, anchor, loop_ws, loop_branch)
     loop_vcs = type(vcs)(repo_root=repo_root, workspace_path=loop_ws)
     scratch_dir = loop_ws / ".cld-run"
@@ -318,7 +318,7 @@ def run_loop(
             _print_phase(iteration, max_iterations, "implementing...", impl_session)
             phase_start = time.monotonic()
 
-            impl_result = launch_agent(
+            impl_result = launch_run(
                 cfg,
                 task_file=impl_task_file,
                 inline_prompt=impl_inline,
@@ -364,7 +364,7 @@ def run_loop(
             _print_phase(iteration, max_iterations, "reviewing...", review_session)
             phase_start = time.monotonic()
 
-            review_result = launch_agent(
+            review_result = launch_run(
                 cfg,
                 task_file=review_task,
                 model=review_model,

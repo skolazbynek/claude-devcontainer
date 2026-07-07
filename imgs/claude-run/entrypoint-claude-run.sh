@@ -88,7 +88,7 @@ else
     VCS_NOTE="Your working directory is isolated in a git worktree. All changes will be committed when you're done."
 fi
 
-SYSTEM_PROMPT_FILE="${AGENT_SYSTEM_PROMPT_FILE:-/opt/cld/agent-system-prompt.md}"
+SYSTEM_PROMPT_FILE="${AGENT_SYSTEM_PROMPT_FILE:-/opt/cld/run-system-prompt.md}"
 SYSTEM_PROMPT="$(cat "$SYSTEM_PROMPT_FILE")
 
 $VCS_NOTE

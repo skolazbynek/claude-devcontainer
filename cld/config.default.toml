@@ -1,6 +1,6 @@
 base_image = "claude-base:latest"
 devcontainer_image = "claude-devcontainer:latest"
-agent_image = "claude-agent:latest"
+run_image = "claude-run:latest"
 
 # SSL CA certificates: internal (Seznam) CAs are baked into the base image
 # trust store and consumed via SSL_CERT_FILE / REQUESTS_CA_BUNDLE /
@@ -49,4 +49,4 @@ trunk_candidates = ["dev", "main", "master"]
 # Inter-container agent messaging (mailboxes + repo agent supervisor)
 # mailbox_root = "~/.cld/mailboxes"  # host root for the mailbox tree
 # agent_max_turns = 30               # per-message turn cap for the agent supervisor
-# agent_kickoff_persona = "repo-agent"  # persona used to kick off a new agent session
+# agent_kickoff_persona = "agent"  # persona used to kick off a new agent session

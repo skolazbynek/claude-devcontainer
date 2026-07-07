@@ -32,13 +32,21 @@ All commands must be run from within a VCS repository (jj or git).
 # Show information
 cld --help
 
-# Interactive devcontainer (neovim, jj/git, poetry, claude with --dangerously-skip-permissions)
-cld devcontainer [-n name]
+# Ephemeral interactive devcontainer (neovim, jj/git, poetry, claude with --dangerously-skip-permissions)
+cld [-n name] [-m model] [-r revision] [-p prompt] [task.md]
 
-# Autonomous agent (task file, inline prompt, or both)
-cld agent [-n name] [-m model] [-r revision] task.md
-cld agent -p "Fix the auth bug in src/login.py"
-cld agent task.md -p "Focus on the database layer"
+# Persistent per-repo interactive devcontainer (start-or-attach; idempotent per repo)
+cld master                                # start or re-attach
+cld master {restart | shutdown [--all] | status | logs}
+
+# Persistent per-repo headless Claude agent (mailbox-driven)
+cld agent                                 # start; never attaches
+cld agent {restart | shutdown [--all] | status | logs}
+
+# One-shot autonomous run (headless, --rm, commits to a branch)
+cld run [-n name] [-m model] [-r revision] task.md
+cld run -p "Fix the auth bug in src/login.py"
+cld run task.md -p "Focus on the database layer"
 
 # Code review agent (generates diff, runs review from template)
 cld review [-n name] [-m model] <feature-branch> <trunk-branch>
@@ -63,7 +71,7 @@ Agent containers run detached and auto-remove on exit. Results are committed to 
 `cld loop` runs implement → review iterations on a single branch until the review is clean (no Critical and no Major findings) or `--max-iterations` is reached. Each iteration spawns two agent containers in sequence (implementer, then reviewer). Review findings are fed into the next implementer's prompt.
 
 ```bash
-# Run with a task file (combine with -p, same semantics as `cld agent`)
+# Run with a task file (combine with -p, same semantics as `cld run`)
 cld loop -n add-cache task.md
 cld loop -n add-cache -p "Use the redis client already in src/cache.py" task.md
 
@@ -204,7 +212,7 @@ Lets any devcontainer (master or repo agent) send a message to any other and get
 claude mcp add -s user messenger -- /path/to/cld/scripts/mcp/run-messenger.sh
 
 # Start a persistent, headless repo agent for the current repo
-cld devcontainer --agent
+cld agent
 
 # From any other container (master or another agent), message it by repo basename
 # (inside Claude): mcp__messenger__send(to="my-repo", subject="...", body="...")
@@ -214,11 +222,11 @@ cld devcontainer --agent
 
 **Lifecycle:**
 ```bash
-cld devcontainer --agent                     # start (idempotent per repo)
-cld devcontainer restart  --agent            # rebuild + relaunch (fresh session)
-cld devcontainer shutdown --agent [--all]    # stop + remove + cleanup
-cld devcontainer status   --agent            # supervisor phase / session / cost
-cld devcontainer logs     --agent [-n N]     # tail its log
+cld agent                     # start (idempotent per repo)
+cld agent restart             # rebuild + relaunch (fresh session)
+cld agent shutdown [--all]    # stop + remove + cleanup
+cld agent status              # supervisor phase / session / cost
+cld agent logs [-n N]         # tail its log
 ```
 
 The repo agent has one persistent Claude session that survives across messages -- it remembers prior conversations with a given sender, so follow-ups like "for question a, RESTRICT" resolve without re-stating context. Every message gets exactly one reply; if the agent's turn doesn't call `send()`, the supervisor synthesizes a fallback so senders are never left hanging.
@@ -229,7 +237,7 @@ The repo agent has one persistent Claude session that survives across messages -
 cld/                               Python package (CLI + shared logic)
   cli.py                           typer app with all subcommands
   docker.py                        container arg building, image management, path translation
-  agent.py                         agent and review launch logic
+  run.py                           one-shot run and review launch logic (`cld run`, `cld review`)
   loop.py                          automated implement-review loop
   chain.py                         declarative multi-agent chain runner
   vcs/                             VCS abstraction layer
@@ -253,14 +261,14 @@ imgs/
     container-init.sh              Shared init (MCP config merge, mysql wrapper) -- baked into base
     vcs-lib.sh                     Shell VCS abstraction (sourced by both entrypoints) -- baked into base
     entrypoint-claude-devcontainer.sh
-  claude-agent/                    Agent image (FROM base, adds agent entrypoint + system prompt)
-    entrypoint-claude-agent.sh
-  claude-agent-review/             Review templates
+  claude-run/                      One-shot run image (FROM base, adds run entrypoint + system prompt)
+    entrypoint-claude-run.sh
+  review-templates/                Review templates (review-template.md, fix-mr.md)
 
 prompts/                           Reusable task prompts for agents
 ```
 
-**Image hierarchy:** `claude-base` is the parent of both `claude-devcontainer` and `claude-agent` (siblings). Always build base first; `cld build` handles all three in order.
+**Image hierarchy:** `claude-base` is the parent of both `claude-devcontainer` and `claude-run` (siblings). Always build base first; `cld build` handles all three in order.
 
 ### Workspace isolation
 
@@ -307,7 +315,7 @@ Flat snake_case keys mirroring `Config` field names. Unknown keys are warned abo
 ```toml
 base_image = "claude-base:latest"
 devcontainer_image = "claude-devcontainer:latest"
-agent_image = "claude-agent:latest"
+run_image = "claude-run:latest"
 mysql_config = "/path/to/mysql.cnf"
 agent_timeout = 1800
 poll_interval = 30
@@ -320,7 +328,7 @@ debug = false
 |---|---|---|
 | `CLD_BASE_IMAGE` | `claude-base:latest` | Common base Docker image |
 | `CLD_DEVCONTAINER_IMAGE` | `claude-devcontainer:latest` | Devcontainer image |
-| `CLD_AGENT_IMAGE` | `claude-agent:latest` | Agent image |
+| `CLD_RUN_IMAGE` | `claude-run:latest` | One-shot run image |
 | `CLD_HOST_PROJECT_DIR` | `""` | Host repo root path; set by host launcher into containers for nested docker path translation |
 | `CLD_HOST_HOME` | `""` | Host home directory (for path translation) |
 | `CLD_AGENT_TIMEOUT` | `1800` | Loop's per-agent wait timeout (seconds) |

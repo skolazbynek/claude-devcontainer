@@ -1,0 +1,18 @@
+FROM claude-base:latest
+
+USER root
+
+RUN mkdir -p /workspace/output /config && \
+    chown -R claude:claude /workspace /config
+
+# Copy one-shot agent orchestrator script (entrypoint for `cld run`).
+COPY entrypoint-claude-run.sh /workspace/run
+RUN chmod +x /workspace/run && chown claude:claude /workspace/run
+
+# Copy the default one-shot system prompt (overridable via AGENT_SYSTEM_PROMPT_FILE).
+RUN mkdir -p /opt/cld
+COPY run-system-prompt.md /opt/cld/run-system-prompt.md
+
+USER claude
+
+ENTRYPOINT ["/workspace/run"]

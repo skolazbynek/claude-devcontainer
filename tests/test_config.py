@@ -36,11 +36,11 @@ class TestTomlLayering:
         assert cfg.base_image == "p-base"
 
     def test_project_overrides_user(self, tmp_path):
-        user = _write(tmp_path / "user.toml", 'base_image = "u"\nagent_image = "u-agent"\n')
+        user = _write(tmp_path / "user.toml", 'base_image = "u"\nrun_image = "u-run"\n')
         proj = _write(tmp_path / ".cld.config", 'base_image = "p"\n')
         cfg = Config.from_env(user_config=user, project_config=proj)
         assert cfg.base_image == "p"
-        assert cfg.agent_image == "u-agent"  # only project's keys override
+        assert cfg.run_image == "u-run"  # only project's keys override
 
     def test_env_overrides_toml(self, tmp_path, monkeypatch):
         proj = _write(tmp_path / ".cld.config", 'base_image = "p"\n')
@@ -86,7 +86,7 @@ class TestMessengerConfig:
         cfg = Config.from_env(user_config=tmp_path / "u", project_config=tmp_path / "p")
         assert cfg.mailbox_root.endswith(".cld/mailboxes")
         assert cfg.agent_max_turns == 30
-        assert cfg.agent_kickoff_persona == "repo-agent"
+        assert cfg.agent_kickoff_persona == "agent"
 
     def test_toml_overrides(self, tmp_path):
         proj = _write(

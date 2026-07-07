@@ -125,7 +125,7 @@ class TestReviewDiffGeneration:
         assert "new_feature.py" in diff
 
     def test_review_template_substitution(self):
-        template_path = Path(__file__).parent.parent / "imgs/claude-agent-review/review-template.md"
+        template_path = Path(__file__).parent.parent / "imgs/review-templates/review-template.md"
         if not template_path.is_file():
             pytest.skip("review-template.md not found")
         template = Template(template_path.read_text())
@@ -147,23 +147,23 @@ class TestReviewDiffGeneration:
 
 @skip_no_agent_image
 class TestReviewLaunchIntegration:
-    """Integration test for launch_review using mocked launch_agent to avoid
+    """Integration test for launch_review using mocked launch_run to avoid
     actually starting a container, but verifying all the setup steps."""
 
     def test_launch_review_creates_diff_and_task(self, repo_with_branches):
         vcs = repo_with_branches
         launched = {}
 
-        def fake_launch_agent(cfg, task_file=None, model="", session_name=None, **kwargs):
+        def fake_launch_run(cfg, task_file=None, model="", session_name=None, **kwargs):
             launched["task_file"] = task_file
             launched["session_name"] = session_name
             return {"container_id": "fake", "session_name": session_name, "repo_root": str(vcs.repo_root)}
 
-        with patch("cld.agent.get_backend", return_value=vcs), \
-             patch("cld.agent.launch_agent", side_effect=fake_launch_agent), \
-             patch("cld.agent.require_docker"), \
-             patch("cld.agent.ensure_image"):
-            from cld.agent import launch_review
+        with patch("cld.run.get_backend", return_value=vcs), \
+             patch("cld.run.launch_run", side_effect=fake_launch_run), \
+             patch("cld.run.require_docker"), \
+             patch("cld.run.ensure_image"):
+            from cld.run import launch_review
             from cld.config import Config
             result = launch_review(Config(), "feature", "trunk", name="test-review")
 
@@ -190,25 +190,25 @@ class TestReviewLaunchIntegration:
     def test_launch_review_empty_diff_exits(self, repo_with_branches):
         vcs = repo_with_branches
 
-        with patch("cld.agent.get_backend", return_value=vcs), \
-             patch("cld.agent.require_docker"), \
-             patch("cld.agent.ensure_image"):
-            from cld.agent import launch_review
+        with patch("cld.run.get_backend", return_value=vcs), \
+             patch("cld.run.require_docker"), \
+             patch("cld.run.ensure_image"):
+            from cld.run import launch_review
             from cld.config import Config
             with pytest.raises(SystemExit):
                 launch_review(Config(), "trunk", "trunk", name="empty-review")
 
 
 class TestReviewErrorPaths:
-    """Error paths in launch_review that short-circuit before launch_agent."""
+    """Error paths in launch_review that short-circuit before launch_run."""
 
     def test_diff_returns_error_exits(self, repo_with_branches):
         vcs = repo_with_branches
         with patch.object(vcs, "diff_between", return_value="Error: vcs blew up"), \
-             patch("cld.agent.get_backend", return_value=vcs), \
-             patch("cld.agent.require_docker"), \
-             patch("cld.agent.launch_agent") as la:
-            from cld.agent import launch_review
+             patch("cld.run.get_backend", return_value=vcs), \
+             patch("cld.run.require_docker"), \
+             patch("cld.run.launch_run") as la:
+            from cld.run import launch_review
             from cld.config import Config
             with pytest.raises(SystemExit) as exc:
                 launch_review(Config(), "feature", "trunk", name="err-diff")
@@ -226,10 +226,10 @@ class TestReviewErrorPaths:
             return real_is_file(self)
 
         with patch.object(Path, "is_file", fake_is_file), \
-             patch("cld.agent.get_backend", return_value=vcs), \
-             patch("cld.agent.require_docker"), \
-             patch("cld.agent.launch_agent") as la:
-            from cld.agent import launch_review
+             patch("cld.run.get_backend", return_value=vcs), \
+             patch("cld.run.require_docker"), \
+             patch("cld.run.launch_run") as la:
+            from cld.run import launch_review
             from cld.config import Config
             with pytest.raises(SystemExit) as exc:
                 launch_review(Config(), "feature", "trunk", name="err-tmpl")
@@ -238,10 +238,10 @@ class TestReviewErrorPaths:
 
     def test_nonexistent_feature_branch_raises(self, repo_with_branches):
         vcs = repo_with_branches
-        with patch("cld.agent.get_backend", return_value=vcs), \
-             patch("cld.agent.require_docker"), \
-             patch("cld.agent.launch_agent") as la:
-            from cld.agent import launch_review
+        with patch("cld.run.get_backend", return_value=vcs), \
+             patch("cld.run.require_docker"), \
+             patch("cld.run.launch_run") as la:
+            from cld.run import launch_review
             from cld.config import Config
             with pytest.raises(RuntimeError):
                 launch_review(Config(), "does-not-exist", "trunk", name="err-branch")
@@ -265,10 +265,10 @@ class TestReviewErrorPaths:
         subprocess.run(["git", "commit", "-m", "orphan-init"], cwd=tmp_path, check=True, capture_output=True)
         vcs = GitBackend(tmp_path)
 
-        with patch("cld.agent.get_backend", return_value=vcs), \
-             patch("cld.agent.require_docker"), \
-             patch("cld.agent.launch_agent") as la:
-            from cld.agent import launch_review
+        with patch("cld.run.get_backend", return_value=vcs), \
+             patch("cld.run.require_docker"), \
+             patch("cld.run.launch_run") as la:
+            from cld.run import launch_review
             from cld.config import Config
             with pytest.raises(RuntimeError):
                 launch_review(Config(), "feature", "trunk", name="err-orphan")
@@ -278,16 +278,16 @@ class TestReviewErrorPaths:
         vcs = repo_with_branches
         captured = {}
 
-        def fake_launch_agent(cfg, task_file=None, model="", session_name=None, **kwargs):
+        def fake_launch_run(cfg, task_file=None, model="", session_name=None, **kwargs):
             captured["task_file"] = task_file
             captured["session_name"] = session_name
             return {"container_id": "x", "session_name": session_name, "repo_root": str(vcs.repo_root)}
 
-        with patch("cld.agent.get_backend", return_value=vcs), \
-             patch("cld.agent.launch_agent", side_effect=fake_launch_agent), \
-             patch("cld.agent.require_docker"), \
-             patch("cld.agent.ensure_image"):
-            from cld.agent import launch_review
+        with patch("cld.run.get_backend", return_value=vcs), \
+             patch("cld.run.launch_run", side_effect=fake_launch_run), \
+             patch("cld.run.require_docker"), \
+             patch("cld.run.ensure_image"):
+            from cld.run import launch_review
             from cld.config import Config
             launch_review(Config(), "feature", "trunk", name="pathchk")
 
@@ -328,7 +328,7 @@ class TestReviewFullE2E:
         diff_file = root / f"review-diff-{session}.patch"
         diff_file.write_text(diff)
 
-        template_path = Path(__file__).parent.parent / "imgs/claude-agent-review/review-template.md"
+        template_path = Path(__file__).parent.parent / "imgs/review-templates/review-template.md"
         if not template_path.is_file():
             pytest.skip("review-template.md not found")
 
@@ -354,7 +354,7 @@ class TestReviewFullE2E:
     def test_launch_review_e2e_produces_code_review_md(
         self, e2e_repo_with_branches, claude_stub_review, monkeypatch,
     ):
-        """Drive the full Python orchestration: launch_review -> launch_agent -> container."""
+        """Drive the full Python orchestration: launch_review -> launch_run -> container."""
         vcs = e2e_repo_with_branches
         if vcs.name == "git":
             pytest.skip(
@@ -365,7 +365,7 @@ class TestReviewFullE2E:
 
         import random
         from cld import agent as agent_mod
-        from cld.agent import launch_review
+        from cld.run import launch_review
         from cld.config import Config
         from tests.conftest import _HOST_PROJECT_DIR
 

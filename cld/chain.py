@@ -11,7 +11,7 @@ from pathlib import Path
 from string import Template
 from typing import TYPE_CHECKING, Iterator
 
-from cld.agent import agent_workspace_path, launch_agent
+from cld.run import launch_run, session_workspace_path
 from cld.agent_runtime import wait_for_agent, read_agent_cost, format_duration
 from cld.config import Config
 from cld.docker import find_repo_root
@@ -354,7 +354,7 @@ def execute_step(
     model = step.model or chain.defaults.model or cfg.chain_default_model or ""
     revision = chain_branch(chain)
     start = time.monotonic()
-    launch_agent(
+    launch_run(
         cfg,
         task_file=task_file,
         model=model,
@@ -420,7 +420,7 @@ def run_chain(
     log.debug("run_chain: name=%s file=%s steps=%d", chain.name, chain_file, len(chain.steps))
 
     anchor = anchor_hash or resolve_anchor(vcs, revision)
-    chain_ws = agent_workspace_path(repo_root, chain_branch(chain))
+    chain_ws = session_workspace_path(repo_root, chain_branch(chain))
     initialise_chain_branch(chain, vcs, anchor, chain_ws)
     scratch_dir = chain_ws / ".cld-run"
     scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -638,7 +638,7 @@ def _run_parallel(
         )
         model = sibling.model or chain.defaults.model or cfg.chain_default_model or ""
         log.debug("parallel sibling '%s' launching session=%s", sibling.name, session)
-        launch_agent(
+        launch_run(
             cfg,
             task_file=task_file,
             model=model,

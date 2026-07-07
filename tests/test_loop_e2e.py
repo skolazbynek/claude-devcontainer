@@ -64,14 +64,14 @@ class TestLoopFullE2E:
 
         # Track container IDs so we can clean up regardless of test outcome.
         spawned = []
-        real_launch_agent = agent_mod.launch_agent
+        real_launch_run = agent_mod.launch_run
 
-        def tracking_launch_agent(*args, **kwargs):
-            result = real_launch_agent(*args, **kwargs)
+        def tracking_launch_run(*args, **kwargs):
+            result = real_launch_run(*args, **kwargs)
             spawned.append(result["container_id"])
             return result
 
-        monkeypatch.setattr(loop_mod, "launch_agent", tracking_launch_agent)
+        monkeypatch.setattr(loop_mod, "launch_run", tracking_launch_run)
 
         try:
             loop_mod.run_loop(

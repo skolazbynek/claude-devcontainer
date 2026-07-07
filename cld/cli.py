@@ -13,13 +13,11 @@ from typing import Optional
 
 import typer
 
-from cld.agent import agent_workspace_path, launch_agent, launch_review
 from cld.chain import ParallelGroup, apply_name_override, chain_state_dir, load_chain, print_chain_report, run_chain, validate_chain
 from cld.chain_state import ChainState, StateWriter, write_state, _utcnow_iso
 from cld.config import Config
 from cld.docker import (
     agent_container_name,
-    agent_extra_paths,
     base_extra_paths,
     build_container_args,
     build_session_name,
@@ -33,10 +31,12 @@ from cld.docker import (
     find_repo_root,
     master_container_name,
     require_docker,
+    run_extra_paths,
     stage_home_ro,
     stage_ssh_agent,
     to_host_path,
 )
+from cld.run import launch_review, launch_run, session_workspace_path
 from cld.log import get_logger, setup_logging
 from cld.prompts import resolve_prompt_ref
 from cld.loop import run_loop
@@ -45,7 +45,9 @@ from cld.vcs.anchor import create_editable_root, read_workspace_anchor, resolve_
 
 log = get_logger(__name__)
 
-app = typer.Typer()
+app = typer.Typer(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
 
 
 def _handle_errors(func):
@@ -68,24 +70,34 @@ def _version_callback(value: bool):
 
 
 @app.callback(invoke_without_command=True)
+@_handle_errors
 def main(
     ctx: typer.Context,
     version: bool = typer.Option(False, "--version", callback=_version_callback, is_eager=True, help="Show version and exit"),
+    name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
+    model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
+    revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change -- @ for jj, HEAD for git)"),
+    prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (appended to task file if both given)"),
 ):
-    if ctx.invoked_subcommand is None:
-        _run_devcontainer(None, "", "", "", "", None, False, False)
+    """Launch an ephemeral interactive Claude devcontainer (default; no subcommand)."""
+    if ctx.invoked_subcommand is not None:
+        return
+    remaining = list(ctx.args)
+    task_file = remaining[0] if remaining else None
+    extra_args = remaining[1:] if len(remaining) > 1 else None
+    _run_devcontainer(task_file, name, model, revision, prompt, extra_args)
 
 
 @app.command()
 @_handle_errors
-def agent(
+def run(
     task_file: Optional[str] = typer.Argument(None, help="Path to task markdown file, or @<name> to resolve from prompts/"),
     name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
     model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
     revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change -- @ for jj, HEAD for git)"),
     prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (appended to task file if both given)"),
 ):
-    """Launch an autonomous Claude agent."""
+    """Launch a one-shot autonomous Claude agent (headless, --rm, commits to a branch)."""
     task_path: Path | None = None
 
     if task_file and task_file.startswith("@"):
@@ -110,7 +122,7 @@ def agent(
     cfg = Config.from_env()
     setup_logging(cfg)
     log.info(
-        "agent: name=%s, model=%s, revision=%s, task_file=%s, prompt=%s",
+        "run: name=%s, model=%s, revision=%s, task_file=%s, prompt=%s",
         name or "<auto>",
         model or "<default>",
         revision or "<default>",
@@ -118,7 +130,7 @@ def agent(
         "<provided>" if prompt else "<none>",
     )
 
-    launch_agent(
+    launch_run(
         cfg,
         task_file=task_path,
         inline_prompt=prompt or None,
@@ -136,27 +148,15 @@ def _run_devcontainer(
     revision: str,
     prompt: str,
     extra_args: list[str] | None,
-    master: bool,
-    agent: bool,
 ) -> None:
-    """Core devcontainer launch logic shared by the callback and main fallback."""
+    """Ephemeral interactive devcontainer launch. Persistent master/agent live in their own sub-apps."""
     require_docker()
-    if master and agent:
-        typer.echo("Error: --master and --agent are mutually exclusive", err=True)
-        raise typer.Exit(1)
     task_path = Path(task_file) if task_file else None
     if task_path and not task_path.is_file():
         typer.echo(f"Error: Task file not found: {task_file}", err=True)
         raise typer.Exit(1)
     cfg = Config.from_env()
     setup_logging(cfg)
-
-    if master:
-        _run_persistent_devcontainer("master", task_path, name, model, revision, prompt, cfg)
-        return
-    if agent:
-        _run_persistent_devcontainer("agent", task_path, name, model, revision, prompt, cfg)
-        return
 
     log.info(
         "devcontainer: name=%s, model=%s, revision=%s, task_file=%s, prompt=%s",
@@ -186,7 +186,7 @@ def _run_devcontainer(
 
     vcs = get_backend()
     anchor_hash = resolve_anchor(vcs, revision)
-    ws_path = agent_workspace_path(repo_root, session)
+    ws_path = session_workspace_path(repo_root, session)
     create_editable_root(vcs, anchor_hash, ws_path, session)
     log.info(f"Anchor: {anchor_hash[:12]}")
 
@@ -287,17 +287,6 @@ def _run_persistent_devcontainer(
     (see docs/design-agent-messaging.md) -- it starts (or confirms it's running)
     and returns.
     """
-    if name:
-        typer.echo(f"Error: --{role} and -n/--name are mutually exclusive", err=True)
-        raise typer.Exit(1)
-    if role == "agent" and (task_path or prompt):
-        typer.echo(
-            "Error: --agent does not take a task file or -p/--prompt "
-            "(the repo agent has no first-launch prompt; message it after it starts)",
-            err=True,
-        )
-        raise typer.Exit(1)
-
     cld_root = Path(__file__).resolve().parent.parent
     ensure_image(
         cfg.devcontainer_image,
@@ -337,7 +326,7 @@ def _run_persistent_devcontainer(
         return
 
     # absent — create a new persistent container
-    ws_path = agent_workspace_path(repo_root, session)
+    ws_path = session_workspace_path(repo_root, session)
     vcs = get_backend()
 
     if ws_path.exists():
@@ -418,56 +407,17 @@ def _run_persistent_devcontainer(
         os.execvp("docker", ["docker", "exec", "-it", session, "/bin/bash", "-l"])
 
     typer.echo(f"Agent '{session}' started for {repo_root}.")
-    typer.echo("  Status: cld devcontainer status --agent")
-    typer.echo("  Logs:   cld devcontainer logs --agent")
+    typer.echo("  Status: cld agent status")
+    typer.echo("  Logs:   cld agent logs")
     typer.echo(f"  Send:   messenger MCP send(to=\"{repo_root.name}\", ...) from another container")
 
 
-dc_app = typer.Typer(help="Launch or manage the interactive devcontainer.")
-app.add_typer(
-    dc_app,
-    name="devcontainer",
-    invoke_without_command=True,
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-)
-
-
-@dc_app.callback(invoke_without_command=True)
-@_handle_errors
-def devcontainer(
-    ctx: typer.Context,
-    name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
-    model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
-    revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change -- @ for jj, HEAD for git)"),
-    prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (appended to task file if both given)"),
-    master: bool = typer.Option(False, "--master", help="Start or attach to the persistent master devcontainer for this repo"),
-    agent: bool = typer.Option(False, "--agent", help="Start the persistent headless repo agent for this repo (see docs/design-agent-messaging.md)"),
-):
-    """Launch an interactive Claude devcontainer (or manage the master/agent persistent containers)."""
-    if ctx.invoked_subcommand is not None:
-        return
-    # Positional args (task_file, extra docker args) come in via ctx.args
-    # because the group uses allow_extra_args=True.
-    remaining = list(ctx.args)
-    task_file = remaining[0] if remaining else None
-    extra_args = remaining[1:] if len(remaining) > 1 else None
-    _run_devcontainer(task_file, name, model, revision, prompt, extra_args, master, agent)
-
-
-@dc_app.command("shutdown")
-@_handle_errors
-def devcontainer_shutdown(
-    all_: bool = typer.Option(False, "--all", help="Stop all containers of this role on this host"),
-    agent: bool = typer.Option(False, "--agent", help="Target the repo agent instead of the master"),
-):
-    """Stop and remove the master (or agent) devcontainer for the current repo (or all with --all)."""
+def _do_shutdown(role: str, all_: bool) -> None:
     require_docker()
     cfg = Config.from_env()
     setup_logging(cfg)
-    role = "agent" if agent else "master"
-
     if all_:
-        containers = docker_agent_list() if agent else docker_master_list()
+        containers = docker_agent_list() if role == "agent" else docker_master_list()
         if not containers:
             typer.echo(f"No {role} containers found.")
             return
@@ -478,7 +428,6 @@ def devcontainer_shutdown(
         if failed:
             raise typer.Exit(1)
         return
-
     repo_root, _ = find_repo_context()
     container_name = _persistent_container_name(role, repo_root)
     if _persistent_container_status(role, container_name) == "absent":
@@ -488,54 +437,29 @@ def devcontainer_shutdown(
         raise typer.Exit(1)
 
 
-@dc_app.command("restart")
-@_handle_errors
-def devcontainer_restart(
-    agent: bool = typer.Option(False, "--agent", help="Restart the repo agent instead of the master"),
-):
-    """Restart the master (or agent) devcontainer for this repo, picking up cld image/code changes.
-
-    Stops and removes the existing container, then relaunches. The jj/git
-    workspace is preserved along with all uncommitted work; only in-container
-    state (installed packages, shell history, running processes) is wiped.
-    """
+def _do_restart(role: str) -> None:
     require_docker()
     cfg = Config.from_env()
     setup_logging(cfg)
-    role = "agent" if agent else "master"
-
     repo_root, _ = find_repo_context()
     container_name = _persistent_container_name(role, repo_root)
     if _persistent_container_status(role, container_name) == "absent":
-        typer.echo(
-            f"No {role} container to restart. Start one with: cld devcontainer --{role}",
-            err=True,
-        )
+        typer.echo(f"No {role} container to restart. Start one with: cld {role}", err=True)
         raise typer.Exit(1)
-
     _stop_and_remove_container(container_name)
     _run_persistent_devcontainer(role, None, "", "", "", "", cfg)
 
 
-@dc_app.command("status")
-@_handle_errors
-def devcontainer_status(
-    agent: bool = typer.Option(False, "--agent", help="Report the repo agent instead of the master"),
-):
-    """Print status of the persistent master or agent devcontainer for this repo."""
+def _do_status(role: str) -> None:
     cfg = Config.from_env()
     setup_logging(cfg)
-    role = "agent" if agent else "master"
-
     repo_root, _ = find_repo_context()
     container_name = _persistent_container_name(role, repo_root)
     docker_status = _persistent_container_status(role, container_name)
     typer.echo(f"{role.capitalize()}: {container_name}")
     typer.echo(f"  Container: {docker_status}")
-
     if role != "agent":
         return
-
     state_path = Path(cfg.mailbox_root).expanduser() / container_name / "state.json"
     if not state_path.is_file():
         typer.echo("  Supervisor state: unavailable (not started yet, or mailbox_root misconfigured)")
@@ -554,24 +478,15 @@ def devcontainer_status(
         typer.echo(f"  Processing:  {current.get('subject')} (from {current.get('from')}, id {current.get('id')})")
 
 
-@dc_app.command("logs")
-@_handle_errors
-def devcontainer_logs(
-    tail: int = typer.Option(80, "-n", "--tail", help="Number of lines to show"),
-    agent: bool = typer.Option(False, "--agent", help="Target the repo agent instead of the master"),
-):
-    """Tail the master or agent container's log output."""
+def _do_logs(role: str, tail: int) -> None:
     require_docker()
     cfg = Config.from_env()
     setup_logging(cfg)
-    role = "agent" if agent else "master"
-
     repo_root, _ = find_repo_context()
     container_name = _persistent_container_name(role, repo_root)
     if _persistent_container_status(role, container_name) == "absent":
         typer.echo(f"No {role} container found for this repo.", err=True)
         raise typer.Exit(1)
-
     result = subprocess.run(
         ["docker", "logs", "--tail", str(tail), container_name],
         capture_output=True, text=True,
@@ -580,6 +495,124 @@ def devcontainer_logs(
         typer.echo(result.stdout, nl=False)
     if result.stderr:
         typer.echo(result.stderr, nl=False, err=True)
+
+
+# --- Persistent master (interactive, per-repo) --------------------------------
+master_app = typer.Typer(
+    help="Persistent per-repo interactive devcontainer (start-or-attach).",
+    invoke_without_command=True,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+app.add_typer(master_app, name="master")
+
+
+@master_app.callback(invoke_without_command=True)
+@_handle_errors
+def master(
+    ctx: typer.Context,
+    model: str = typer.Option("", "-m", "--model", help="Claude model (first launch only)"),
+    revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (first launch only)"),
+    prompt: str = typer.Option("", "-p", "--prompt", help="First-launch prompt (ignored on re-attach)"),
+):
+    """Start (or attach to) the persistent master devcontainer for this repo."""
+    if ctx.invoked_subcommand is not None:
+        return
+    remaining = list(ctx.args)
+    task_file = remaining[0] if remaining else None
+    task_path = Path(task_file) if task_file else None
+    if task_path and not task_path.is_file():
+        typer.echo(f"Error: Task file not found: {task_file}", err=True)
+        raise typer.Exit(1)
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    _run_persistent_devcontainer("master", task_path, "", model, revision, prompt, cfg)
+
+
+@master_app.command("restart")
+@_handle_errors
+def master_restart():
+    """Restart the master devcontainer for this repo, picking up image/code changes."""
+    _do_restart("master")
+
+
+@master_app.command("shutdown")
+@_handle_errors
+def master_shutdown(
+    all_: bool = typer.Option(False, "--all", help="Stop all master containers on this host"),
+):
+    """Stop and remove the master devcontainer for this repo (or all with --all)."""
+    _do_shutdown("master", all_)
+
+
+@master_app.command("status")
+@_handle_errors
+def master_status():
+    """Print status of the master devcontainer for this repo."""
+    _do_status("master")
+
+
+@master_app.command("logs")
+@_handle_errors
+def master_logs(
+    tail: int = typer.Option(80, "-n", "--tail", help="Number of lines to show"),
+):
+    """Tail the master container's log output."""
+    _do_logs("master", tail)
+
+
+# --- Persistent repo agent (headless, mailbox-driven, per-repo) ---------------
+agent_app = typer.Typer(
+    help="Persistent per-repo headless Claude agent (mailbox-driven; see docs/design-agent-messaging.md).",
+    invoke_without_command=True,
+)
+app.add_typer(agent_app, name="agent")
+
+
+@agent_app.callback(invoke_without_command=True)
+@_handle_errors
+def agent(
+    ctx: typer.Context,
+    model: str = typer.Option("", "-m", "--model", help="Claude model (first launch only)"),
+    revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (first launch only)"),
+):
+    """Start the persistent repo agent for this repo. Idempotent per repo."""
+    if ctx.invoked_subcommand is not None:
+        return
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    _run_persistent_devcontainer("agent", None, "", model, revision, "", cfg)
+
+
+@agent_app.command("restart")
+@_handle_errors
+def agent_restart():
+    """Restart the repo agent for this repo, picking up image/code changes."""
+    _do_restart("agent")
+
+
+@agent_app.command("shutdown")
+@_handle_errors
+def agent_shutdown(
+    all_: bool = typer.Option(False, "--all", help="Stop all agent containers on this host"),
+):
+    """Stop and remove the repo agent for this repo (or all with --all)."""
+    _do_shutdown("agent", all_)
+
+
+@agent_app.command("status")
+@_handle_errors
+def agent_status():
+    """Print status of the repo agent for this repo (docker + supervisor phase)."""
+    _do_status("agent")
+
+
+@agent_app.command("logs")
+@_handle_errors
+def agent_logs(
+    tail: int = typer.Option(80, "-n", "--tail", help="Number of lines to show"),
+):
+    """Tail the repo agent's log output (= supervisor stderr)."""
+    _do_logs("agent", tail)
 
 
 def _stop_and_remove_container(name: str) -> None:
@@ -594,7 +627,7 @@ def _shutdown_persistent_container(role: str, name: str, repo_root_str: str, ses
     _stop_and_remove_container(name)
 
     repo_root = Path(repo_root_str)
-    ws_path = agent_workspace_path(repo_root, session)
+    ws_path = session_workspace_path(repo_root, session)
     success = True
 
     if repo_root.exists():
@@ -707,7 +740,7 @@ def loop(
 @app.command()
 @_handle_errors
 def build(no_cache: bool = typer.Option(False, "--no-cache", help="Force rebuild without cache")):
-    """Build base, devcontainer, and agent images (base first)."""
+    """Build base, devcontainer, and run images (base first)."""
     require_docker()
     cfg = Config.from_env()
     setup_logging(cfg)
@@ -734,10 +767,10 @@ def build(no_cache: bool = typer.Option(False, "--no-cache", help="Force rebuild
         force=True, no_cache=no_cache,
     )
     ensure_image(
-        cfg.agent_image,
-        cld_root / "imgs/claude-agent/Dockerfile.claude-agent",
-        cld_root / "imgs/claude-agent",
-        extra_paths=agent_extra_paths(cld_root),
+        cfg.run_image,
+        cld_root / "imgs/claude-run/Dockerfile.claude-run",
+        cld_root / "imgs/claude-run",
+        extra_paths=run_extra_paths(cld_root),
         parent_image=(
             cfg.base_image,
             cld_root / "imgs/claude-base/Dockerfile.claude-base",

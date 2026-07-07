@@ -44,7 +44,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 _TOML_KEYS = {
     "base_image",
     "devcontainer_image",
-    "agent_image",
+    "run_image",
     "mysql_config",
     "agent_timeout",
     "poll_interval",
@@ -153,7 +153,7 @@ class Config:
     # Docker image names
     base_image: str = "claude-base:latest"
     devcontainer_image: str = "claude-devcontainer:latest"
-    agent_image: str = "claude-agent:latest"
+    run_image: str = "claude-run:latest"
 
     # Optional MySQL credentials (path to a .cnf file on the host)
     mysql_config: str = ""
@@ -208,7 +208,7 @@ class Config:
     # Inter-container agent messaging (mailboxes + repo agent supervisor)
     mailbox_root: str = _default_mailbox_root()
     agent_max_turns: int = 30
-    agent_kickoff_persona: str = "repo-agent"
+    agent_kickoff_persona: str = "agent"
 
     # Diagnostics
     debug: bool = False
@@ -235,7 +235,7 @@ class Config:
         return cls(
             base_image=_env_str("CLD_BASE_IMAGE", layered.get("base_image", "claude-base:latest")),
             devcontainer_image=_env_str("CLD_DEVCONTAINER_IMAGE", layered.get("devcontainer_image", "claude-devcontainer:latest")),
-            agent_image=_env_str("CLD_AGENT_IMAGE", layered.get("agent_image", "claude-agent:latest")),
+            run_image=_env_str("CLD_RUN_IMAGE", layered.get("run_image", "claude-run:latest")),
             mysql_config=_env_str("CLD_MYSQL_CONFIG", layered.get("mysql_config", "")),
             ssl_certs_path=_env_str("CLD_SSL_CERTS_PATH", layered.get("ssl_certs_path", "")),
             host_project_dir=_env_str("CLD_HOST_PROJECT_DIR"),
@@ -258,5 +258,5 @@ class Config:
             ssh_auth_sock=_resolve_ssh_auth_sock(layered),
             mailbox_root=_env_str("CLD_MAILBOX_ROOT", layered.get("mailbox_root", _default_mailbox_root())),
             agent_max_turns=_env_int("CLD_AGENT_MAX_TURNS", int(layered.get("agent_max_turns", 30))),
-            agent_kickoff_persona=_env_str("CLD_AGENT_KICKOFF_PERSONA", layered.get("agent_kickoff_persona", "repo-agent")),
+            agent_kickoff_persona=_env_str("CLD_AGENT_KICKOFF_PERSONA", layered.get("agent_kickoff_persona", "agent")),
         )

@@ -130,10 +130,10 @@ def devcontainer_extra_paths(cld_root: Path) -> list[Path]:
     return [cld_root / "imgs/claude-devcontainer/entrypoint-claude-devcontainer.sh"]
 
 
-def agent_extra_paths(cld_root: Path) -> list[Path]:
+def run_extra_paths(cld_root: Path) -> list[Path]:
     return [
-        cld_root / "imgs/claude-agent/entrypoint-claude-agent.sh",
-        cld_root / "imgs/claude-agent/agent-system-prompt.md",
+        cld_root / "imgs/claude-run/entrypoint-claude-run.sh",
+        cld_root / "imgs/claude-run/run-system-prompt.md",
     ]
 
 

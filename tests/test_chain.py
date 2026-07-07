@@ -44,7 +44,7 @@ def _make_fake_agent_commit(vcs, revision, session_name, files):
 
 def _install_chain_mocks(monkeypatch, vcs, wait_results):
     la_mock = MagicMock()
-    monkeypatch.setattr("cld.chain.launch_agent", la_mock)
+    monkeypatch.setattr("cld.chain.launch_run", la_mock)
     monkeypatch.setattr("cld.chain.wait_for_agent", MagicMock(side_effect=list(wait_results)))
     monkeypatch.setattr("cld.chain.get_backend", lambda *_a, **_kw: vcs)
     monkeypatch.setattr("cld.chain.read_agent_cost", lambda *a, **k: 0.0)
