@@ -31,68 +31,6 @@ detect_vcs() {
 
 # --- Workspace isolation -----------------------------------------------------
 
-vcs_create_workspace() {
-    # Create an isolated workspace/worktree for an agent or devcontainer.
-    # Args: $1=name  $2=target_path  $3=revision (optional)
-    local name="$1" path="$2" revision="${3:-}"
-
-    if [ "$VCS_TYPE" = "jj" ]; then
-        local cmd=("jj" "workspace" "add" "--name" "$name")
-        [ -n "$revision" ] && cmd+=("-r" "$revision")
-        cmd+=("$path")
-        "${cmd[@]}" 2>&1
-    else
-        local cmd=("git" "worktree" "add" "-b" "$name" "$path")
-        [ -n "$revision" ] && cmd+=("$revision")
-        "${cmd[@]}" 2>&1
-    fi
-}
-
-vcs_init_editable_root() {
-    # Create an editable-root workspace: an empty descendant of ANCHOR with a
-    # bookmark/branch named NAME pointing at it. Idempotent: if PATH exists,
-    # assume prior initialization and no-op (restart case).
-    # Args: $1=name  $2=path  $3=anchor_hash
-    local name="$1" path="$2" anchor="$3"
-
-    if [ -e "$path" ]; then
-        echo "[vcs] workspace exists, reusing: $path"
-        return 0
-    fi
-
-    mkdir -p "$(dirname "$path")"
-
-    if [ "$VCS_TYPE" = "jj" ]; then
-        jj workspace add --name "$name" -r "$anchor" "$path" || return 1
-        (cd "$path" && jj bookmark create "$name") || return 1
-    else
-        git worktree add -b "$name" "$path" "$anchor" || return 1
-        (cd "$path" && git commit --allow-empty -m "cld: editable root") || return 1
-    fi
-}
-
-vcs_forget_workspace() {
-    # Remove/forget a workspace/worktree.
-    # Args: $1=name  $2=path (required for git, optional for jj)
-    local name="$1" path="${2:-}"
-
-    if [ "$VCS_TYPE" = "jj" ]; then
-        jj workspace forget "$name" 2>&1
-        # Clear the bind-mounted workspace contents on the host (mount point
-        # itself remains; the host-side launcher created the directory).
-        if [ -n "$path" ] && [ -d "$path" ]; then
-            find "$path" -mindepth 1 -delete 2>/dev/null || true
-        fi
-    else
-        if [ -n "$path" ]; then
-            git worktree remove --force "$path" 2>&1 || true
-        fi
-        git worktree prune 2>&1 || true
-        # Clean up the tracking branch
-        git branch -D "$name" 2>/dev/null || true
-    fi
-}
-
 # --- Branch / bookmark management --------------------------------------------
 
 vcs_create_branch() {

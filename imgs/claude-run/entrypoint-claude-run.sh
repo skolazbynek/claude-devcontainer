@@ -7,17 +7,6 @@ AGENT_NAME="${SESSION_NAME:?SESSION_NAME must be set}"
 TASK_FILE_MOUNT="${INSTRUCTION_FILE:-/config/task.md}"
 INSTRUCTION_FILE=""
 
-cleanup() {
-    local exit_code=$?
-    if [ -n "$AGENT_NAME" ] && [ -n "$LOG_FILE" ]; then
-        log "Cleanup: running /opt/cld/cleanup-workspace.sh"
-        cd "$WORKSPACE_ORIGIN" 2>/dev/null || true
-        /opt/cld/cleanup-workspace.sh 2>&1 | tee -a "$LOG_FILE" || true
-    fi
-    exit $exit_code
-}
-trap cleanup EXIT
-
 log() {
     local msg="[$(date +'%Y-%m-%d %H:%M:%S')] $*"
     echo "$msg"
@@ -46,22 +35,24 @@ fi
 # user.email/user.name from ~/.config/jj.
 copy_host_configs
 
-detect_vcs || exit 1
+BOOKMARK="$AGENT_NAME"
+ANCHOR="$AGENT_ANCHOR_HASH"
 
-# Workspace init happens here (in-container) so the launcher never needs RW
-# on the origin repo.
-WORKSPACE_ACTUAL="$WORKSPACE_ORIGIN/.cld/workspaces/$AGENT_NAME"
-if ! vcs_init_editable_root "$AGENT_NAME" "$WORKSPACE_ACTUAL" "$AGENT_ANCHOR_HASH"; then
-    echo "Error: workspace init failed" >&2
-    exit 1
-fi
-mkdir -p "$WORKSPACE_ORIGIN/.cld/anchors"
-echo "$AGENT_ANCHOR_HASH" > "$WORKSPACE_ORIGIN/.cld/anchors/$AGENT_NAME"
-if [ ! -L "$WORKSPACE_CURRENT" ] || [ "$(readlink "$WORKSPACE_CURRENT")" != "$WORKSPACE_ACTUAL" ]; then
-    rm -rf "$WORKSPACE_CURRENT"
-    ln -s "$WORKSPACE_ACTUAL" "$WORKSPACE_CURRENT"
-fi
-cd "$WORKSPACE_CURRENT"
+cd "$WORKSPACE_ORIGIN"
+
+# One-shot agent: first launch only. Anchor at $ANCHOR (the split-produced B
+# commit containing .cld-run/*); create a fresh workspace at /workspace/current
+# and plant the bookmark on @ so the final commit is easy to find later.
+jj workspace add --name "$BOOKMARK" -r "$ANCHOR" /workspace/current
+(cd /workspace/current && jj bookmark set "$BOOKMARK" -r @ --allow-backwards)
+
+(cd /workspace/current && \
+    jj config set --repo fsmonitor.backend watchman && \
+    jj config set --repo fsmonitor.watchman.register-snapshot-trigger true && \
+    jj status >/dev/null)
+
+cd /workspace/current
+VCS_TYPE="jj"
 
 OUTPUT_DIR="$WORKSPACE_CURRENT/agent-output-$AGENT_NAME"
 LOG_FILE="$OUTPUT_DIR/agent.log"
