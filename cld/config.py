@@ -51,6 +51,7 @@ _TOML_KEYS = {
     "debug",
     "home_mounts_always",
     "home_mounts_devcontainer",
+    "master_extra_mounts_ro",
     "ssl_certs_path",
     "chain_max_parallel",
     "chain_default_model",
@@ -178,6 +179,12 @@ class Config:
         ".cache/nvim",
     )
 
+    # Host paths RO same-path bind-mounted into `cld master` containers. Lets the
+    # user cd into any of these paths inside master's shell and run `cld agent`
+    # against the sibling repo — the sibling agent container gets RW via the
+    # docker socket, master itself never gets RW on the target.
+    master_extra_mounts_ro: tuple[str, ...] = ()
+
     # Set by the host launcher when running inside a container, so Python
     # code (e.g. nested `cld` invocations) can translate container-side
     # paths back to host paths for sibling -v mounts. Empty on the host.
@@ -247,6 +254,7 @@ class Config:
             home_mounts_devcontainer=tuple(layered.get("home_mounts_devcontainer", (
                 ".gitconfig", ".bashrc", ".config/nvim", ".local/state/nvim", ".cache/nvim",
             ))),
+            master_extra_mounts_ro=tuple(layered.get("master_extra_mounts_ro", ())),
             chain_max_parallel=_env_int("CLD_CHAIN_MAX_PARALLEL", int(layered.get("chain_max_parallel", 4))),
             chain_default_model=_env_str("CLD_CHAIN_DEFAULT_MODEL", layered.get("chain_default_model", "")),
             ignore_gitignore=tuple(layered.get("ignore_gitignore", ())),

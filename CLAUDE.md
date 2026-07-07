@@ -61,7 +61,9 @@ chains/                          -- YAML chain definitions (e.g. architect-imple
 2. If `.git/` directory exists AND `git` binary is available -> git backend
 3. Error
 
-**Workspace isolation:** Containers mount the host repo at `/workspace/origin`, create a workspace (jj workspace / git worktree) at `/workspace/current` with a named branch. On exit, workspace is cleaned up but branch persists.
+**Workspace isolation:** Containers mount the host repo RW at `/workspace/origin`. The container's own entrypoint (via `vcs_init_editable_root` in `vcs-lib.sh`) runs `jj workspace add` / `git worktree add` at `/workspace/origin/.cld/workspaces/<session>` on boot and symlinks `/workspace/current` to it. Workspace creation lives inside the container (not on the host) so `cld master` can launch sibling agents against RO-mounted repos without ever needing RW itself. Graceful shutdown of persistent containers does `docker exec /opt/cld/cleanup-workspace.sh` inside the container before `docker stop` -- this deregisters the workspace and removes it; the branch persists.
+
+**Master extra mounts (`master_extra_mounts_ro`):** Host paths RO same-path bind-mounted into `cld master` containers. Lets the user `cd` into any RO-mounted repo inside master's shell and run `cld agent` -- master's cwd-walk finds the repo, resolves the anchor via RO reads, and calls `docker run` on a sibling agent container with `-v <host_path>:/workspace/origin` (RW inside the sibling only). Master's own filesystem view of the target repo stays RO throughout.
 
 **Session naming:** All commands accept `-n/--name`. Names are prefixed per mode: `cld_`, `agent_`, `review_`. Passed into containers as `SESSION_NAME` env var. Entrypoints use it for branches, workspaces, and log directories.
 
@@ -101,7 +103,7 @@ All Python-side runtime tunables live in `cld/config.py:Config` (frozen dataclas
 
 **Resolution order (lowest → highest priority):** dataclass defaults < user TOML (`~/.config/cld/config.toml`) < project TOML (`<repo_root>/.cld.config`, walked up from cwd) < `.env` in cwd < `CLD_*` env vars.
 
-TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `devcontainer_image`, `run_image`, `mysql_config`, `ssl_certs_path`, `agent_timeout`, `poll_interval`, `debug`, `home_mounts_always`, `home_mounts_devcontainer`, `chain_max_parallel`, `chain_default_model`, `log_level`, `log_color`, `ignore_gitignore`, `mailbox_root`, `agent_max_turns`, `agent_kickoff_persona`). Array fields accept TOML arrays of strings. Unknown keys are warned about on stderr and ignored. `host_project_dir` / `host_home` are container-internal and not configurable via TOML.
+TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `devcontainer_image`, `run_image`, `mysql_config`, `ssl_certs_path`, `agent_timeout`, `poll_interval`, `debug`, `home_mounts_always`, `home_mounts_devcontainer`, `master_extra_mounts_ro`, `chain_max_parallel`, `chain_default_model`, `log_level`, `log_color`, `ignore_gitignore`, `mailbox_root`, `agent_max_turns`, `agent_kickoff_persona`). Array fields accept TOML arrays of strings. Unknown keys are warned about on stderr and ignored. `host_project_dir` / `host_home` are container-internal and not configurable via TOML.
 
 `CLD_*` env vars (read by `Config.from_env`):
 

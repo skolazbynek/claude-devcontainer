@@ -10,9 +10,9 @@ INSTRUCTION_FILE=""
 cleanup() {
     local exit_code=$?
     if [ -n "$AGENT_NAME" ] && [ -n "$LOG_FILE" ]; then
-        log "Cleanup: forgetting workspace $AGENT_NAME"
+        log "Cleanup: running /opt/cld/cleanup-workspace.sh"
         cd "$WORKSPACE_ORIGIN" 2>/dev/null || true
-        vcs_forget_workspace "$AGENT_NAME" "$WORKSPACE_CURRENT" 2>&1 | tee -a "$LOG_FILE" || true
+        /opt/cld/cleanup-workspace.sh 2>&1 | tee -a "$LOG_FILE" || true
     fi
     exit $exit_code
 }
@@ -37,11 +37,6 @@ if [ ! -f "$TASK_FILE_MOUNT" ] && [ -z "$AGENT_INLINE_PROMPT" ]; then
     exit 1
 fi
 
-if [ -z "${WORKSPACE_PREINITIALIZED:-}" ]; then
-    echo "Error: Agent container requires the host to pre-create the workspace (WORKSPACE_PREINITIALIZED=1)" >&2
-    exit 1
-fi
-
 if [ -z "${AGENT_ANCHOR_HASH:-}" ]; then
     echo "Error: AGENT_ANCHOR_HASH must be set" >&2
     exit 1
@@ -52,6 +47,20 @@ fi
 copy_host_configs
 
 detect_vcs || exit 1
+
+# Workspace init happens here (in-container) so the launcher never needs RW
+# on the origin repo.
+WORKSPACE_ACTUAL="$WORKSPACE_ORIGIN/.cld/workspaces/$AGENT_NAME"
+if ! vcs_init_editable_root "$AGENT_NAME" "$WORKSPACE_ACTUAL" "$AGENT_ANCHOR_HASH"; then
+    echo "Error: workspace init failed" >&2
+    exit 1
+fi
+mkdir -p "$WORKSPACE_ORIGIN/.cld/anchors"
+echo "$AGENT_ANCHOR_HASH" > "$WORKSPACE_ORIGIN/.cld/anchors/$AGENT_NAME"
+if [ ! -L "$WORKSPACE_CURRENT" ] || [ "$(readlink "$WORKSPACE_CURRENT")" != "$WORKSPACE_ACTUAL" ]; then
+    rm -rf "$WORKSPACE_CURRENT"
+    ln -s "$WORKSPACE_ACTUAL" "$WORKSPACE_CURRENT"
+fi
 cd "$WORKSPACE_CURRENT"
 
 OUTPUT_DIR="$WORKSPACE_CURRENT/agent-output-$AGENT_NAME"

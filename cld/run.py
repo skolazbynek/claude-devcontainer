@@ -14,11 +14,10 @@ from cld.docker import (
     require_docker,
     run_extra_paths,
     to_host_path,
-    WORKSPACE_BASE,
 )
 from cld.log import get_logger
 from cld.vcs import get_backend
-from cld.vcs.anchor import create_editable_root, resolve_anchor
+from cld.vcs.anchor import resolve_anchor
 
 log = get_logger(__name__)
 
@@ -75,18 +74,17 @@ def launch_run(
 
     session = session_name or build_session_name("run", name)
 
-    if workspace_path is None:
+    # Workspace registration + anchor record are done by the container entrypoint
+    # itself so the host launcher never needs RW on the origin repo. The anchor
+    # is still resolved on the host side (RO-safe) and pinned into the container
+    # via AGENT_ANCHOR_HASH so the in-container guard can enforce immutability.
+    if anchor_hash is None:
         anchor_hash = resolve_anchor(vcs, revision)
+    if workspace_path is None:
         workspace_path = session_workspace_path(repo_root, session)
-        create_editable_root(vcs, anchor_hash, workspace_path, session)
-    elif anchor_hash is None:
-        raise RuntimeError("workspace_path given without anchor_hash")
 
     args = ["--name", session]
     args += build_container_args(repo_root, session, cfg)
-    host_ws = to_host_path(str(workspace_path), cfg)
-    args += ["-v", f"{host_ws}:{WORKSPACE_BASE}/current"]
-    args += ["-e", "WORKSPACE_PREINITIALIZED=1"]
     args += ["-e", f"AGENT_ANCHOR_HASH={anchor_hash}"]
     if task_file:
         host_task = to_host_path(str(task_file.resolve()), cfg)

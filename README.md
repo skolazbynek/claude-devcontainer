@@ -231,9 +231,28 @@ prompts/                           Reusable task prompts for agents
 
 **Image hierarchy:** `claude-base` is the parent of both `claude-devcontainer` and `claude-run` (siblings). Always build base first; `cld build` handles all three in order.
 
+### Managing sibling agents from `cld master`
+
+To spin up / restart / shut down persistent agents for repos other than master's own, set `master_extra_mounts_ro` in your config (list of host paths RO same-path bind-mounted into every master container):
+
+```toml
+master_extra_mounts_ro = ["~/repos", "~/work"]
+```
+
+Then inside master's shell:
+
+```bash
+cd /home/you/repos/repoB    # RO mount, safe to browse
+cld agent                   # launches a sibling agent container for repoB
+cld agent status
+cld agent shutdown
+```
+
+Master itself never gets RW on the target repo. The sibling agent container mounts RepoB RW (via the docker socket master already uses for peer discovery), does its own workspace registration on boot, and runs `/opt/cld/cleanup-workspace.sh` inside itself on shutdown so master never has to write to RepoB.
+
 ### Workspace isolation
 
-Containers mount the host repo at `/workspace/origin` and create an isolated workspace at `/workspace/current` with a named branch. For jj this uses `jj workspace add`; for git it uses `git worktree add`. The `-r` flag controls which revision the workspace branches from (default: `@` for jj, `HEAD` for git). On exit, the workspace is cleaned up but the branch persists.
+Containers mount the host repo RW at `/workspace/origin`. The container's own entrypoint runs `jj workspace add` / `git worktree add` at `/workspace/origin/.cld/workspaces/<session>` on boot and symlinks `/workspace/current` to it. Workspace creation lives in the container (not on the host), so `cld master` can launch sibling agents against RO-mounted repos without needing RW itself. The `-r` flag pins the anchor revision (default: `@` for jj, `HEAD` for git). On graceful shutdown, the container itself deregisters the workspace via `docker exec /opt/cld/cleanup-workspace.sh` before `docker stop`; the branch persists.
 
 ### Host file protection
 

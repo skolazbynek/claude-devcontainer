@@ -2,5 +2,8 @@
   "permissions": {
     "defaultMode": "bypassPermissions",
     "allow": ["Bash", "Read", "Write", "Edit"]
+  },
+  "sandbox": {
+    "enabled": false
   }
 }

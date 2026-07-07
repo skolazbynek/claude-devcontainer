@@ -57,7 +57,6 @@ class TestLaunchAgentExtensions:
             patch("cld.run.build_container_args", return_value=[]),
             patch("cld.run.session_workspace_path", return_value=Path("/fake/repo/.cld/workspaces") / session),
             patch("cld.run.resolve_anchor", return_value="deadbeef1234"),
-            patch("cld.run.create_editable_root"),
             patch("cld.run.subprocess.run", return_value=docker_result) as mock_run,
         ):
             launch_run(Config(), quiet=True, **kwargs)

@@ -36,11 +36,11 @@ from cld.docker import (
     stage_ssh_agent,
     to_host_path,
 )
-from cld.run import launch_run, session_workspace_path
+from cld.run import launch_run
 from cld.log import get_logger, setup_logging
 from cld.prompts import resolve_prompt_ref
 from cld.vcs import get_backend
-from cld.vcs.anchor import create_editable_root, read_workspace_anchor, resolve_anchor
+from cld.vcs.anchor import read_workspace_anchor, resolve_anchor
 
 log = get_logger(__name__)
 
@@ -185,14 +185,9 @@ def _run_devcontainer(
 
     vcs = get_backend()
     anchor_hash = resolve_anchor(vcs, revision)
-    ws_path = session_workspace_path(repo_root, session)
-    create_editable_root(vcs, anchor_hash, ws_path, session)
     log.info(f"Anchor: {anchor_hash[:12]}")
 
     args = build_container_args(repo_root, session, cfg, interactive=True)
-    host_ws = to_host_path(str(ws_path), cfg)
-    args += ["-v", f"{host_ws}:/workspace/current"]
-    args += ["-e", "WORKSPACE_PREINITIALIZED=1"]
     args += ["-e", f"AGENT_ANCHOR_HASH={anchor_hash}"]
     if task_path:
         host_task = to_host_path(str(task_path.resolve()), cfg)
@@ -223,27 +218,6 @@ def _run_devcontainer(
     print()
 
     os.execvp("docker", ["docker", "run"] + args)
-
-
-def _is_workspace_valid(vcs, session: str, ws_path: Path) -> bool:
-    """Return True if *ws_path* is currently registered as a workspace in the VCS."""
-    if vcs.name == "jj":
-        result = vcs.run([
-            "--no-pager", "workspace", "list", "--color=never",
-            "--ignore-working-copy", "-T", 'name ++ "\\n"',
-        ])
-        if result.returncode != 0:
-            return False
-        return session in result.stdout.strip().splitlines()
-    else:
-        result = vcs.run(["worktree", "list", "--porcelain"])
-        if result.returncode != 0:
-            return False
-        ws_str = str(ws_path.resolve())
-        return any(
-            line.startswith("worktree ") and line[len("worktree "):].strip() == ws_str
-            for line in result.stdout.splitlines()
-        )
 
 
 def _wait_for_container_ready(name: str, sentinel: str, timeout: int = 60) -> bool:
@@ -324,48 +298,25 @@ def _run_persistent_devcontainer(
         typer.echo(f"Agent '{session}' is running. Message it via the messenger MCP's send() tool.")
         return
 
-    # absent — create a new persistent container
-    ws_path = session_workspace_path(repo_root, session)
+    # absent — create a new persistent container. Workspace registration + anchor
+    # record are done by the container entrypoint itself (so master doesn't need
+    # RW on the target repo). On restart, the entrypoint sees the existing
+    # workspace at $WORKSPACE_ORIGIN/.cld/workspaces/<session> and reuses it;
+    # if the anchor record on disk exists it wins over `resolve_anchor(vcs, revision)`
+    # so restart preserves the original anchor even if @ has drifted.
     vcs = get_backend()
-
-    if ws_path.exists():
-        if _is_workspace_valid(vcs, session, ws_path):
-            log.info("Orphan workspace found; reusing: %s", ws_path)
-            recorded = read_workspace_anchor(repo_root, session)
-            if recorded:
-                anchor_hash = recorded
-                log.info("Restored recorded anchor: %s", anchor_hash[:12])
-            else:
-                anchor_hash = resolve_anchor(vcs, revision)
-                log.warning(
-                    "No anchor record for existing workspace; resolving from current @ (may drift): %s",
-                    anchor_hash[:12],
-                )
-        else:
-            log.warning("Orphan workspace at %s is stale; removing and recreating", ws_path)
-            try:
-                vcs.forget_workspace(session, str(ws_path))
-            except Exception as e:
-                log.warning("Could not deregister stale workspace: %s", e)
-            shutil.rmtree(ws_path, ignore_errors=True)
-            recorded = read_workspace_anchor(repo_root, session)
-            anchor_hash = recorded or resolve_anchor(vcs, revision)
-            if recorded:
-                log.info("Restored recorded anchor for recreated workspace: %s", anchor_hash[:12])
-            create_editable_root(vcs, anchor_hash, ws_path, session)
+    recorded = read_workspace_anchor(repo_root, session)
+    if recorded:
+        anchor_hash = recorded
+        log.info("Restored recorded anchor: %s", anchor_hash[:12])
     else:
         anchor_hash = resolve_anchor(vcs, revision)
-        create_editable_root(vcs, anchor_hash, ws_path, session)
-
-    log.info("Anchor: %s", anchor_hash[:12])
+        log.info("Anchor: %s", anchor_hash[:12])
 
     args = build_container_args(
         repo_root, session, cfg, interactive=False,
         master=(role == "master"), agent=(role == "agent"),
     )
-    host_ws = to_host_path(str(ws_path), cfg)
-    args += ["-v", f"{host_ws}:/workspace/current"]
-    args += ["-e", "WORKSPACE_PREINITIALIZED=1"]
     args += ["-e", f"AGENT_ANCHOR_HASH={anchor_hash}"]
     if task_path:
         host_task = to_host_path(str(task_path.resolve()), cfg)
@@ -622,30 +573,29 @@ def _stop_and_remove_container(name: str) -> None:
 
 
 def _shutdown_persistent_container(role: str, name: str, repo_root_str: str, session: str) -> bool:
-    """Stop, remove, and clean up the workspace for a master/agent container. Returns True on success."""
+    """Stop, remove, and clean up the workspace for a master/agent container.
+
+    Workspace teardown is delegated to the container itself via `docker exec`
+    of the baked cleanup helper. This means the host / master never needs
+    RW on the target repo -- essential for master-launched sibling agents
+    where master's mount of the target repo is RO. Returns True on success.
+    """
+    # Best-effort in-container cleanup while the container is still running.
+    # On restart (which calls _stop_and_remove_container directly, not this
+    # function) we skip cleanup so the workspace is preserved.
+    exec_result = subprocess.run(
+        ["docker", "exec", name, "/opt/cld/cleanup-workspace.sh"],
+        capture_output=True, text=True,
+    )
+    if exec_result.returncode != 0:
+        log.warning(
+            "In-container cleanup for %s failed (rc=%d); workspace may be leaked. "
+            "stderr: %s", name, exec_result.returncode, exec_result.stderr.strip(),
+        )
+
     _stop_and_remove_container(name)
-
-    repo_root = Path(repo_root_str)
-    ws_path = session_workspace_path(repo_root, session)
-    success = True
-
-    if repo_root.exists():
-        try:
-            vcs = get_backend(repo_root)
-            vcs.forget_workspace(session, str(ws_path))
-        except Exception as e:
-            log.warning("Failed to deregister workspace %s: %s", session, e)
-            success = False
-
-    if ws_path.exists():
-        shutil.rmtree(ws_path, ignore_errors=True)
-
-    anchor_record = repo_root / ".cld" / "anchors" / session
-    if anchor_record.exists():
-        anchor_record.unlink()
-
     typer.echo(f"Stopped and removed {role} container: {name}")
-    return success
+    return exec_result.returncode == 0
 
 
 @app.command()

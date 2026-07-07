@@ -398,6 +398,23 @@ def build_container_args(
         args += ["-v", f"{host_mailbox_root}:{MAILBOX_MOUNT}:rw"]
         log.info("Mailbox mounted: %s -> %s", host_mailbox_root, MAILBOX_MOUNT)
 
+    # Master-only: RO same-path bind-mounts so the user can cd into any of
+    # these inside master's shell and run `cld agent` against a sibling repo.
+    # Same-path alignment (host path == container path) means path translation
+    # becomes an identity for anything under these roots.
+    if master:
+        for entry in cfg.master_extra_mounts_ro:
+            expanded = os.path.expanduser(entry)
+            if not Path(expanded).exists():
+                log.error(
+                    "master_extra_mounts_ro entry does not exist on host: %s "
+                    "(expanded from %r). Remove it or create the directory.",
+                    expanded, entry,
+                )
+                sys.exit(1)
+            args += ["-v", f"{expanded}:{expanded}:ro"]
+            log.info("Master RO mount: %s (same-path)", expanded)
+
     log.debug("Container args: %s", mask_secrets(repr(args)))
     return args
 

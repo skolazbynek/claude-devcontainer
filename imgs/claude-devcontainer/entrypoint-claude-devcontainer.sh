@@ -8,11 +8,6 @@ MAILBOX_OK=$?
 
 BOOKMARK="${SESSION_NAME:?SESSION_NAME must be set}"
 
-if [ -z "${WORKSPACE_PREINITIALIZED:-}" ]; then
-    echo "Error: Devcontainer requires the host to pre-create the workspace (WORKSPACE_PREINITIALIZED=1)" >&2
-    exit 1
-fi
-
 if [ -z "${AGENT_ANCHOR_HASH:-}" ]; then
     echo "Error: AGENT_ANCHOR_HASH must be set" >&2
     exit 1
@@ -22,6 +17,25 @@ detect_vcs || exit 1
 
 echo "Using $VCS_TYPE repository at: $WORKSPACE_ORIGIN"
 echo "Anchor: ${AGENT_ANCHOR_HASH:0:12}"
+
+# Workspace init happens here (in-container) so the host launcher never needs
+# RW on the origin repo -- required for master-launched sibling agents where
+# master's own mount of the target repo is RO. Idempotent for restart.
+WORKSPACE_ACTUAL="$WORKSPACE_ORIGIN/.cld/workspaces/$SESSION_NAME"
+if ! vcs_init_editable_root "$SESSION_NAME" "$WORKSPACE_ACTUAL" "$AGENT_ANCHOR_HASH"; then
+    echo "Error: workspace init failed" >&2
+    exit 1
+fi
+mkdir -p "$WORKSPACE_ORIGIN/.cld/anchors"
+echo "$AGENT_ANCHOR_HASH" > "$WORKSPACE_ORIGIN/.cld/anchors/$SESSION_NAME"
+
+# /workspace/current is the well-known in-container path used throughout the
+# rest of the entrypoint (and by Claude). Replace the baked directory with a
+# symlink to the just-created workspace tree.
+if [ ! -L "$WORKSPACE_CURRENT" ] || [ "$(readlink "$WORKSPACE_CURRENT")" != "$WORKSPACE_ACTUAL" ]; then
+    rm -rf "$WORKSPACE_CURRENT"
+    ln -s "$WORKSPACE_ACTUAL" "$WORKSPACE_CURRENT"
+fi
 
 cd "$WORKSPACE_CURRENT"
 
@@ -86,4 +100,5 @@ fi
 
 /bin/bash
 
-vcs_forget_workspace "$BOOKMARK" "$WORKSPACE_CURRENT"
+# Bare devcontainer: clean up after the user's shell exits.
+/opt/cld/cleanup-workspace.sh
