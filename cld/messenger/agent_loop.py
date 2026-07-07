@@ -115,13 +115,24 @@ class AgentSupervisor:
         if self.model:
             cmd += ["--model", self.model]
 
-        log.info("invoking claude (resume=%s, prompt_size=%d)", resume, len(prompt))
+        log.info("invoking claude (resume=%s, prompt_size=%d): %s", resume, len(prompt), " ".join(cmd))
         result = subprocess.run(cmd, capture_output=True, text=True, input=prompt, cwd=str(self.repo_root))
         if result.returncode != 0:
-            raise RuntimeError(f"claude exited {result.returncode}: {result.stderr[-2000:]}")
+            # In --output-format json, claude reports errors as a JSON envelope on stdout;
+            # stderr is usually empty. Emit both streams to the container log before raising
+            # so `docker logs` / `cld agent logs` has the full context.
+            log.error("claude exited %d\ncmd: %s\nstdout:\n%s\nstderr:\n%s",
+                      result.returncode, " ".join(cmd), result.stdout, result.stderr)
+            raise RuntimeError(
+                f"claude exited {result.returncode}\n"
+                f"stderr: {result.stderr[-2000:]}\n"
+                f"stdout: {result.stdout[-4000:]}"
+            )
         try:
             return json.loads(result.stdout)
         except json.JSONDecodeError as e:
+            log.error("could not parse claude JSON output (%s)\ncmd: %s\nstdout:\n%s\nstderr:\n%s",
+                      e, " ".join(cmd), result.stdout, result.stderr)
             raise RuntimeError(f"could not parse claude JSON output ({e}): {result.stdout[-2000:]}")
 
     def kickoff(self) -> None:

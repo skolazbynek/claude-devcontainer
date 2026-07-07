@@ -47,8 +47,8 @@ jj workspace add --name "$BOOKMARK" -r "$ANCHOR" /workspace/current
 (cd /workspace/current && jj bookmark set "$BOOKMARK" -r @ --allow-backwards)
 
 (cd /workspace/current && \
-    jj config set --repo fsmonitor.backend watchman && \
-    jj config set --repo fsmonitor.watchman.register-snapshot-trigger true && \
+    jj config set --workspace fsmonitor.backend watchman && \
+    jj config set --workspace fsmonitor.watchman.register-snapshot-trigger true && \
     jj status >/dev/null)
 
 cd /workspace/current

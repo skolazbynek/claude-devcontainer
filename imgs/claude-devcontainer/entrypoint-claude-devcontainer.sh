@@ -33,8 +33,8 @@ fi
 # changes get snapshotted without a jj command. `register-snapshot-trigger`
 # fires under our cap-drop=ALL / no-new-privileges / non-root posture.
 (cd /workspace/current && \
-    jj config set --repo fsmonitor.backend watchman && \
-    jj config set --repo fsmonitor.watchman.register-snapshot-trigger true && \
+    jj config set --workspace fsmonitor.backend watchman && \
+    jj config set --workspace fsmonitor.watchman.register-snapshot-trigger true && \
     jj status >/dev/null)
 
 cd /workspace/current
