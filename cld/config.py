@@ -183,7 +183,7 @@ class Config:
     trunk_candidates: tuple[str, ...] = ("main", "master", "trunk")
 
     # Set by the host launcher when running inside a container, so Python
-    # code (e.g. the orchestrator MCP server) can translate container-side
+    # code (e.g. nested `cld` invocations) can translate container-side
     # paths back to host paths for sibling -v mounts. Empty on the host.
     host_project_dir: str = ""
     host_home: str = ""

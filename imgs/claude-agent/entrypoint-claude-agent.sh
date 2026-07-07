@@ -107,7 +107,6 @@ log "Using model: $AGENT_MODEL"
 
 if claude -p "$SYSTEM_PROMPT" \
     --model "$AGENT_MODEL" \
-    --tools "default" \
     --dangerously-skip-permissions \
     --output-format json > "$RESULT_FILE" 2>&1; then
     CLAUDE_EXIT=0

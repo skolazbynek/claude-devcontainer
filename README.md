@@ -191,51 +191,9 @@ This detection runs both on the host (CLI commands) and inside containers (entry
 | Read file from revision | `jj file show -r <rev> <path>` | `git show <rev>:<path>` |
 | Common ancestor | `fork_point(A \| B)` | `git merge-base A B` |
 
-## MCP Orchestrator
+## MCP Orchestrator (deprecated)
 
-The orchestrator gives Claude the ability to launch and manage Docker agents via MCP tools. It's baked into the devcontainer and also usable on the host:
-
-```bash
-# Register for host use (user-scoped, works from any directory)
-claude mcp add -s user orchestrator -- /path/to/cld/scripts/mcp/run-orchestrator.sh
-
-# Inside devcontainer, use the team orchestrator persona
-claude --agent team-orchestrator
-```
-
-**Tools:**
-- Agent lifecycle: `launch_agent`, `list_agents`, `check_status`, `stop_agent`, `get_log`
-- Prompt management: `list_prompts`, `read_prompt`, `save_prompt`
-- VCS operations: `vcs_log`, `vcs_branch_list`, `vcs_new`, `vcs_commit`, `vcs_describe`, `vcs_diff`
-- Backward-compatible aliases: `jj_log`, `jj_bookmark_list`, `jj_new`, `jj_commit`, `jj_describe`, `jj_diff`
-
-Builtin prompts are baked into the image at `/opt/cld/prompts/`. Workspace prompts live at `<repo-root>/prompts/`.
-
-### End-to-end orchestrator flow
-
-```
-+-- host -----------------+
-|  cld devcontainer       |
-|        |                |
-|        v                |
-|  +------------------+   |
-|  |  devcontainer    |   |
-|  |  claude --agent  |   |
-|  |  team-orchestr.  |---+ launches sibling agent containers via /var/run/docker.sock
-|  +------------------+   |        |
-|                         |        v
-|                         |  +------------+  +------------+
-|                         |  | agent_a... |  | review_b...| -> commits to its own VCS branch
-|                         |  +------------+  +------------+
-+-------------------------+        |                |
-                                   v                v
-                              jj squash --from agent_a   (host user merges results)
-```
-
-1. User starts a devcontainer with `cld devcontainer`.
-2. Inside it, runs `claude --agent team-orchestrator`.
-3. The orchestrator calls `launch_agent` to spawn sibling Docker agents.
-4. Each agent commits results to its own VCS branch; the host user merges them with `jj squash --from <branch>` (or `git merge`).
+The `orchestrator` MCP is no longer wired into cld images or host-side claude. `cld/mcp/orchestrator.py` and `scripts/mcp/run-orchestrator.sh` remain in the source tree for reference but are not registered anywhere. Use the `messenger` MCP (below) for inter-agent coordination.
 
 ## Messenger
 
@@ -279,13 +237,13 @@ cld/                               Python package (CLI + shared logic)
     jj.py                          jujutsu backend (preferred)
     git.py                         git backend (fallback)
     detect.py                      auto-detection logic
-  mcp/orchestrator.py              MCP server for agent orchestration
+  mcp/orchestrator.py              MCP server for agent orchestration (deprecated, not wired)
   mcp/messenger.py                 MCP server for the mailbox transport
   messenger/mailbox.py             filesystem mailbox transport
   messenger/agent_loop.py          repo agent supervisor daemon
 
 scripts/
-  mcp/run-orchestrator.sh          venv wrapper for MCP server
+  mcp/run-orchestrator.sh          venv wrapper (deprecated, kept for reference)
   mcp/run-messenger.sh             venv wrapper for the messenger MCP server
 
 imgs/
@@ -316,7 +274,7 @@ All RO `$HOME` mounts (claude/anthropic/jj configs, `~/.claude.json`, plus devco
 
 ### Docker socket
 
-The devcontainer mounts `/var/run/docker.sock` so the orchestrator can launch and manage sibling agent containers. Path translation converts container paths to host paths for volume mounts.
+The devcontainer mounts `/var/run/docker.sock` so the messenger can enumerate peer containers via `docker ps` (used by `list_agents`). Path translation converts container paths to host paths for volume mounts.
 
 ### Security model and known gaps
 
@@ -325,7 +283,7 @@ Containers run as host UID/GID with `--cap-drop=ALL`, `--security-opt=no-new-pri
 **Known gaps -- read carefully before shipping anything sensitive into a container:**
 
 - **No outbound network firewall.** Once an agent is running, it can reach any host on the public internet and exfiltrate anything mounted in (`~/.claude` tokens, `~/.claude.json` MCP creds, `~/.config/*` creds, `CLD_MYSQL_CONFIG`). Anthropic's reference devcontainer ships an `init-firewall.sh` with default-deny outbound and a small allowlist; cld does not (yet) ship an equivalent.
-- **`/var/run/docker.sock` mount = host root.** When the docker socket is mounted (it is, for the orchestrator), an agent inside can run `docker run -v /:/host --privileged ...` and read or modify anything on the host. This effectively bypasses every other security control. If you don't need the orchestrator, comment out the docker.sock block in `cld/docker.py`.
+- **`/var/run/docker.sock` mount = host root.** When the docker socket is mounted (it is, to let the messenger enumerate peer containers), an agent inside can run `docker run -v /:/host --privileged ...` and read or modify anything on the host. This effectively bypasses every other security control. If you don't need cross-container messenger discovery, comment out the docker.sock block in `cld/docker.py`.
 - **`~/.claude` is mounted rw.** A malicious agent can both read your OAuth tokens and overwrite session state.
 
 ## Configuration

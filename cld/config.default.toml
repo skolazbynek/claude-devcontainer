@@ -2,10 +2,11 @@ base_image = "claude-base:latest"
 devcontainer_image = "claude-devcontainer:latest"
 agent_image = "claude-agent:latest"
 
-# SSL CA certificates: absolute path to a dir or PEM file on the host.
-# Empty = auto-detect (/etc/ssl/certs on Linux, /etc/ssl/cert.pem on macOS).
-# Set explicitly to use a custom CA bundle; omit entirely to fall back to the
-# container's own ca-certificates package.
+# SSL CA certificates: internal (Seznam) CAs are baked into the base image
+# trust store and consumed via SSL_CERT_FILE / REQUESTS_CA_BUNDLE /
+# NODE_EXTRA_CA_CERTS. Set ssl_certs_path only as an opt-in escape hatch to
+# *replace* the baked bundle with a host-supplied dir or PEM file. There is
+# no auto-detect / auto-mount anymore.
 # ssl_certs_path = "/etc/ssl/certs"
 
 # Loop tunables

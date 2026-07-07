@@ -160,7 +160,7 @@ def ensure_image(
     Pass force=True to always build. Pass no_cache=True to build with --no-cache.
     Pass quiet=True to capture docker build output (logged at INFO line-by-line)
     instead of streaming to the inherited stdout. Required when running under
-    MCP stdio (orchestrator) where stdout = JSON-RPC and must stay clean.
+    MCP stdio servers where stdout = JSON-RPC and must stay clean.
     Returns the content hash of the (now-current) image.
     """
     parent_hash: str | None = None
@@ -295,28 +295,21 @@ def build_container_args(
         "-w", f"{WORKSPACE_BASE}/current",
     ]
 
-    # SSL CA certificates -- optional, container has its own bundle as fallback.
-    _SSL_CANDIDATES = ["/etc/ssl/certs", "/etc/ssl/cert.pem"]
+    # SSL CA certificates: internal (Seznam) roots are baked into the base image
+    # trust store, so no mount is needed by default. `cfg.ssl_certs_path` is an
+    # explicit escape hatch that shadows the baked bundle with a host-supplied
+    # dir or PEM file -- opt in only, and it *replaces* rather than merges.
     if cfg.ssl_certs_path:
-        log.debug("SSL: using configured ssl_certs_path=%s", cfg.ssl_certs_path)
-        ssl_src: str | None = cfg.ssl_certs_path
-    else:
-        ssl_src = None
-        for candidate in _SSL_CANDIDATES:
-            present = Path(candidate).exists()
-            log.debug("SSL candidate %s: present=%s", candidate, present)
-            if present and ssl_src is None:
-                ssl_src = candidate
-    if ssl_src:
-        ssl_path = Path(ssl_src)
+        ssl_path = Path(cfg.ssl_certs_path)
+        log.info("SSL: replacing baked CA bundle with %s (opt-in via ssl_certs_path)", ssl_path)
         if ssl_path.is_dir():
-            args += ["-v", f"{ssl_src}:/etc/ssl/certs:ro",
+            args += ["-v", f"{ssl_path}:/etc/ssl/certs:ro",
                      "-e", "NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt"]
         else:
-            args += ["-v", f"{ssl_src}:/etc/ssl/cert.pem:ro",
+            args += ["-v", f"{ssl_path}:/etc/ssl/cert.pem:ro",
+                     "-e", "SSL_CERT_FILE=/etc/ssl/cert.pem",
+                     "-e", "REQUESTS_CA_BUNDLE=/etc/ssl/cert.pem",
                      "-e", "NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem"]
-    else:
-        log.warning("No host SSL CA bundle found -- container will use its own ca-certificates")
 
     # Claude session state (required)
     # rw needed for OAuth token refresh and session state writes; tradeoff: agent can both
@@ -359,9 +352,9 @@ def build_container_args(
             "-e", f"CLD_HOST_PROJECT_DIR={repo_root}",
             "-e", f"CLD_HOST_HOME={home}",
         ]
-        log.info("Docker socket mounted (orchestrator support)")
+        log.info("Docker socket mounted (messenger list_agents via docker ps)")
     else:
-        log.warning("Docker socket not found, orchestrator agent lifecycle tools unavailable")
+        log.warning("Docker socket not found, messenger list_agents will be unavailable")
 
     # MySQL (conditional)
     if cfg.mysql_config:

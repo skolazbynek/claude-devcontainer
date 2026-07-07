@@ -27,13 +27,13 @@ cld/                             -- Python package (host-side CLI + shared logic
     git.py                       -- git backend implementation (fallback)
     detect.py                    -- auto-detection: jj preferred, git fallback
   mcp/
-    orchestrator.py              -- MCP server for orchestrating Docker agents
+    orchestrator.py              -- (deprecated) MCP server for orchestrating Docker agents. Not wired into any image or host claude; kept for reference.
     messenger.py                 -- MCP server for the mailbox transport (send/list_inbox/read_message/archive/list_agents)
   messenger/
     mailbox.py                   -- Filesystem mailbox transport (pure, unit-testable with tmpdirs)
     agent_loop.py                -- Repo agent supervisor daemon (`python -m cld.messenger.agent_loop`)
 scripts/
-  mcp/run-orchestrator.sh        -- Thin venv wrapper for MCP server
+  mcp/run-orchestrator.sh        -- (deprecated) thin venv wrapper; kept for reference
   mcp/run-messenger.sh           -- Thin venv wrapper for the messenger MCP server
 imgs/
   claude-base/                   -- Common base image (debian, git, jj, poetry, docker CLI, mysql client, claude). No editor, no entrypoint.
@@ -111,7 +111,7 @@ TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `de
 | `CLD_DEVCONTAINER_IMAGE` | `claude-devcontainer:latest` | Devcontainer image |
 | `CLD_AGENT_IMAGE` | `claude-agent:latest` | Agent image |
 | `CLD_MYSQL_CONFIG` | `""` | Path to a `.cnf` file, mounted ro at `/run/secrets/mysql.cnf` |
-| `CLD_SSL_CERTS_PATH` | `""` | SSL CA bundle path (dir or PEM file); empty = auto-detect |
+| `CLD_SSL_CERTS_PATH` | `""` | Opt-in override: host path (dir or PEM file) that **replaces** the baked CA bundle. Empty = use baked bundle (internal Seznam CAs + Debian defaults). No auto-detect. |
 | `CLD_HOST_PROJECT_DIR` | `""` | Set by host launcher into containers; lets in-container Python translate `/workspace/*` paths back to host paths for sibling `-v` mounts |
 | `CLD_HOST_HOME` | `""` | Same idea for `$HOME` paths |
 | `CLD_AGENT_TIMEOUT` | `1800` | Loop's per-agent wait timeout (seconds) |
@@ -165,7 +165,7 @@ Three helpers in `cld/vcs/anchor.py` form the entire shared contract: `resolve_a
 
 ## Agent Output
 
-Agent containers are `--rm` (auto-removed on exit). Results are committed to the agent's branch as `agent-output-<session-name>/`: `agent.log`, `result.json`, `summary.json`. The orchestrator reads these via `VcsBackend.file_show()`.
+Agent containers are `--rm` (auto-removed on exit). Results are committed to the agent's branch as `agent-output-<session-name>/`: `agent.log`, `result.json`, `summary.json`. Callers read these via `VcsBackend.file_show()`.
 
 Inspect with jj: `jj log -r <name>`, `jj diff -r <name>`. Merge: `jj squash --from <name>`.
 Inspect with git: `git log <name>`, `git diff <name>~1..<name>`. Merge: `git merge <name>`.
@@ -178,14 +178,9 @@ Inspect with git: `git log <name>`, `git diff <name>~1..<name>`. Merge: `git mer
 - Install with `poetry install` to get the `cld` command.
 - Logging is centralised in `cld/log.py`; each module obtains a logger via `get_logger(__name__)`.
 
-## MCP Orchestrator
+## MCP Orchestrator (deprecated)
 
-Python MCP server in `cld/mcp/orchestrator.py`. See README's "MCP Orchestrator" section for the user-facing description and tool list. CLAUDE.md focuses on developer-internal context only.
-
-Internal notes:
-- `launch_agent` calls `cld.agent.launch_agent()` directly (not via subprocess) so it shares image-management, env, and path-translation logic.
-- Non-host-visible task files are staged into `repo_root/.agent-tasks/` so they can be bind-mounted.
-- The orchestrator never squashes or merges into external branches; result aggregation is the caller's job.
+`cld/mcp/orchestrator.py` and `scripts/mcp/run-orchestrator.sh` remain in the tree for reference but are not wired into any image, host claude config, or persona. Do not add new callers; use the `messenger` MCP for inter-agent coordination instead. Tests for the orchestrator module are skipped (`tests/test_orchestrator.py`, `tests/test_log.py::test_mcp_orchestrator_stdout_is_clean`).
 
 ## Messenger (inter-container agent messaging)
 

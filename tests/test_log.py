@@ -130,6 +130,7 @@ def test_log_subprocess_error_with_none_streams(caplog):
 
 
 @pytest.mark.integration
+@pytest.mark.skip(reason="orchestrator MCP is deprecated")
 def test_mcp_orchestrator_stdout_is_clean(tmp_path):
     """MCP stdio server must keep stdout free of log lines."""
     env = os.environ.copy()

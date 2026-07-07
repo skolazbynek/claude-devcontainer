@@ -131,6 +131,7 @@ class AgentSupervisor:
             REPO_ABS_PATH=str(self.repo_root),
             MAX_TURNS=str(self.max_turns),
             CONTAINER_NAME=self.session_name,
+            AGENT_ANCHOR_HASH=os.environ.get("AGENT_ANCHOR_HASH", ""),
         )
         data = self._run_claude(prompt, resume=False)
         self.session_id = data.get("session_id")

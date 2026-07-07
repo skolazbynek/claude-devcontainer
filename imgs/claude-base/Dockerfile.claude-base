@@ -39,7 +39,7 @@ RUN curl -fsSL https://github.com/jj-vcs/jj/releases/download/v0.37.0/jj-v0.37.0
     ln -s ~/.opt/jj ~/.local/bin/jj && \
     rm -f ~/.tmp/jj.tar.gz
 
-# Install Docker CLI (static binary, for orchestrator agent management)
+# Install Docker CLI (static binary, used by messenger's list_agents via `docker ps`)
 RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz -o ~/.tmp/docker.tgz && \
     tar -xzf ~/.tmp/docker.tgz --strip-components=1 -C ~/.local/bin docker/docker && \
     rm -f ~/.tmp/docker.tgz
@@ -60,6 +60,26 @@ ENV PATH="/home/claude/.local/bin:${PATH}"
 WORKDIR /workspace
 
 USER root
+
+# Bake internal (Seznam) CA certificates into the system trust store so
+# python/requests/pip/poetry and other subprocesses trust them without
+# depending on any host mount. `update-ca-certificates` picks up any
+# .crt file under /usr/local/share/ca-certificates/ and rewrites the
+# concatenated bundle at /etc/ssl/certs/ca-certificates.crt.
+COPY imgs/claude-base/ca-certs/seznam/ /tmp/seznam-ca/
+RUN mkdir -p /usr/local/share/ca-certificates/seznam && \
+    for f in /tmp/seznam-ca/*.pem; do \
+        cp "$f" "/usr/local/share/ca-certificates/seznam/$(basename "${f%.pem}").crt"; \
+    done && \
+    rm -rf /tmp/seznam-ca && \
+    update-ca-certificates
+
+# Point every consumer at the system trust store. OpenSSL-based tools
+# (python stdlib, jj, git, curl) already read it; certifi-based tools
+# (requests, pip, poetry) need REQUESTS_CA_BUNDLE; Node needs its own env.
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 
 # Disable Claude Code's Bash sandbox: the container itself (cap-drop ALL,
 # no-new-privileges, ephemeral, host UID, scoped mounts) is the trust

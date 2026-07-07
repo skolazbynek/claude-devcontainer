@@ -6,6 +6,8 @@ import pytest
 
 from cld.mcp.orchestrator import _is_host_visible, _parse_description
 
+pytestmark = pytest.mark.skip(reason="orchestrator MCP is deprecated")
+
 
 class TestIsHostVisible:
     @pytest.mark.parametrize(

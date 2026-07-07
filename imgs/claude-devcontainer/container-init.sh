@@ -89,13 +89,6 @@ build_claude_config() {
 
     # Rewrite baked-in MCP servers to use container paths
     local rewrites='{}'
-    if jq -e '.mcpServers.orchestrator' "$HOME/.claude.json" &>/dev/null; then
-        rewrites=$(echo "$rewrites" | jq '.orchestrator = {
-            "type": "stdio",
-            "command": "python3",
-            "args": ["/opt/cld/cld/mcp/orchestrator.py"]
-        }')
-    fi
     if jq -e '.mcpServers["graphql-tester"]' "$HOME/.claude.json" &>/dev/null; then
         rewrites=$(echo "$rewrites" | jq '.["graphql-tester"] = {
             "type": "stdio",
