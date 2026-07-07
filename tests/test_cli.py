@@ -140,7 +140,7 @@ class TestAgentSubcommand:
              patch("cld.cli.docker_agent_status", return_value="absent"), \
              patch("cld.cli.get_backend", return_value=vcs_mock), \
              patch("cld.cli.resolve_anchor", return_value="abc123"), \
-             patch("cld.cli.read_workspace_anchor", return_value=None), \
+             patch("cld.cli.stage_anchor_with_scratch", return_value="def456"), \
              patch("cld.cli.build_container_args", return_value=["--rm"]) as bca, \
              patch("cld.cli.stage_home_ro", return_value=[]), \
              patch("cld.cli.stage_ssh_agent", return_value=[]), \

@@ -89,9 +89,11 @@ class TestLoadDotenv:
 
 
 class TestToHostPath:
-    def test_translates_workspace_current(self):
+    def test_workspace_current_not_translated(self):
+        # /workspace/current lives inside the container's ephemeral filesystem
+        # and has no host equivalent; to_host_path leaves it alone.
         cfg = Config(host_project_dir="/host/proj")
-        assert to_host_path("/workspace/current/file.py", cfg) == "/host/proj/file.py"
+        assert to_host_path("/workspace/current/file.py", cfg) == "/workspace/current/file.py"
 
     def test_translates_workspace_origin(self):
         cfg = Config(host_project_dir="/host/proj")
