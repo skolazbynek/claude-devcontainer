@@ -11,14 +11,15 @@ from pathlib import Path
 from string import Template
 from typing import TYPE_CHECKING, Iterator
 
-from cld.run import launch_run, session_workspace_path
+from cld.run import launch_run
 from cld.agent_runtime import wait_for_agent, read_agent_cost, format_duration
 from cld.config import Config
 from cld.docker import find_repo_root
 from cld.log import get_logger
 from cld.prompts import stage_persona_without_frontmatter
 from cld.vcs import get_backend
-from cld.vcs.anchor import assert_descendant, create_editable_root, resolve_anchor
+from cld.vcs.anchor import assert_descendant, resolve_anchor
+from cld.vcs.scratch import stage_anchor_with_scratch
 
 if TYPE_CHECKING:
     from cld.chain_state import StateWriter
@@ -283,10 +284,16 @@ def step_session(chain: Chain, step: ChainStep, group_idx: int | None = None) ->
     return f"{prefix}_{step.name}"
 
 
-def initialise_chain_branch(chain: Chain, vcs, anchor_hash: str, workspace_path: Path) -> str:
-    """Create the persistent chain branch as an editable_root child of anchor."""
+def initialise_chain_branch(chain: Chain, vcs, anchor_hash: str) -> str:
+    """Create the persistent chain branch as a bookmark pointing at the anchor.
+
+    The chain "branch" is a jj bookmark that tracks the current chain tip; it
+    starts pointing at *anchor_hash* (B) and gets advanced per successful step.
+    Individual step agents run in their own containers with per-step anchors
+    layered on top of the chain branch's current tip.
+    """
     branch = chain_branch(chain)
-    create_editable_root(vcs, anchor_hash, workspace_path, branch)
+    vcs.set_branch(branch, anchor_hash)
     return branch
 
 
@@ -340,6 +347,10 @@ def execute_step(
     scratch_dir: Path,
 ) -> StepResult:
     """Launch one agent for one step, wait for completion, return its result."""
+    # scratch_dir lives under gitignored .cld/, but jj's split operation on
+    # earlier steps can drop empty subdirs from the working copy checkout,
+    # so ensure it exists before every step.
+    scratch_dir.mkdir(parents=True, exist_ok=True)
     persona_path = persona_resolve(step.persona, repo_root, cld_root)
     persona_path = stage_persona_without_frontmatter(persona_path, scratch_dir)
     task_file = compose_task(
@@ -419,12 +430,22 @@ def run_chain(
     log.info("Chain '%s' starting with %d step(s)", chain.name, len(chain.steps))
     log.debug("run_chain: name=%s file=%s steps=%d", chain.name, chain_file, len(chain.steps))
 
-    anchor = anchor_hash or resolve_anchor(vcs, revision)
-    chain_ws = session_workspace_path(repo_root, chain_branch(chain))
-    initialise_chain_branch(chain, vcs, anchor, chain_ws)
-    scratch_dir = chain_ws / ".cld-run"
+    base_anchor = anchor_hash or resolve_anchor(vcs, revision)
+    # Stage the chain-level anchor B: a child of base_anchor containing an
+    # (empty) .cld-run/ so the tree is anchored and non-empty. Per-step scratch
+    # is added by execute_step / _run_parallel via additional stage calls when
+    # each agent is launched.
+    anchor = stage_anchor_with_scratch(
+        vcs, base_anchor, chain_branch(chain),
+        {"chain": f"{chain.name}\n".encode()},
+    )
+    initialise_chain_branch(chain, vcs, anchor)
+    # Host-side scratch (composed task files, staged personas) that get RO-mounted
+    # into per-step agent containers. Lives under gitignored `.cld/` so it does
+    # not interfere with subsequent stage_anchor_with_scratch snapshots.
+    scratch_dir = repo_root / ".cld" / "chain-scratch" / chain_branch(chain)
     scratch_dir.mkdir(parents=True, exist_ok=True)
-    log.info("Chain anchor: %s", anchor[:12])
+    log.info("Chain anchor: %s (base=%s)", anchor[:12], base_anchor[:12])
 
     if state_writer is not None:
         state_writer.set_anchor(anchor)
@@ -625,6 +646,7 @@ def _run_parallel(
     scratch_dir: Path,
 ) -> list[StepResult]:
     """Launch all siblings (serialized launch), wait concurrently, return results."""
+    scratch_dir.mkdir(parents=True, exist_ok=True)
     sessions: list[tuple[ChainStep, str, Path]] = []
     for sibling in group.siblings:
         session = step_session(chain, sibling, group_idx=group_idx)

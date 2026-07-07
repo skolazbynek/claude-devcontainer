@@ -109,12 +109,6 @@ COPY imgs/claude-devcontainer/container-init.sh imgs/claude-devcontainer/vcs-lib
 RUN chmod +x container-init.sh vcs-lib.sh && \
     chown claude:claude container-init.sh vcs-lib.sh
 
-# Baked cleanup helper (invoked via `docker exec` before shutdown of any
-# persistent cld container; also usable from any entrypoint).
-COPY imgs/claude-base/cleanup-workspace.sh /opt/cld/cleanup-workspace.sh
-RUN chmod +x /opt/cld/cleanup-workspace.sh && \
-    chown claude:claude /opt/cld/cleanup-workspace.sh
-
 # Bake in cld package and prompts. PYTHONPATH makes `import cld` work for any
 # in-container invocation (e.g. baked MCP servers run as scripts), since the
 # package is COPY'd rather than installed.

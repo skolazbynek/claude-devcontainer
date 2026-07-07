@@ -40,7 +40,8 @@ from cld.run import launch_run
 from cld.log import get_logger, setup_logging
 from cld.prompts import resolve_prompt_ref
 from cld.vcs import get_backend
-from cld.vcs.anchor import read_workspace_anchor, resolve_anchor
+from cld.vcs.anchor import resolve_anchor
+from cld.vcs.scratch import stage_anchor_with_scratch
 
 log = get_logger(__name__)
 
@@ -184,8 +185,11 @@ def _run_devcontainer(
     session = build_session_name("cld", name)
 
     vcs = get_backend()
-    anchor_hash = resolve_anchor(vcs, revision)
-    log.info(f"Anchor: {anchor_hash[:12]}")
+    base_anchor = resolve_anchor(vcs, revision)
+    anchor_hash = stage_anchor_with_scratch(
+        vcs, base_anchor, session, {"session": f"{session}\n".encode()},
+    )
+    log.info(f"Anchor: {anchor_hash[:12]} (base={base_anchor[:12]})")
 
     args = build_container_args(repo_root, session, cfg, interactive=True)
     args += ["-e", f"AGENT_ANCHOR_HASH={anchor_hash}"]
@@ -298,20 +302,18 @@ def _run_persistent_devcontainer(
         typer.echo(f"Agent '{session}' is running. Message it via the messenger MCP's send() tool.")
         return
 
-    # absent — create a new persistent container. Workspace registration + anchor
-    # record are done by the container entrypoint itself (so master doesn't need
-    # RW on the target repo). On restart, the entrypoint sees the existing
-    # workspace at $WORKSPACE_ORIGIN/.cld/workspaces/<session> and reuses it;
-    # if the anchor record on disk exists it wins over `resolve_anchor(vcs, revision)`
-    # so restart preserves the original anchor even if @ has drifted.
+    # absent — create a new persistent container. The container entrypoint
+    # itself creates the ephemeral workspace at /workspace/current on top of
+    # the anchor B commit. On a subsequent restart the bookmark `<session>`
+    # already exists in the origin store; the entrypoint detects it and
+    # reattaches without re-staging an anchor, so this path only runs on the
+    # very first launch.
     vcs = get_backend()
-    recorded = read_workspace_anchor(repo_root, session)
-    if recorded:
-        anchor_hash = recorded
-        log.info("Restored recorded anchor: %s", anchor_hash[:12])
-    else:
-        anchor_hash = resolve_anchor(vcs, revision)
-        log.info("Anchor: %s", anchor_hash[:12])
+    base_anchor = resolve_anchor(vcs, revision)
+    anchor_hash = stage_anchor_with_scratch(
+        vcs, base_anchor, session, {"session": f"{session}\n".encode()},
+    )
+    log.info("Anchor: %s (base=%s)", anchor_hash[:12], base_anchor[:12])
 
     args = build_container_args(
         repo_root, session, cfg, interactive=False,
@@ -573,29 +575,15 @@ def _stop_and_remove_container(name: str) -> None:
 
 
 def _shutdown_persistent_container(role: str, name: str, repo_root_str: str, session: str) -> bool:
-    """Stop, remove, and clean up the workspace for a master/agent container.
+    """Stop and remove a master/agent container.
 
-    Workspace teardown is delegated to the container itself via `docker exec`
-    of the baked cleanup helper. This means the host / master never needs
-    RW on the target repo -- essential for master-launched sibling agents
-    where master's mount of the target repo is RO. Returns True on success.
+    The workspace lives inside the container's ephemeral filesystem, so
+    `docker rm` drops it automatically. The bookmark `<session>` and any
+    committed work remain in the origin's jj store for later reattach.
     """
-    # Best-effort in-container cleanup while the container is still running.
-    # On restart (which calls _stop_and_remove_container directly, not this
-    # function) we skip cleanup so the workspace is preserved.
-    exec_result = subprocess.run(
-        ["docker", "exec", name, "/opt/cld/cleanup-workspace.sh"],
-        capture_output=True, text=True,
-    )
-    if exec_result.returncode != 0:
-        log.warning(
-            "In-container cleanup for %s failed (rc=%d); workspace may be leaked. "
-            "stderr: %s", name, exec_result.returncode, exec_result.stderr.strip(),
-        )
-
     _stop_and_remove_container(name)
     typer.echo(f"Stopped and removed {role} container: {name}")
-    return exec_result.returncode == 0
+    return True
 
 
 @app.command()

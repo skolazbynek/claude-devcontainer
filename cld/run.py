@@ -18,13 +18,9 @@ from cld.docker import (
 from cld.log import get_logger
 from cld.vcs import get_backend
 from cld.vcs.anchor import resolve_anchor
+from cld.vcs.scratch import stage_anchor_with_scratch
 
 log = get_logger(__name__)
-
-
-def session_workspace_path(repo_root: Path, session: str) -> Path:
-    """Host path where a session's isolated workspace lives (shared by run/master/agent/chain)."""
-    return repo_root / ".cld" / "workspaces" / session
 
 
 def launch_run(
@@ -39,15 +35,15 @@ def launch_run(
     *,
     system_prompt_file: Path | None = None,
     extra_env: dict[str, str] | None = None,
-    workspace_path: Path | None = None,
     anchor_hash: str | None = None,
 ) -> dict:
     """Launch a one-shot autonomous Claude agent in a Docker container.
 
-    If ``workspace_path`` and ``anchor_hash`` are provided the caller has
-    already created the editable_root workspace; otherwise this function
-    creates one. Either way, ``AGENT_ANCHOR_HASH`` is propagated into the
-    container so the in-container guard can enforce immutability.
+    If ``anchor_hash`` is provided the caller has already staged the anchor
+    commit (via ``stage_anchor_with_scratch``); otherwise this function does
+    the staging itself. ``AGENT_ANCHOR_HASH`` (== B) is propagated into the
+    container so the in-container entrypoint can create the workspace on top
+    of it and the descendant guard can enforce immutability.
     """
     require_docker()
     if not task_file and not inline_prompt:
@@ -74,14 +70,16 @@ def launch_run(
 
     session = session_name or build_session_name("run", name)
 
-    # Workspace registration + anchor record are done by the container entrypoint
-    # itself so the host launcher never needs RW on the origin repo. The anchor
-    # is still resolved on the host side (RO-safe) and pinned into the container
-    # via AGENT_ANCHOR_HASH so the in-container guard can enforce immutability.
+    # Host stages an anchor commit B (child of the resolved anchor A) containing
+    # only `.cld-run/*`. B's hash is the AGENT_ANCHOR_HASH the container reads;
+    # the in-container entrypoint creates the workspace on top of B and the
+    # descendant guard enforces that all further commits descend from it.
     if anchor_hash is None:
-        anchor_hash = resolve_anchor(vcs, revision)
-    if workspace_path is None:
-        workspace_path = session_workspace_path(repo_root, session)
+        base_anchor = resolve_anchor(vcs, revision)
+        anchor_hash = stage_anchor_with_scratch(
+            vcs, base_anchor, session,
+            {"session": f"{session}\n".encode()},
+        )
 
     args = ["--name", session]
     args += build_container_args(repo_root, session, cfg)
@@ -132,15 +130,12 @@ def launch_run(
         print()
         print(f"Anchor:       {anchor_hash[:12]}")
         print(f"Check if running:\n  docker ps --filter id={cid}")
-        print(f"\nFollow progress (logs):\n  tail -f {workspace_path}/agent-output-{session}/agent.log")
         print(f"\nWait for completion:\n  docker wait {cid}")
         if vcs_name == "jj":
             print(f"\nAfter completion, view results:\n  jj log -r '{anchor_hash}..{session}'\n  jj diff --from {anchor_hash} --to {session}")
-            print(f"  cat {repo_root}/agent-output-{session}/summary.json")
             print(f"\nMerge changes:\n  jj squash --from {session}")
         else:
             print(f"\nAfter completion, view results:\n  git log {anchor_hash}..{session}\n  git diff {anchor_hash}..{session}")
-            print(f"  cat {repo_root}/agent-output-{session}/summary.json")
             print(f"\nMerge changes:\n  git merge {session}")
         print()
 
@@ -148,6 +143,5 @@ def launch_run(
         "container_id": cid,
         "session_name": session,
         "repo_root": str(repo_root),
-        "workspace_path": str(workspace_path),
         "anchor_hash": anchor_hash,
     }

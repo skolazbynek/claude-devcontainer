@@ -226,10 +226,11 @@ def to_host_path(path: str, cfg: Config) -> str:
     ``$HOME`` paths back to their host-side locations. No-op on the host.
     """
     if cfg.host_project_dir:
-        for prefix in ("/workspace/current", "/workspace/origin"):
-            if path.startswith(prefix):
-                path = cfg.host_project_dir + path[len(prefix):]
-                break
+        # /workspace/current is container-ephemeral (no host equivalent under
+        # the new layout); only /workspace/origin maps back to the host repo.
+        prefix = "/workspace/origin"
+        if path.startswith(prefix):
+            path = cfg.host_project_dir + path[len(prefix):]
     if cfg.host_home and path.startswith(CONTAINER_HOME):
         path = cfg.host_home + path[len(CONTAINER_HOME):]
     return path
