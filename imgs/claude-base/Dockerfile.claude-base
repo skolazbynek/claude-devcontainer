@@ -25,6 +25,20 @@ RUN apt-get update && apt-get install -y \
     golang-go \
     && rm -rf /var/lib/apt/lists/*
 
+# Watchman: needed for jj's fsmonitor.backend=watchman + register-snapshot-trigger,
+# which drives autonomous snapshots inside the container-ephemeral workspace so
+# uncommitted edits survive `docker rm && docker run` via the origin's jj store.
+# Pin to a verified release; do not track "latest".
+RUN apt-get update && apt-get install -y --no-install-recommends unzip && \
+    curl -fsSL -o /tmp/w.zip https://github.com/facebook/watchman/releases/download/v2026.07.06.00/watchman-v2026.07.06.00-linux.zip && \
+    unzip -q /tmp/w.zip -d /tmp && \
+    cp /tmp/watchman-*/bin/* /usr/local/bin/ && \
+    cp -r /tmp/watchman-*/lib/* /usr/local/lib/ && \
+    ldconfig && \
+    chmod 755 /usr/local/bin/watchman* && \
+    mkdir -p /usr/local/var/run/watchman && chmod 1777 /usr/local/var/run/watchman && \
+    apt-get purge -y unzip && rm -rf /var/lib/apt/lists/* /tmp/w.zip /tmp/watchman-*
+
 USER claude
 
 RUN mkdir ~/.tmp && \
