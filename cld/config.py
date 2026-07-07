@@ -51,7 +51,6 @@ _TOML_KEYS = {
     "debug",
     "home_mounts_always",
     "home_mounts_devcontainer",
-    "trunk_candidates",
     "ssl_certs_path",
     "chain_max_parallel",
     "chain_default_model",
@@ -179,16 +178,13 @@ class Config:
         ".cache/nvim",
     )
 
-    # Ordered list of branch names tried when auto-detecting trunk for `cld review`
-    trunk_candidates: tuple[str, ...] = ("main", "master", "trunk")
-
     # Set by the host launcher when running inside a container, so Python
     # code (e.g. nested `cld` invocations) can translate container-side
     # paths back to host paths for sibling -v mounts. Empty on the host.
     host_project_dir: str = ""
     host_home: str = ""
 
-    # Loop tunables
+    # Agent-wait tunables (used by chain orchestrator)
     agent_timeout: int = 1800
     poll_interval: int = 30
 
@@ -251,7 +247,6 @@ class Config:
             home_mounts_devcontainer=tuple(layered.get("home_mounts_devcontainer", (
                 ".gitconfig", ".bashrc", ".config/nvim", ".local/state/nvim", ".cache/nvim",
             ))),
-            trunk_candidates=tuple(layered.get("trunk_candidates", ("main", "master", "trunk"))),
             chain_max_parallel=_env_int("CLD_CHAIN_MAX_PARALLEL", int(layered.get("chain_max_parallel", 4))),
             chain_default_model=_env_str("CLD_CHAIN_DEFAULT_MODEL", layered.get("chain_default_model", "")),
             ignore_gitignore=tuple(layered.get("ignore_gitignore", ())),

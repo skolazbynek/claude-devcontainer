@@ -162,8 +162,7 @@ class TestRunChain:
         assert result.chain_branch == branch
         if vcs.name == "git":
             # Pre-existing: git refuses `branch -f` on a worktree-checked-out
-            # branch, so the accumulator can't advance to the step's tip. The
-            # same limitation breaks cld loop's git path; out of scope here.
+            # branch, so the accumulator can't advance to the step's tip.
             pytest.xfail("git backend cannot advance a worktree-checked-out branch")
         # On jj the accumulator advanced to the step's tip; the output lands there.
         assert vcs.file_show(branch, "chain-outputs/t/build.md") == "BUILD_OUTPUT\n"

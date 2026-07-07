@@ -36,10 +36,9 @@ from cld.docker import (
     stage_ssh_agent,
     to_host_path,
 )
-from cld.run import launch_review, launch_run, session_workspace_path
+from cld.run import launch_run, session_workspace_path
 from cld.log import get_logger, setup_logging
 from cld.prompts import resolve_prompt_ref
-from cld.loop import run_loop
 from cld.vcs import get_backend
 from cld.vcs.anchor import create_editable_root, read_workspace_anchor, resolve_anchor
 
@@ -647,94 +646,6 @@ def _shutdown_persistent_container(role: str, name: str, repo_root_str: str, ses
 
     typer.echo(f"Stopped and removed {role} container: {name}")
     return success
-
-
-@app.command()
-@_handle_errors
-def review(
-    feature_branch: str = typer.Argument(help="Feature branch to review"),
-    trunk_branch: Optional[str] = typer.Argument(default=None, help="Trunk branch to diff against (auto-detected if omitted)"),
-    name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
-    model: str = typer.Option("", "-m", "--model", help="Claude model"),
-    revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change -- @ for jj, HEAD for git)"),
-):
-    """Launch a code review agent."""
-    cfg = Config.from_env()
-    setup_logging(cfg)
-    if trunk_branch is None:
-        branches = get_backend().list_branches()
-        branch_names = {
-            line.strip().lstrip("* ").split(":")[0].split()[0]
-            for line in branches.splitlines()
-            if line.strip()
-        }
-        for candidate in cfg.trunk_candidates:
-            if candidate in branch_names:
-                trunk_branch = candidate
-                break
-        if trunk_branch is None:
-            raise RuntimeError(f"Could not auto-detect trunk branch; none of {list(cfg.trunk_candidates)} found. Pass it explicitly.")
-    log.info(
-        "review: feature=%s, trunk=%s, model=%s",
-        feature_branch,
-        trunk_branch or "<auto>",
-        model or "<default>",
-    )
-    launch_review(cfg, feature_branch, trunk_branch, name=name, model=model, revision=revision)
-
-
-@app.command()
-@_handle_errors
-def loop(
-    task_file: Optional[str] = typer.Argument(None, help="Path to task markdown file"),
-    name: str = typer.Option("", "-n", "--name", help="Loop session name suffix"),
-    model: str = typer.Option("", "-m", "--model", help="Model for implementer agent"),
-    review_model: str = typer.Option("", "--review-model", help="Model for reviewer agent"),
-    revision: str = typer.Option("", "-r", "--revision", help="Revision to base workspace on (default: last committed change -- @- for jj, HEAD for git)"),
-    max_iterations: int = typer.Option(3, "--max-iterations", help="Hard cap on iterations; loop also stops early on a clean review (no critical/major findings)"),
-    prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (appended to task file if both given)"),
-    approve: bool = typer.Option(False, "--approve", help="Pause after each review for approval (continue/stop/view/edit findings)"),
-):
-    """Run an automated implement-review loop.
-
-    Each iteration runs an implementer agent, then a reviewer agent. Review
-    findings feed into the next implementer. Stops on a clean review, hitting
-    --max-iterations, or an agent failure. All iterations land on a single
-    'loop_<name>' branch; the final report prints inspection/merge commands.
-    """
-    if not task_file and not prompt:
-        typer.echo("Error: Provide a task file, --prompt, or both", err=True)
-        raise typer.Exit(1)
-    if max_iterations < 1:
-        typer.echo("Error: --max-iterations must be at least 1", err=True)
-        raise typer.Exit(1)
-    task_path = Path(task_file) if task_file else None
-    if task_path and not task_path.is_file():
-        typer.echo(f"Error: Task file not found: {task_file}", err=True)
-        raise typer.Exit(1)
-
-    cfg = Config.from_env()
-    setup_logging(cfg)
-    log.info(
-        "loop: task_file=%s, prompt=%s, model=%s, review_model=%s, max_iterations=%d, approve=%s",
-        str(task_path) if task_path else "<none>",
-        "<provided>" if prompt else "<none>",
-        model or "<default>",
-        review_model or "<default>",
-        max_iterations,
-        approve,
-    )
-    run_loop(
-        cfg,
-        task_path,
-        inline_prompt=prompt or None,
-        name=name,
-        model=model,
-        review_model=review_model,
-        revision=revision,
-        max_iterations=max_iterations,
-        approve=approve,
-    )
 
 
 @app.command()

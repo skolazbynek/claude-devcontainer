@@ -48,12 +48,6 @@ cld run [-n name] [-m model] [-r revision] task.md
 cld run -p "Fix the auth bug in src/login.py"
 cld run task.md -p "Focus on the database layer"
 
-# Code review agent (generates diff, runs review from template)
-cld review [-n name] [-m model] <feature-branch> <trunk-branch>
-
-# Implement-review loop (automated iterate until clean review)
-cld loop task.md -p "Optional additional information to the task file"
-
 # Declarative multi-agent chain
 cld chain run @review-implement task.md
 cld chain run chains/parallel-review.yaml -p "Focus on auth code"
@@ -65,37 +59,6 @@ cld chain dry-run @review-implement
 ### Agent workflow
 
 Agent containers run detached and auto-remove on exit. Results are committed to the agent's branch as `agent-output-<session>/` containing `agent.log`, `result.json`, and `summary.json`.
-
-### Loop workflow
-
-`cld loop` runs implement → review iterations on a single branch until the review is clean (no Critical and no Major findings) or `--max-iterations` is reached. Each iteration spawns two agent containers in sequence (implementer, then reviewer). Review findings are fed into the next implementer's prompt.
-
-```bash
-# Run with a task file (combine with -p, same semantics as `cld run`)
-cld loop -n add-cache task.md
-cld loop -n add-cache -p "Use the redis client already in src/cache.py" task.md
-
-# Inline-only
-cld loop -n add-cache -p "Add a cache layer to the user repository"
-
-# Pick a reviewer model independent of the implementer
-cld loop -n add-cache -m opus --review-model sonnet task.md
-
-# Human-in-the-loop: pause after each review (continue/stop/view/edit findings)
-# Untested
-cld loop --approve task.md
-```
-
-Exit conditions:
-
-- **Clean review** (`critical == 0` and `major == 0`) -- loop stops early, exit reason `clean review`.
-- **`--max-iterations` reached** (default 3) -- loop stops with the last iteration's state.
-- **Implementer or reviewer failure** -- loop stops; the failing iteration's branch state is preserved for inspection.
-- **`--approve` stop** -- user terminates after a paused review.
-
-The loop creates a single branch `loop_<name>` accumulating all iterations. Commit messages on the loop branch are tagged `[loop impl N]` and `[loop review N]` and include severity counts. A total cost in USD is reported at the end. Per-iteration review files (`CODE_REVIEW_iter<N>.md`) are committed to the branch.
-
-Loop env vars (see *Configuration* below): `CLD_AGENT_TIMEOUT` caps per-agent wait time; `CLD_POLL_INTERVAL` controls docker-ps polling.
 
 ### Chain workflow
 
@@ -237,8 +200,7 @@ The repo agent has one persistent Claude session that survives across messages -
 cld/                               Python package (CLI + shared logic)
   cli.py                           typer app with all subcommands
   docker.py                        container arg building, image management, path translation
-  run.py                           one-shot run and review launch logic (`cld run`, `cld review`)
-  loop.py                          automated implement-review loop
+  run.py                           one-shot run launch logic (`cld run`)
   chain.py                         declarative multi-agent chain runner
   vcs/                             VCS abstraction layer
     base.py                        abstract VcsBackend interface
@@ -263,7 +225,6 @@ imgs/
     entrypoint-claude-devcontainer.sh
   claude-run/                      One-shot run image (FROM base, adds run entrypoint + system prompt)
     entrypoint-claude-run.sh
-  review-templates/                Review templates (review-template.md, fix-mr.md)
 
 prompts/                           Reusable task prompts for agents
 ```
@@ -331,8 +292,8 @@ debug = false
 | `CLD_RUN_IMAGE` | `claude-run:latest` | One-shot run image |
 | `CLD_HOST_PROJECT_DIR` | `""` | Host repo root path; set by host launcher into containers for nested docker path translation |
 | `CLD_HOST_HOME` | `""` | Host home directory (for path translation) |
-| `CLD_AGENT_TIMEOUT` | `1800` | Loop's per-agent wait timeout (seconds) |
-| `CLD_POLL_INTERVAL` | `30` | Loop's docker-ps poll interval (seconds) |
+| `CLD_AGENT_TIMEOUT` | `1800` | Chain's per-agent wait timeout (seconds) |
+| `CLD_POLL_INTERVAL` | `30` | Chain's docker-ps poll interval (seconds) |
 | `CLD_CHAIN_MAX_PARALLEL` | `4` | Max agents running concurrently in a parallel chain group |
 | `CLD_CHAIN_DEFAULT_MODEL` | `""` | Model override for all chain steps; empty = use chain YAML default |
 | `CLD_LOG_LEVEL` | `INFO` | Root level for the `cld` logger hierarchy (DEBUG/INFO/WARNING/ERROR) |

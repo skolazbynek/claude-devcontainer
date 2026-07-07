@@ -1,9 +1,8 @@
-"""One-shot Claude agent (`cld run`) and code-review agent (`cld review`) launch logic."""
+"""One-shot Claude agent (`cld run`) launch logic."""
 
 import subprocess
 import sys
 from pathlib import Path
-from string import Template
 
 from cld.config import Config
 from cld.docker import (
@@ -19,7 +18,7 @@ from cld.docker import (
 )
 from cld.log import get_logger
 from cld.vcs import get_backend
-from cld.vcs.anchor import assert_descendant, create_editable_root, resolve_anchor
+from cld.vcs.anchor import create_editable_root, resolve_anchor
 
 log = get_logger(__name__)
 
@@ -154,62 +153,3 @@ def launch_run(
         "workspace_path": str(workspace_path),
         "anchor_hash": anchor_hash,
     }
-
-
-def launch_review(
-    cfg: Config,
-    feature_branch: str,
-    trunk_branch: str,
-    name: str = "",
-    model: str = "",
-    revision: str = "",
-) -> dict:
-    """Generate a diff between two branches and launch a code review agent."""
-    vcs = get_backend()
-    repo_root = vcs.repo_root
-    cld_root = Path(__file__).resolve().parent.parent
-
-    session = build_session_name("review", name)
-
-    anchor = resolve_anchor(vcs, revision)
-    workspace_path = session_workspace_path(repo_root, session)
-    create_editable_root(vcs, anchor, workspace_path, session)
-
-    scratch = workspace_path / ".cld-run"
-    scratch.mkdir(parents=True, exist_ok=True)
-
-    diff_file = scratch / f"review-diff-{session}.patch"
-    log.info(f"Generating diff: fork_point({feature_branch}, {trunk_branch}) -> {feature_branch}")
-    fork = vcs.fork_point(feature_branch, trunk_branch)
-    diff_content = vcs.diff_between(fork, feature_branch)
-    if diff_content.startswith("Error:"):
-        log.error(f"Failed to generate diff: {diff_content}")
-        sys.exit(1)
-    if not diff_content.strip():
-        log.error("Generated diff is empty")
-        sys.exit(1)
-    diff_file.write_text(diff_content)
-    log.info(f"Diff saved to: {diff_file}")
-
-    template_path = cld_root / "imgs/review-templates/review-template.md"
-    if not template_path.is_file():
-        log.error(f"Template not found: {template_path}")
-        sys.exit(1)
-    task_content = Template(template_path.read_text()).safe_substitute(
-        TRUNK_BRANCH=trunk_branch,
-        FEATURE_BRANCH=feature_branch,
-        DIFF_FILE_PATH=f"{WORKSPACE_BASE}/current/.cld-run/{diff_file.name}",
-    )
-    task_file = scratch / f"review-task-{session}.md"
-    task_file.write_text(task_content)
-    log.info(f"Task file created: {task_file}")
-    print()
-
-    return launch_run(
-        cfg,
-        task_file=task_file,
-        model=model,
-        session_name=session,
-        workspace_path=workspace_path,
-        anchor_hash=anchor,
-    )

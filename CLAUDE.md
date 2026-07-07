@@ -10,7 +10,6 @@ Tooling for running Claude Code in Docker containers with VCS workspace isolatio
 - **Persistent master** (`cld master`) -- Persistent per-repo interactive devcontainer. Start-or-attach; idempotent per repo. Same interactive shell as the ephemeral one, but stays up so packages/history/state persist across attaches.
 - **Persistent repo agent** (`cld agent`) -- Persistent per-repo headless Claude agent. Runs the `claude-devcontainer` image with `AGENT_MODE=1`; the entrypoint execs the supervisor daemon (`python -m cld.messenger.agent_loop`). Receives tasks via the mailbox/messenger transport (see "Messenger" below and `docs/design-agent-messaging.md`). One long-lived Claude session per repo.
 - **One-shot run** (`cld run`) -- Headless *one-shot* autonomous agent. Takes a task file and/or inline prompt, runs detached in the `claude-run` image, commits results to a VCS branch, then its container exits (`--rm`).
-- **Code review** (`cld review`) -- Generates a diff between branches and runs a review via the one-shot pipeline.
 
 ## Architecture
 
@@ -18,10 +17,9 @@ Tooling for running Claude Code in Docker containers with VCS workspace isolatio
 cld/                             -- Python package (host-side CLI + shared logic)
   cli.py                         -- typer app, all subcommands
   docker.py                      -- container setup: arg building, image management, path translation
-  run.py                         -- one-shot run and review launch logic (`cld run`, `cld review`)
+  run.py                         -- one-shot run launch logic (`cld run`)
   agent_runtime.py               -- shared agent lifecycle helpers (wait, cost, formatting)
-  loop.py                        -- automated implement-review loop
-  chain.py                       -- chain orchestrator (mirrors loop.py for multi-step pipelines)
+  chain.py                       -- declarative multi-step chain orchestrator
   vcs/                           -- VCS abstraction layer
     base.py                      -- abstract VcsBackend interface
     jj.py                        -- jujutsu backend implementation
@@ -45,7 +43,6 @@ imgs/
     Dockerfile.claude-run
     entrypoint-claude-run.sh
     run-system-prompt.md
-  review-templates/              -- Review templates (review-template.md, fix-mr.md) used by `cld review`
 prompts/
   personas/                      -- Persona system prompts (architect, implementer, reviewer, …)
   (other task prompts)           -- Reusable task prompts for agents
@@ -96,9 +93,6 @@ cld agent logs [-n N]                  # tail the container's log (= supervisor 
 # One-shot autonomous run
 cld run [-n name] [-m model] [-r revision] [-p prompt] [task-file.md|@<name>]
 
-# Code review
-cld review [-n name] [-m model] <feature-branch> <trunk-branch>
-
 ```
 
 ## Configuration
@@ -107,7 +101,7 @@ All Python-side runtime tunables live in `cld/config.py:Config` (frozen dataclas
 
 **Resolution order (lowest → highest priority):** dataclass defaults < user TOML (`~/.config/cld/config.toml`) < project TOML (`<repo_root>/.cld.config`, walked up from cwd) < `.env` in cwd < `CLD_*` env vars.
 
-TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `devcontainer_image`, `run_image`, `mysql_config`, `ssl_certs_path`, `agent_timeout`, `poll_interval`, `debug`, `home_mounts_always`, `home_mounts_devcontainer`, `trunk_candidates`, `chain_max_parallel`, `chain_default_model`, `log_level`, `log_color`, `ignore_gitignore`, `mailbox_root`, `agent_max_turns`, `agent_kickoff_persona`). Array fields accept TOML arrays of strings. Unknown keys are warned about on stderr and ignored. `host_project_dir` / `host_home` are container-internal and not configurable via TOML.
+TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `devcontainer_image`, `run_image`, `mysql_config`, `ssl_certs_path`, `agent_timeout`, `poll_interval`, `debug`, `home_mounts_always`, `home_mounts_devcontainer`, `chain_max_parallel`, `chain_default_model`, `log_level`, `log_color`, `ignore_gitignore`, `mailbox_root`, `agent_max_turns`, `agent_kickoff_persona`). Array fields accept TOML arrays of strings. Unknown keys are warned about on stderr and ignored. `host_project_dir` / `host_home` are container-internal and not configurable via TOML.
 
 `CLD_*` env vars (read by `Config.from_env`):
 
@@ -120,15 +114,15 @@ TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `de
 | `CLD_SSL_CERTS_PATH` | `""` | Opt-in override: host path (dir or PEM file) that **replaces** the baked CA bundle. Empty = use baked bundle (internal Seznam CAs + Debian defaults). No auto-detect. |
 | `CLD_HOST_PROJECT_DIR` | `""` | Set by host launcher into containers; lets in-container Python translate `/workspace/*` paths back to host paths for sibling `-v` mounts |
 | `CLD_HOST_HOME` | `""` | Same idea for `$HOME` paths |
-| `CLD_AGENT_TIMEOUT` | `1800` | Loop's per-agent wait timeout (seconds) |
-| `CLD_POLL_INTERVAL` | `30` | Loop's docker-ps poll interval (seconds) |
+| `CLD_AGENT_TIMEOUT` | `1800` | Chain's per-agent wait timeout (seconds) |
+| `CLD_POLL_INTERVAL` | `30` | Chain's docker-ps poll interval (seconds) |
 | `CLD_CHAIN_MAX_PARALLEL` | `4` | Max parallel siblings launched concurrently in a chain group |
 | `CLD_CHAIN_DEFAULT_MODEL` | `""` | Model override for chain agents; empty = agent default |
 | `CLD_LOG_LEVEL` | `INFO` | Root level for the `cld` logger hierarchy. Accepts DEBUG/INFO/WARNING/ERROR (case-insensitive; WARN aliased to WARNING). |
 | `CLD_LOG_COLOR` | `auto` | ANSI color in log output: `auto` (TTY-detect), `always`, or `never`. |
 | `CLD_DEBUG` | `false` | Diagnostics flag. Back-compat alias: when truthy and `CLD_LOG_LEVEL` is unset, equivalent to `CLD_LOG_LEVEL=DEBUG`. |
 | `CLD_IGNORE_GITIGNORE` | `""` | Colon-separated list of gitignored files to symlink from origin into workspace (e.g. `.env:.envrc`). Set in `.cld.config` as array: `ignore_gitignore = [".env"]`. |
-| `CLD_SSH_AUTH_SOCK` | unset | SSH agent forwarding into `cld` (bare, ephemeral). Tri-state: **unset** = auto-detect from host `$SSH_AUTH_SOCK`; **empty** (`""`) = explicitly disable; **path** = use that socket. Forwarded to `/run/host-ssh-agent.sock` inside the container; devcontainer only (never headless `cld agent` / `cld review`). |
+| `CLD_SSH_AUTH_SOCK` | unset | SSH agent forwarding into `cld` (bare, ephemeral). Tri-state: **unset** = auto-detect from host `$SSH_AUTH_SOCK`; **empty** (`""`) = explicitly disable; **path** = use that socket. Forwarded to `/run/host-ssh-agent.sock` inside the container; devcontainer only (never headless `cld agent`). |
 | `CLD_MAILBOX_ROOT` | `~/.cld/mailboxes` | Host root of the inter-container mailbox tree; bind-mounted RW into every master and agent container. |
 | `CLD_AGENT_MAX_TURNS` | `30` | Per-message turn cap passed to the agent supervisor's `claude -p --max-turns`. |
 | `CLD_AGENT_KICKOFF_PERSONA` | `agent` | Persona name (resolved like chain personas) used to kick off a new repo-agent Claude session. |
@@ -204,7 +198,7 @@ Full design: `docs/design-agent-messaging.md`. One-line summary: one repo agent 
 
 ## Chain Orchestrator
 
-Module: `cld/chain.py`. Mirrors `cld/loop.py` but for declarative multi-step pipelines. Entry point is `cld chain <file.yaml>` via `cli.py`.
+Module: `cld/chain.py`. Declarative multi-step pipeline runner. Entry point is `cld chain <file.yaml>` via `cli.py`.
 
 **Dataclasses** (all frozen):
 
@@ -226,7 +220,7 @@ Module: `cld/chain.py`. Mirrors `cld/loop.py` but for declarative multi-step pip
 | `run_chain(cfg, chain_file, ...)` | Orchestrate all steps; returns `ChainResult` |
 | `print_chain_report(result, vcs)` | Print summary table with cost, duration, VCS inspect commands |
 
-**Shared helpers** (`cld/agent_runtime.py`, extracted from `loop.py`):
+**Shared helpers** (`cld/agent_runtime.py`):
 - `wait_for_agent(session_name, vcs, cfg)` -- polls `docker ps` until container exits, reads `summary.json`.
 - `read_agent_cost(session, vcs)` -- reads `result.json` for `cost_usd`.
 - `format_duration(seconds)` -- formats as `Xm00s`.

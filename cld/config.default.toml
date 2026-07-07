@@ -9,9 +9,9 @@ run_image = "claude-run:latest"
 # no auto-detect / auto-mount anymore.
 # ssl_certs_path = "/etc/ssl/certs"
 
-# Loop tunables
+# Agent-wait tunables (used by chain orchestrator)
 agent_timeout = 1800   # seconds to wait for an agent before declaring timeout
-poll_interval = 30     # seconds between docker-ps polls in the loop
+poll_interval = 30     # seconds between docker-ps polls
 
 # Chain orchestration tunables
 # chain_max_parallel = 4    # max agents running in parallel in a chain
@@ -37,9 +37,6 @@ home_mounts_devcontainer = [
     ".gitconfig",
     ".bashrc"
 ]
-
-# Branch names tried in order when auto-detecting trunk for `cld review`.
-trunk_candidates = ["dev", "main", "master"]
 
 # SSH agent forwarding into devcontainer sessions.
 # Omit this key to auto-detect from the host's $SSH_AUTH_SOCK.
