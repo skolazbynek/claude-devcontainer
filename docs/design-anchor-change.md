@@ -137,19 +137,31 @@ These three helpers form the entire shared contract. There is no separate
 ### 4.2 Command-side opening sequence
 
 ```
-1. anchor   = resolve_anchor(vcs, args.revision)
-2. ws_path  = <repo>/.cld/workspaces/<session>
-3. branch   = command-specific (agent_<session>, loop_<name>, ...)
-              -- refuse if it already exists, unless --force
-4. create_editable_root(vcs, anchor, ws_path, branch)
-5. (optional) host writes scratch files into ws_path's working copy
-              (see §4.4) -- no host-side writes outside ws_path
-6. launch the container, mounting ws_path at /workspace/current
-7. on each subsequent advance of the persistent branch:
-       assert_descendant(anchor, new_tip)
-8. exit report prints the anchor hash and uses anchor..tip for inspect
-   commands (§4.6)
+1. A        = resolve_anchor(vcs, args.revision)             (jj resolve to hash)
+2. session  = build_session_name(...)                        (branch/bookmark)
+3. B        = stage_anchor_with_scratch(vcs, A, session,
+                  scratch_files)                             (see §4.4)
+              # jj split --onto A -m "cld anchor: <session>" .cld-run
+              # B is a child of A containing only .cld-run/*;
+              # the user's own working-copy change stays where it was,
+              # minus the extracted .cld-run/ files.
+4. launch the container with AGENT_ANCHOR_HASH=B and no bind-mount at
+   /workspace/current -- the container entrypoint creates its own
+   ephemeral workspace at /workspace/current on top of B (jj store lives
+   in /workspace/origin/.jj/repo via the RW bind mount) and sets a
+   bookmark <session> tracking @.
+5. on each subsequent advance of the persistent branch:
+       assert_descendant(B, new_tip)
+6. exit report prints B's hash and uses B..tip for inspect commands
+   (§4.6). No host-side workspace directory is ever created.
 ```
+
+Restart of a persistent container (`cld master restart` / `cld agent
+restart`) skips steps 1--3: the container entrypoint sees the existing
+bookmark `<session>` in the origin store and reattaches by pointing a
+fresh workspace at the bookmark's last tip. Watchman-driven autosnapshots
+during the previous session's runtime guarantee that uncommitted edits
+made just before shutdown are visible on reattach.
 
 ### 4.3 Per-command changes
 
@@ -201,52 +213,50 @@ These three helpers form the entire shared contract. There is no separate
 
 ### 4.4 Scratch-file isolation
 
-The contract requires that **no host-side write occurs outside the
-workspace directory**. Host scratch files (composed task inputs, diff
-patches, persona stagings) move from:
+Host scratch files (composed task inputs, diff patches, persona stagings)
+are extracted into the anchor commit `B` via `jj split`, then read by the
+in-container agent from `/workspace/current/.cld-run/*`. The host-side
+sequence is:
 
 ```
-<repo_root>/.cld/<file>           (current; host's main working-copy dir)
+1. write scratch files to <repo>/.cld-run/<file>            (host WC)
+2. jj status                                                (force snapshot)
+3. jj split --onto <A> -m "cld anchor: <session>" .cld-run
+     -> extracts .cld-run/ into a new child B of A,
+        leaves the user's own commit intact minus scratch
+4. return B's commit hash                                   (== AGENT_ANCHOR_HASH)
 ```
 
-to:
-
-```
-<workspace_path>/.cld-run/<file>  (inside the editable_root workspace)
-```
-
-`<workspace_path>` is `<repo_root>/.cld/workspaces/<session>/` — the
-per-session workspace created in step 4 of §4.2. `.cld-run/` is a new,
-**not-gitignored** top-level directory, so the files are VCS-trackable
-descendants of the anchor.
+`.cld-run/` is a reserved, **not-gitignored** top-level directory
+(`stage_anchor_with_scratch` asserts on `.gitignore` and refuses if it is
+excluded). The directory exists only briefly on the host during staging;
+after the split, it is gone from the user's working copy and lives solely
+inside `B`.
 
 Mechanics:
 
-- `cld_tmpdir(repo_root)` (host's `.cld/` writer) is removed. Replaced by
-  callers receiving a `workspace_path` and writing under
-  `<workspace_path>/.cld-run/`.
-- Whether the command **commits** these files before launching the agent
-  is the command's choice, not the shared contract:
-    - `agent`, `review`: simplest path is to leave them in the working
-      change; the agent's first commit absorbs them.
-    - `loop`, `chain`: may prefer to commit per-iteration / per-step
-      inputs as their own change so each step's history is clean.
-  In every case the files reside in the editable-root workspace, so they
-  are inherently rooted in the anchor tree.
-- Container path references in templates (`review-template.md`,
-  `loop-review.md`) switch from `/workspace/origin/.cld/<file>` to
-  `/workspace/current/.cld-run/<file>`. The container reads its inputs
-  from its own workspace, not via the bind-mounted host origin.
-- Wildcard cleanup (`_cleanup_temp_files` and its glob list) is deleted
-  outright. Scratch files live and die with the workspace; forgetting the
-  workspace (`vcs.forget_workspace`) reclaims the directory.
-- Concurrency: per-session workspaces are already separate directories,
-  so cross-run collisions on scratch filenames become structurally
-  impossible.
+- `stage_anchor_with_scratch(vcs, anchor_hash, session, scratch_files:
+  dict[str, bytes]) -> str` in `cld/vcs/scratch.py` implements the
+  sequence above. It is **jj-only**: the git backend raises
+  `NotImplementedError`.
+- On any failure between step 1 and step 3, the function best-effort
+  restores the pre-staging op via `jj op restore` and deletes the host
+  scratch files, logging the exact `jj op restore <op-id>` command the
+  user can run if auto-recovery itself fails.
+- The container reads scratch input from its own workspace at
+  `/workspace/current/.cld-run/*` -- the files are visible there because
+  the workspace is anchored on top of `B`.
+- No host-side workspace directory exists, so there are no wildcard
+  scratch-file cleanup paths. Files die when the container's ephemeral
+  workspace dies.
+- Concurrency: session-specific commit descriptions (`cld anchor: <session>`)
+  and per-session bookmarks mean parallel staging is safe as long as jj's
+  own concurrent-op semantics allow (which they do: `jj op log` merges
+  divergent ops).
 
 `CLAUDE.md` documents `.cld-run/` as the cld-reserved scratch directory
-inside agent workspaces, never present in the host's main working copy.
-No change to repo `.gitignore`.
+that appears only briefly on the host during anchor staging. No change to
+repo `.gitignore`.
 
 ### 4.5 Container-side guard
 
