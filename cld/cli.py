@@ -43,7 +43,6 @@ from cld.log import get_logger, setup_logging
 from cld.prompts import resolve_prompt_ref
 from cld.vcs import get_backend
 from cld.vcs.anchor import resolve_anchor
-from cld.vcs.scratch import stage_anchor_with_scratch
 
 log = get_logger(__name__)
 
@@ -602,40 +601,49 @@ def _shutdown_persistent_container(role: str, name: str, repo_root_str: str, ses
     bookmark and reattaches.
     """
     _stop_and_remove_container(name)
-    _forget_session_bookmark(repo_root_str, session)
+    _forget_session_state(repo_root_str, session)
     typer.echo(f"Stopped and removed {role} container: {name}")
     return True
 
 
-def _forget_session_bookmark(repo_root_str: str, session: str) -> None:
-    """Drop the session bookmark from the origin's jj store. Best-effort."""
+def _forget_session_state(repo_root_str: str, session: str) -> None:
+    """Drop the session's bookmark and workspace registration from the origin's jj store.
+
+    Best-effort: both entries are independent (bookmark = named commit
+    pointer, workspace = registered working-copy path). If we leave the
+    workspace behind, the next `cld <role>` launch takes the "first launch"
+    path (no bookmark) and its `jj workspace add --name <session>` fails
+    with "Workspace named X already exists", leaving /workspace/current empty.
+    """
     repo_root = Path(repo_root_str)
     if not repo_root.is_dir():
         log.warning(
-            "Cannot forget bookmark %s: repo_root %s no longer exists. "
-            "Recover manually with: cd <repo> && jj bookmark forget %s",
-            session, repo_root, session,
+            "Cannot clean up session state for %s: repo_root %s no longer exists. "
+            "Recover manually with: cd <repo> && jj bookmark forget %s && jj workspace forget %s",
+            session, repo_root, session, session,
         )
         return
     try:
         backend = get_backend(repo_root)
     except RuntimeError as e:
         log.warning(
-            "Cannot forget bookmark %s in %s: %s. "
-            "Recover manually with: cd %s && jj bookmark forget %s",
-            session, repo_root, e, repo_root, session,
+            "Cannot clean up session state for %s in %s: %s. "
+            "Recover manually with: cd %s && jj bookmark forget %s && jj workspace forget %s",
+            session, repo_root, e, repo_root, session, session,
         )
         return
     if backend.name != "jj":
         return
-    result = backend.run(["bookmark", "forget", session])
-    if result.returncode != 0:
-        log.warning(
-            "jj bookmark forget %s failed (rc=%d): %s. "
-            "Next `cld` launch may reattach to the stale bookmark; "
-            "recover with: cd %s && jj bookmark forget %s",
-            session, result.returncode, result.stderr.strip(), repo_root, session,
-        )
+    for cmd in (["bookmark", "forget", session], ["workspace", "forget", session]):
+        result = backend.run(cmd)
+        if result.returncode != 0:
+            log.warning(
+                "jj %s failed (rc=%d): %s. "
+                "Next `cld` launch may reattach to stale state; "
+                "recover with: cd %s && jj %s",
+                " ".join(cmd), result.returncode, result.stderr.strip(),
+                repo_root, " ".join(cmd),
+            )
 
 
 @app.command()

@@ -60,10 +60,12 @@ no side effects.
 ## Design rules
 
 1. **One peer-side code path for anchor work.** Both anchor resolution
-   (`resolve_anchor`) and anchor staging (`stage_anchor_with_scratch`) run
-   inside the peer container's entrypoint, uniformly for master's own repo
-   and for sibling targets. Master's cld does neither. Host cld is
-   unchanged; only cld-inside-master delegates.
+   (via `jj log -r <hint>` in the peer) and anchor staging
+   (`stage_from_env` in `cld/vcs/scratch.py`) run inside the peer
+   container's entrypoint, uniformly for host launches, master's own repo,
+   and sibling targets. The host only resolves the base revision to a
+   commit hash (skipped when running inside master, since master has no jj
+   view); everything else happens peer-side.
 2. **Master has no filesystem view of any sibling repo, and never writes to
    any target repo.** Sibling repos are not bind-mounted into master at all
    (see "target registration" below). Master's `/workspace/origin` is RW for
@@ -81,49 +83,46 @@ no side effects.
 
 ## Delegated anchor work (the crux)
 
-Today, `resolve_anchor` and `stage_anchor_with_scratch` both run **on the
-host** before `docker run`: they read jj history, write `.cld-run/session`
-to the host working copy, run `jj split --onto A`, then pass the resulting
-`AGENT_ANCHOR_HASH=B` to the container. This does not work from inside
-master: no bind mount of the sibling exists in master, and master's view of
-its own repo lives in the wrong jj workspace for the split.
-
-Under this design, both operations move **into** the peer container's
-entrypoint:
+Host cld and master-delegated cld now share a single peer-side staging
+pipeline: the host only resolves the base revision, and the peer container
+creates the anchor commit `B` inside its own ephemeral workspace at
+`/workspace/current`. The origin working copy is never touched -- crucial
+for the common jj case where the user's `@` **is** the anchor `A` (an older
+design that ran `jj split --onto A` on the host rewrote `A` in that case).
 
 ```
-master:
+host / master:
   target_host_path = resolve_target(cwd)          # config lookup + own repo
-  revision_hint    = -r flag or ""                # unresolved; peer resolves
+  revision_hint    = -r flag / resolved A hash    # peer will resolve if symbolic
   scratch          = {"session": ...}             # in memory
   docker run
       -e AGENT_REVISION_HINT=<revision_hint>
-      -e AGENT_SCRATCH=<base64-json>              # or via stdin / tmpfile
+      -e AGENT_SCRATCH=<base64-json>
       -v <target_host_path>:/workspace/origin:rw
 
-peer container entrypoint (before workspace creation):
-  A       = resolve_anchor(vcs, AGENT_REVISION_HINT)
-  scratch = decode(env AGENT_SCRATCH)
-  B       = stage_anchor_with_scratch(vcs, A, SESSION_NAME, scratch)
-  export AGENT_ANCHOR_HASH=$B
-  # rest of the existing entrypoint unchanged
+peer container entrypoint:
+  A = jj log -r "$AGENT_REVISION_HINT" -T commit_id       # in /workspace/origin
+  jj workspace add --name "$SESSION_NAME" -r "$A" /workspace/current
+  AGENT_ANCHOR_HASH = $(cd /workspace/current && python3 -m cld.vcs.scratch)
+      # ↳ writes AGENT_SCRATCH files into .cld-run/*, `jj commit -m "cld anchor: $SESSION_NAME" .cld-run`,
+      #   prints B (== the just-created commit's id) to stdout.
+  jj bookmark set "$SESSION_NAME" -r @
 ```
 
 Why this works everywhere:
 
-- **Master's own repo**: master passes only the host path (from
-  `CLD_HOST_PROJECT_DIR`) and the revision string. The peer's own
-  `/workspace/origin` is RW; resolution and staging succeed there.
-- **Siblings**: identical. The sibling repo is mounted RW into the peer
-  container even though it is not visible in master at all.
-- **Workspace mismatch bug is gone**: the peer stages while its
-  `vcs.repo_root == vcs.workspace_path == /workspace/origin`, so the
-  `jj status` snapshot and the `jj split ... .cld-run` operate on the same
-  workspace where `.cld-run/` was written.
-
-Host cld can keep its current inline flow (no regression, no scratch env
-plumbing on host). Only cld-inside-master takes the delegated path,
-selected by presence of `CLD_HOST_PROJECT_DIR` / `MASTER_MODE`.
+- **Host launch (non-master)**: host resolves `A` to a pinned commit hash
+  from its own jj view, passes it as `AGENT_REVISION_HINT`. No writes to
+  origin's working copy.
+- **Master's own repo**: master has no jj view of the target, so it passes
+  the revision hint as an unresolved string; the peer's own
+  `/workspace/origin` is RW and its entrypoint resolves + workspace-adds
+  locally.
+- **Siblings**: identical to master's own repo -- the sibling repo is
+  mounted RW into the peer container.
+- **`@ == A` case is safe**: `jj workspace add -r <A>` creates a fresh empty
+  child of `A` in the secondary workspace; the origin's main workspace `@`
+  stays exactly where it was. No rewrite of `A`, no divergence.
 
 ## Target registration and discovery
 
@@ -203,11 +202,11 @@ Why this is preferred over master-side forgetting:
 Failure mode: if the peer dies dirty (SIGKILL, OOM, host reboot before the
 trap ran), the bookmark survives. Handled as best-effort with a WARN and
 the manual `jj bookmark forget` command in the log, matching the current
-`_forget_session_bookmark` fallback wording. A sweeper command (out of
+`_forget_session_state` fallback wording. A sweeper command (out of
 scope) may later reconcile stale bookmarks against `docker ps` output.
 
 Host cld today does the forget directly on its own machine
-(`_forget_session_bookmark`). Migrating host cld to the same peer
+(`_forget_session_state`). Migrating host cld to the same peer
 self-cleanup mechanism is the natural follow-up (drops the helper, removes
 a code path). Not required by this design but recommended for consistency
 with Rule 5.

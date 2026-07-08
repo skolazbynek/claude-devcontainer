@@ -30,31 +30,31 @@ fi
 # user.email/user.name from ~/.config/jj.
 copy_host_configs
 
-# Anchor: prefer AGENT_ANCHOR_HASH (host cld staged it before docker run).
-# If unset, run delegated in-peer staging using AGENT_REVISION_HINT +
-# AGENT_SCRATCH (a `cld master` launched us; see docs/design-master-sibling-launch.md).
-if [ -z "${AGENT_ANCHOR_HASH:-}" ]; then
-    if [ -z "${AGENT_SCRATCH:-}" ]; then
-        echo "Error: need AGENT_ANCHOR_HASH or AGENT_SCRATCH" >&2
-        exit 1
-    fi
-    echo "[cld] delegated anchor staging (revision_hint='${AGENT_REVISION_HINT:-@}')"
-    if ! AGENT_ANCHOR_HASH=$(cd "$WORKSPACE_ORIGIN" && python3 -m cld.vcs.scratch); then
-        echo "Error: delegated anchor staging failed" >&2
-        exit 1
-    fi
-    export AGENT_ANCHOR_HASH
+# Anchor: base revision arrives as AGENT_REVISION_HINT (resolved commit hash
+# from the host, or unresolved revset when a `cld master` delegated to us).
+# The anchor commit B is created INSIDE /workspace/current by
+# `python3 -m cld.vcs.scratch` -- the origin working copy is never touched.
+if [ -z "${AGENT_SCRATCH:-}" ]; then
+    echo "Error: AGENT_SCRATCH is required" >&2
+    exit 1
 fi
 
 BOOKMARK="$AGENT_NAME"
-ANCHOR="$AGENT_ANCHOR_HASH"
 
 cd "$WORKSPACE_ORIGIN"
-
-# One-shot agent: first launch only. Anchor at $ANCHOR (the split-produced B
-# commit containing .cld-run/*); create a fresh workspace at /workspace/current
-# and plant the bookmark on @ so the final commit is easy to find later.
-jj workspace add --name "$BOOKMARK" -r "$ANCHOR" /workspace/current
+BASE_REV="${AGENT_REVISION_HINT:-@}"
+if ! A_HASH=$(jj log --no-graph -n 1 -r "$BASE_REV" -T commit_id 2>/dev/null); then
+    echo "Error: could not resolve AGENT_REVISION_HINT='$BASE_REV'" >&2
+    exit 1
+fi
+echo "[cld] base=${A_HASH:0:12}"
+jj workspace add --name "$BOOKMARK" -r "$A_HASH" /workspace/current
+if ! AGENT_ANCHOR_HASH=$(cd /workspace/current && python3 -m cld.vcs.scratch); then
+    echo "Error: peer-side anchor staging failed" >&2
+    exit 1
+fi
+export AGENT_ANCHOR_HASH
+echo "[cld] anchor=${AGENT_ANCHOR_HASH:0:12}"
 (cd /workspace/current && jj bookmark set "$BOOKMARK" -r @ --allow-backwards)
 
 (cd /workspace/current && \

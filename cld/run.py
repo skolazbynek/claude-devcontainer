@@ -12,13 +12,11 @@ from cld.docker import (
     build_session_name,
     ensure_image,
     find_target_repo,
-    in_master_container,
     require_docker,
     run_extra_paths,
     to_host_path,
 )
 from cld.log import get_logger
-from cld.vcs import get_backend
 
 log = get_logger(__name__)
 
@@ -35,15 +33,13 @@ def launch_run(
     *,
     system_prompt_file: Path | None = None,
     extra_env: dict[str, str] | None = None,
-    anchor_hash: str | None = None,
 ) -> dict:
     """Launch a one-shot autonomous Claude agent in a Docker container.
 
-    If ``anchor_hash`` is provided the caller has already staged the anchor
-    commit (via ``stage_anchor_with_scratch``); otherwise this function does
-    the staging itself. ``AGENT_ANCHOR_HASH`` (== B) is propagated into the
-    container so the in-container entrypoint can create the workspace on top
-    of it and the descendant guard can enforce immutability.
+    The container entrypoint stages anchor B inside its own ephemeral workspace
+    after ``jj workspace add -r <A>``; ``anchor_env_args`` only carries the
+    resolved base revision + scratch envelope. The final ``AGENT_ANCHOR_HASH``
+    (== B) is computed peer-side and surfaces in the agent's ``summary.json``.
     """
     require_docker()
     if not task_file and not inline_prompt:
@@ -69,17 +65,9 @@ def launch_run(
 
     session = session_name or build_session_name("run", name)
 
-    # Anchor: on the host (traditional flow), stage commit B inline and pass
-    # AGENT_ANCHOR_HASH. Inside master (delegated flow), pass AGENT_REVISION_HINT
-    # + AGENT_SCRATCH and let the peer stage locally.
-    # `anchor_hash` may be pre-staged by a caller (chain runner); if so, use it
-    # directly. Chain-inside-master is blocked upstream, so we don't handle it.
     args = ["--name", session]
     args += build_container_args(repo_root, session, cfg)
-    if anchor_hash is not None:
-        args += ["-e", f"AGENT_ANCHOR_HASH={anchor_hash}"]
-    else:
-        args += anchor_env_args(cfg, session, revision)
+    args += anchor_env_args(cfg, session, revision)
     if task_file:
         host_task = to_host_path(str(task_file.resolve()), cfg)
         args += ["-v", f"{host_task}:/config/task.md:ro"]
@@ -97,8 +85,6 @@ def launch_run(
 
     if not quiet:
         log.info("Starting agent in background...")
-        if anchor_hash:
-            log.info(f"Anchor: {anchor_hash[:12]}")
         if task_file:
             log.info(f"Task file: {task_file}")
         if inline_prompt:
@@ -124,26 +110,15 @@ def launch_run(
         print("Agent started successfully")
         print("========================================")
         print()
-        if anchor_hash:
-            print(f"Anchor:       {anchor_hash[:12]}")
         print(f"Check if running:\n  docker ps --filter id={cid}")
         print(f"\nWait for completion:\n  docker wait {cid}")
-        # The anchor hash is only known synchronously in the host flow. In the
-        # delegated flow the peer stages the anchor itself; the resulting hash
-        # appears in the peer's summary.json (anchor_hash) once it completes.
-        if anchor_hash and not in_master_container():
-            vcs_name = get_backend().name
-            if vcs_name == "jj":
-                print(f"\nAfter completion, view results:\n  jj log -r '{anchor_hash}..{session}'\n  jj diff --from {anchor_hash} --to {session}")
-                print(f"\nMerge changes:\n  jj squash --from {session}")
-            else:
-                print(f"\nAfter completion, view results:\n  git log {anchor_hash}..{session}\n  git diff {anchor_hash}..{session}")
-                print(f"\nMerge changes:\n  git merge {session}")
+        # The anchor commit is created inside the peer container's workspace,
+        # so its hash is only known once the agent's summary.json is written.
+        print(f"\nInspect on completion:\n  jj log -r {session}   # or: git log {session}")
         print()
 
     return {
         "container_id": cid,
         "session_name": session,
         "repo_root": str(repo_root),
-        "anchor_hash": anchor_hash,
     }

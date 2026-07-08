@@ -238,31 +238,30 @@ def find_target_repo(cfg: Config) -> Path:
 def anchor_env_args(cfg: Config, session: str, revision: str) -> list[str]:
     """Return the docker `-e` args carrying anchor info to a peer container.
 
-    - On the host (traditional flow): stage the anchor here and emit
-      `AGENT_ANCHOR_HASH=<B>`. Reads jj history in the current working copy.
-    - Inside a master container (delegated flow): emit only
-      `AGENT_REVISION_HINT` and `AGENT_SCRATCH` and let the peer's entrypoint
-      run `resolve_anchor` + `stage_anchor_with_scratch` locally where its
-      view of the target repo is RW. Master does no jj read or write.
+    Uniform for host and delegated (inside-master) launches: the host resolves
+    the revision to a commit hash when it has a jj view, or leaves it symbolic
+    when running inside master (which has no RW view of the target repo). The
+    peer entrypoint uses this as the base for ``jj workspace add`` and then
+    creates the anchor commit B inside that workspace via ``stage_from_env``.
+    See docs/design-anchor-change.md.
     """
     from cld.vcs import get_backend
     from cld.vcs.anchor import resolve_anchor
-    from cld.vcs.scratch import encode_scratch_envelope, stage_anchor_with_scratch
+    from cld.vcs.scratch import encode_scratch_envelope
 
     scratch = {"session": f"{session}\n".encode()}
+    payload = encode_scratch_envelope(scratch)
 
     if in_master_container():
-        payload = encode_scratch_envelope(scratch)
-        return [
-            "-e", f"AGENT_REVISION_HINT={revision}",
-            "-e", f"AGENT_SCRATCH={payload}",
-        ]
+        hint = revision
+    else:
+        hint = resolve_anchor(get_backend(), revision)
+        log.info("Anchor base: %s", hint[:12])
 
-    vcs = get_backend()
-    base = resolve_anchor(vcs, revision)
-    anchor_hash = stage_anchor_with_scratch(vcs, base, session, scratch)
-    log.info("Anchor: %s (base=%s)", anchor_hash[:12], base[:12])
-    return ["-e", f"AGENT_ANCHOR_HASH={anchor_hash}"]
+    return [
+        "-e", f"AGENT_REVISION_HINT={hint}",
+        "-e", f"AGENT_SCRATCH={payload}",
+    ]
 
 
 def resolve_master_target(cwd: Path, cfg: Config) -> str:

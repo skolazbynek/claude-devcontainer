@@ -19,7 +19,6 @@ from cld.log import get_logger
 from cld.prompts import stage_persona_without_frontmatter
 from cld.vcs import get_backend
 from cld.vcs.anchor import assert_descendant, resolve_anchor
-from cld.vcs.scratch import stage_anchor_with_scratch
 
 if TYPE_CHECKING:
     from cld.chain_state import StateWriter
@@ -284,6 +283,25 @@ def step_session(chain: Chain, step: ChainStep, group_idx: int | None = None) ->
     return f"{prefix}_{step.name}"
 
 
+def _anchor_ref(vcs, anchor_commit: str) -> str:
+    """Return a descent-check reference for *anchor_commit* that survives WC rewrites.
+
+    For jj, return ``change_id(<A's change_id>)`` -- a revset expression that
+    selects every commit belonging to A's change (current visible + hidden +
+    divergent siblings). This is stable across working-copy snapshots that
+    rewrite A's commit_id and robust against transient divergence: since jj
+    auto-rebases descendants when a change is rewritten, a step tip anchored
+    on any commit of A's change ends up with some commit of A's change in its
+    ancestry. For git, HEAD identity is already commit-based.
+    """
+    if vcs.name != "jj":
+        return anchor_commit
+    result = vcs.run(["log", "-r", anchor_commit, "--no-graph", "-T", "change_id", "-n", "1"])
+    if result.returncode == 0 and result.stdout.strip():
+        return f"change_id({result.stdout.strip()})"
+    return anchor_commit
+
+
 def initialise_chain_branch(chain: Chain, vcs, anchor_hash: str) -> str:
     """Create the persistent chain branch as a bookmark pointing at the anchor.
 
@@ -347,9 +365,6 @@ def execute_step(
     scratch_dir: Path,
 ) -> StepResult:
     """Launch one agent for one step, wait for completion, return its result."""
-    # scratch_dir lives under gitignored .cld/, but jj's split operation on
-    # earlier steps can drop empty subdirs from the working copy checkout,
-    # so ensure it exists before every step.
     scratch_dir.mkdir(parents=True, exist_ok=True)
     persona_path = persona_resolve(step.persona, repo_root, cld_root)
     persona_path = stage_persona_without_frontmatter(persona_path, scratch_dir)
@@ -444,22 +459,22 @@ def run_chain(
     log.info("Chain '%s' starting with %d step(s)", chain.name, len(chain.steps))
     log.debug("run_chain: name=%s file=%s steps=%d", chain.name, chain_file, len(chain.steps))
 
-    base_anchor = anchor_hash or resolve_anchor(vcs, revision)
-    # Stage the chain-level anchor B: a child of base_anchor containing an
-    # (empty) .cld-run/ so the tree is anchored and non-empty. Per-step scratch
-    # is added by execute_step / _run_parallel via additional stage calls when
-    # each agent is launched.
-    anchor = stage_anchor_with_scratch(
-        vcs, base_anchor, chain_branch(chain),
-        {"chain": f"{chain.name}\n".encode()},
-    )
+    anchor = anchor_hash or resolve_anchor(vcs, revision)
+    # Chain-level anchor == A. Each step's peer container stages its own child
+    # commit B on top of the current chain-branch tip inside its ephemeral
+    # workspace; assert_descendant(vcs, A, step_tip) still holds because every
+    # per-step B descends from A.
+    # For jj, resolve A's change_id and use it (not the commit_id) as the
+    # descendant-check anchor: change_id is stable across working-copy rewrites
+    # (e.g. host-side snapshot churn on scratch_dir) whereas the commit_id may
+    # become hidden and lookup as-an-ancestor fails.
+    anchor_ref = _anchor_ref(vcs, anchor)
     initialise_chain_branch(chain, vcs, anchor)
     # Host-side scratch (composed task files, staged personas) that get RO-mounted
-    # into per-step agent containers. Lives under gitignored `.cld/` so it does
-    # not interfere with subsequent stage_anchor_with_scratch snapshots.
+    # into per-step agent containers. Lives under gitignored `.cld/`.
     scratch_dir = repo_root / ".cld" / "chain-scratch" / chain_branch(chain)
     scratch_dir.mkdir(parents=True, exist_ok=True)
-    log.info("Chain anchor: %s (base=%s)", anchor[:12], base_anchor[:12])
+    log.info("Chain anchor: %s", anchor[:12])
 
     if state_writer is not None:
         state_writer.set_anchor(anchor)
@@ -509,7 +524,7 @@ def run_chain(
                     chain, vcs,
                     successful_session=first_success.session,
                     transient_sessions=[r.session for r in group_results],
-                    anchor_hash=anchor,
+                    anchor_hash=anchor_ref,
                 )
                 continue
             step = item
@@ -573,7 +588,7 @@ def run_chain(
             advance_chain_branch(
                 chain, vcs, successful_session=session,
                 transient_sessions=[session],
-                anchor_hash=anchor,
+                anchor_hash=anchor_ref,
             )
             log.debug("chain branch advanced to %s", session)
     except KeyboardInterrupt:

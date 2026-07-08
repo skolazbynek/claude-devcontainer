@@ -1,6 +1,9 @@
 .git
 .jj
 .claude
+!.claude/skills
+!.claude/skills/**
+.claude/skills/.claude
 .env
 .env.*
 __pycache__

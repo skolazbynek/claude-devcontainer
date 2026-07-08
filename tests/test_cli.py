@@ -8,7 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 from cld.cli import (
-    _forget_session_bookmark,
+    _forget_session_state,
     _persistent_container_name,
     _persistent_container_status,
     _shutdown_persistent_container,
@@ -274,8 +274,8 @@ class TestAgentRestart:
         assert "agent" in result.output
 
 
-class TestShutdownForgetsBookmark:
-    """Shutdown drops the session bookmark so the next launch is a fresh lifecycle."""
+class TestShutdownForgetsSessionState:
+    """Shutdown drops the session bookmark AND workspace so the next launch is a fresh lifecycle."""
 
     def _jj_backend(self):
         backend = MagicMock()
@@ -283,16 +283,18 @@ class TestShutdownForgetsBookmark:
         backend.run.return_value = MagicMock(returncode=0, stderr="")
         return backend
 
-    def test_jj_backend_runs_bookmark_forget(self, tmp_path):
+    def test_jj_backend_forgets_bookmark_and_workspace(self, tmp_path):
         backend = self._jj_backend()
         with patch("cld.cli.get_backend", return_value=backend), \
              patch("cld.cli._stop_and_remove_container") as stop_mock:
             ok = _shutdown_persistent_container("master", "cld_master_x", str(tmp_path), "cld_master_x")
         assert ok
         stop_mock.assert_called_once_with("cld_master_x")
-        backend.run.assert_called_once_with(["bookmark", "forget", "cld_master_x"])
+        forget_calls = [c.args[0] for c in backend.run.call_args_list]
+        assert ["bookmark", "forget", "cld_master_x"] in forget_calls
+        assert ["workspace", "forget", "cld_master_x"] in forget_calls
 
-    def test_git_backend_skips_bookmark_forget(self, tmp_path):
+    def test_git_backend_skips_forget(self, tmp_path):
         backend = MagicMock()
         backend.name = "git"
         with patch("cld.cli.get_backend", return_value=backend), \
@@ -301,7 +303,7 @@ class TestShutdownForgetsBookmark:
         assert ok
         backend.run.assert_not_called()
 
-    def test_bookmark_forget_failure_is_non_fatal(self, tmp_path):
+    def test_forget_failure_is_non_fatal(self, tmp_path):
         backend = MagicMock()
         backend.name = "jj"
         backend.run.return_value = MagicMock(returncode=1, stderr="conflict")
@@ -314,7 +316,7 @@ class TestShutdownForgetsBookmark:
         gone = tmp_path / "gone"
         with patch("cld.cli.get_backend") as get_backend_mock, \
              patch("cld.cli._stop_and_remove_container"):
-            _forget_session_bookmark(str(gone), "cld_master_x")
+            _forget_session_state(str(gone), "cld_master_x")
         get_backend_mock.assert_not_called()
 
     def test_get_backend_failure_is_non_fatal(self, tmp_path):
@@ -323,7 +325,7 @@ class TestShutdownForgetsBookmark:
             ok = _shutdown_persistent_container("master", "cld_master_x", str(tmp_path), "cld_master_x")
         assert ok
 
-    def test_shutdown_all_forgets_each_bookmark(self, tmp_path):
+    def test_shutdown_all_forgets_each_session(self, tmp_path):
         repo_a = tmp_path / "a"; repo_a.mkdir()
         repo_b = tmp_path / "b"; repo_b.mkdir()
         containers = [
@@ -340,6 +342,8 @@ class TestShutdownForgetsBookmark:
         forget_calls = [c.args[0] for c in backend.run.call_args_list]
         assert ["bookmark", "forget", "cld_master_a"] in forget_calls
         assert ["bookmark", "forget", "cld_master_b"] in forget_calls
+        assert ["workspace", "forget", "cld_master_a"] in forget_calls
+        assert ["workspace", "forget", "cld_master_b"] in forget_calls
 
 
 class TestRestartPreservesBookmark:
@@ -350,7 +354,7 @@ class TestRestartPreservesBookmark:
              patch("cld.cli.find_target_repo", return_value=tmp_path), \
              patch("cld.cli.docker_master_status", return_value="running"), \
              patch("cld.cli._shutdown_persistent_container") as shutdown_mock, \
-             patch("cld.cli._forget_session_bookmark") as forget_mock, \
+             patch("cld.cli._forget_session_state") as forget_mock, \
              patch("cld.cli._stop_and_remove_container") as stop_mock, \
              patch("cld.cli._run_persistent_devcontainer") as launch_mock:
             result = runner.invoke(app, ["master", "restart"])
@@ -365,7 +369,7 @@ class TestRestartPreservesBookmark:
              patch("cld.cli.find_target_repo", return_value=tmp_path), \
              patch("cld.cli.docker_agent_status", return_value="running"), \
              patch("cld.cli._shutdown_persistent_container") as shutdown_mock, \
-             patch("cld.cli._forget_session_bookmark") as forget_mock, \
+             patch("cld.cli._forget_session_state") as forget_mock, \
              patch("cld.cli._stop_and_remove_container") as stop_mock, \
              patch("cld.cli._run_persistent_devcontainer") as launch_mock:
             result = runner.invoke(app, ["agent", "restart"])

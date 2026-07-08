@@ -1,5 +1,14 @@
 # Unified Anchor-Change UX
 
+> **Note (2026-07):** the "host stages `B` via `jj split --onto A`" details in
+> this document have been superseded. Anchor staging now runs peer-side inside
+> the container's ephemeral workspace via `stage_in_workspace` /
+> `stage_from_env` in `cld/vcs/scratch.py`. The origin working copy is never
+> touched (fixes the `@ IS A` case, which previously rewrote change `A`). See
+> CLAUDE.md § *Anchor change contract* and docs/design-master-sibling-launch.md
+> § *Delegated anchor work* for the current wire and staging flow. Goals,
+> invariants, and the descendant contract below still apply.
+
 ## 1. Goal & invariant
 
 Every `cld` subcommand (`agent`, `devcontainer`, `review`, `loop`, `chain run`)

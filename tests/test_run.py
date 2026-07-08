@@ -38,11 +38,6 @@ class TestLaunchAgentExtensions:
         """Patch all externals; return the full docker-run command list."""
         session = "agent_testxx"
 
-        mock_vcs = MagicMock()
-        mock_vcs.name = "jj"
-        mock_vcs.repo_root = Path("/fake/repo")
-        mock_vcs.workspace_revision = ""
-
         docker_result = MagicMock()
         docker_result.returncode = 0
         docker_result.stdout = "abc123def\n"
@@ -51,11 +46,10 @@ class TestLaunchAgentExtensions:
         with (
             patch("cld.run.require_docker"),
             patch("cld.run.find_target_repo", return_value=Path("/fake/repo")),
-            patch("cld.run.get_backend", return_value=mock_vcs),
             patch("cld.run.ensure_image"),
             patch("cld.run.build_session_name", return_value=session),
             patch("cld.run.build_container_args", return_value=[]),
-            patch("cld.run.anchor_env_args", return_value=["-e", "AGENT_ANCHOR_HASH=cafef00d1234"]),
+            patch("cld.run.anchor_env_args", return_value=["-e", "AGENT_REVISION_HINT=cafef00d1234"]),
             patch("cld.run.subprocess.run", return_value=docker_result) as mock_run,
         ):
             launch_run(Config(), quiet=True, **kwargs)

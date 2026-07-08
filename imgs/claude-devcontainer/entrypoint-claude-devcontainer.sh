@@ -20,30 +20,53 @@ cd "$WORKSPACE_ORIGIN"
 # restart-paused lifecycle owns this session. `cld <role> restart` preserves
 # the bookmark (reattach at its tip). `cld <role> shutdown` forgets it so the
 # next launch is a fresh lifecycle honoring -r.
+# Forget any workspace already registered under $BOOKMARK before adding. A
+# prior `cld <role> shutdown` forgets the bookmark but NOT the workspace, so
+# on a fresh first-launch the stale registration would make `jj workspace add
+# --name` fail with "Workspace named X already exists" -- silently, since
+# there's no set -e -- and leave /workspace/current an empty dir. No-op when
+# absent (first-ever launch).
+jj workspace forget "$BOOKMARK" 2>&1 || true
+
 if jj bookmark list -T 'name ++ "\n"' | grep -qx "$BOOKMARK"; then
     echo "[cld] reattaching workspace '$BOOKMARK'"
-    jj workspace forget "$BOOKMARK" 2>&1 || true
-    jj workspace add --name "$BOOKMARK" -r "$BOOKMARK" /workspace/current
-else
-    # First launch. Anchor comes from AGENT_ANCHOR_HASH (host cld staged it
-    # before docker run) or, if unset, from delegated in-peer staging using
-    # AGENT_REVISION_HINT + AGENT_SCRATCH (a `cld master` launched us; see
-    # docs/design-master-sibling-launch.md).
-    if [ -z "${AGENT_ANCHOR_HASH:-}" ]; then
-        if [ -z "${AGENT_SCRATCH:-}" ]; then
-            echo "Error: need AGENT_ANCHOR_HASH or AGENT_SCRATCH on first launch" >&2
-            exit 1
-        fi
-        echo "[cld] delegated anchor staging (revision_hint='${AGENT_REVISION_HINT:-@}')"
-        if ! AGENT_ANCHOR_HASH=$(python3 -m cld.vcs.scratch); then
-            echo "Error: delegated anchor staging failed" >&2
-            exit 1
-        fi
-        export AGENT_ANCHOR_HASH
+    if ! jj workspace add --name "$BOOKMARK" -r "$BOOKMARK" /workspace/current; then
+        echo "Error: jj workspace add failed (reattach)" >&2
+        exit 1
     fi
-    ANCHOR="$AGENT_ANCHOR_HASH"
-    echo "[cld] first launch, anchor=${ANCHOR:0:12}"
-    jj workspace add --name "$BOOKMARK" -r "$ANCHOR" /workspace/current
+    # Recover the anchor: the ancestor of the bookmark with our own
+    # 'cld anchor: <session>' description is B.
+    AGENT_ANCHOR_HASH=$(jj log --no-graph -n 1 \
+        -r "heads(ancestors(${BOOKMARK}) & description(exact:'cld anchor: ${SESSION_NAME}'))" \
+        -T commit_id 2>/dev/null || true)
+    export AGENT_ANCHOR_HASH
+else
+    # First launch. Base revision comes from AGENT_REVISION_HINT (a resolved
+    # hash from the host, or an unresolved revset when a `cld master`
+    # delegated to this peer; see docs/design-master-sibling-launch.md).
+    # The anchor commit B is staged INSIDE /workspace/current by
+    # `python3 -m cld.vcs.scratch`, so the origin working copy is never touched
+    # -- crucial for the common jj case where the user's @ is A itself.
+    if [ -z "${AGENT_SCRATCH:-}" ]; then
+        echo "Error: AGENT_SCRATCH is required on first launch" >&2
+        exit 1
+    fi
+    BASE_REV="${AGENT_REVISION_HINT:-@}"
+    if ! A_HASH=$(jj log --no-graph -n 1 -r "$BASE_REV" -T commit_id 2>/dev/null); then
+        echo "Error: could not resolve AGENT_REVISION_HINT='$BASE_REV'" >&2
+        exit 1
+    fi
+    echo "[cld] first launch, base=${A_HASH:0:12}"
+    if ! jj workspace add --name "$BOOKMARK" -r "$A_HASH" /workspace/current; then
+        echo "Error: jj workspace add failed (first launch)" >&2
+        exit 1
+    fi
+    if ! AGENT_ANCHOR_HASH=$(cd /workspace/current && python3 -m cld.vcs.scratch); then
+        echo "Error: peer-side anchor staging failed" >&2
+        exit 1
+    fi
+    export AGENT_ANCHOR_HASH
+    echo "[cld] anchor=${AGENT_ANCHOR_HASH:0:12}"
     (cd /workspace/current && jj bookmark set "$BOOKMARK" -r @ --allow-backwards)
 fi
 
@@ -72,7 +95,11 @@ if command -v poetry &>/dev/null; then
 fi
 
 CLAUDE_BIN=$(which claude)
-CLAUDE_EXTRA_ARGS="--dangerously-skip-permissions"
+# --add-dir /opt/cld surfaces the baked-in .claude/skills/ (agent-start,
+# messenger-*) regardless of which repo is mounted at /workspace/origin;
+# settings.json's permissions.additionalDirectories grants file access only
+# and does not trigger skill auto-loading, so this must be a CLI flag.
+CLAUDE_EXTRA_ARGS="--dangerously-skip-permissions --add-dir /opt/cld"
 if [ -n "${AGENT_MODEL:-}" ]; then
     CLAUDE_EXTRA_ARGS="$CLAUDE_EXTRA_ARGS --model $AGENT_MODEL"
 fi
