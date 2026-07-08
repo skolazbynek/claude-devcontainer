@@ -233,10 +233,10 @@ prompts/                           Reusable task prompts for agents
 
 ### Managing sibling agents from `cld master`
 
-To spin up / restart / shut down persistent agents for repos other than master's own, set `master_extra_mounts_ro` in your config (list of host paths RO same-path bind-mounted into every master container):
+To spin up / restart / shut down persistent agents for repos other than master's own, set `master_targets` in your config (list of host paths registered as launch targets for master; each becomes an empty placeholder directory inside master's shell so `cd <path>` works, without ever bind-mounting the repo into master):
 
 ```toml
-master_extra_mounts_ro = ["~/repos", "~/work"]
+master_targets = ["~/repos/foo", "~/work/bar"]
 ```
 
 Then inside master's shell:
@@ -248,7 +248,7 @@ cld agent status
 cld agent shutdown
 ```
 
-Master itself never gets RW on the target repo. The sibling agent container mounts RepoB RW (via the docker socket master already uses for peer discovery), does its own workspace registration on boot, and runs `/opt/cld/cleanup-workspace.sh` inside itself on shutdown so master never has to write to RepoB.
+Master itself has no filesystem view of the target repo -- only a placeholder directory so `cd` works. The peer container gets RW at `/workspace/origin` (via the docker socket master uses for peer discovery), does its own anchor staging (`resolve_anchor` + `stage_anchor_with_scratch`) on boot from the `AGENT_REVISION_HINT` + `AGENT_SCRATCH` env vars master passes, and forgets its bookmark on SIGTERM so master never writes to RepoB. `cld master repos` inside master's shell lists what it can target.
 
 ### Workspace isolation
 

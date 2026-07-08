@@ -6,19 +6,19 @@ from pathlib import Path
 
 from cld.config import Config
 from cld.docker import (
+    anchor_env_args,
     base_extra_paths,
     build_container_args,
     build_session_name,
     ensure_image,
-    find_repo_context,
+    find_target_repo,
+    in_master_container,
     require_docker,
     run_extra_paths,
     to_host_path,
 )
 from cld.log import get_logger
 from cld.vcs import get_backend
-from cld.vcs.anchor import resolve_anchor
-from cld.vcs.scratch import stage_anchor_with_scratch
 
 log = get_logger(__name__)
 
@@ -50,8 +50,7 @@ def launch_run(
         log.error("No task file or prompt provided")
         sys.exit(1)
 
-    repo_root, _workspace_rev = find_repo_context()
-    vcs = get_backend()
+    repo_root = find_target_repo(cfg)
 
     cld_root = Path(__file__).resolve().parent.parent
     ensure_image(
@@ -70,20 +69,17 @@ def launch_run(
 
     session = session_name or build_session_name("run", name)
 
-    # Host stages an anchor commit B (child of the resolved anchor A) containing
-    # only `.cld-run/*`. B's hash is the AGENT_ANCHOR_HASH the container reads;
-    # the in-container entrypoint creates the workspace on top of B and the
-    # descendant guard enforces that all further commits descend from it.
-    if anchor_hash is None:
-        base_anchor = resolve_anchor(vcs, revision)
-        anchor_hash = stage_anchor_with_scratch(
-            vcs, base_anchor, session,
-            {"session": f"{session}\n".encode()},
-        )
-
+    # Anchor: on the host (traditional flow), stage commit B inline and pass
+    # AGENT_ANCHOR_HASH. Inside master (delegated flow), pass AGENT_REVISION_HINT
+    # + AGENT_SCRATCH and let the peer stage locally.
+    # `anchor_hash` may be pre-staged by a caller (chain runner); if so, use it
+    # directly. Chain-inside-master is blocked upstream, so we don't handle it.
     args = ["--name", session]
     args += build_container_args(repo_root, session, cfg)
-    args += ["-e", f"AGENT_ANCHOR_HASH={anchor_hash}"]
+    if anchor_hash is not None:
+        args += ["-e", f"AGENT_ANCHOR_HASH={anchor_hash}"]
+    else:
+        args += anchor_env_args(cfg, session, revision)
     if task_file:
         host_task = to_host_path(str(task_file.resolve()), cfg)
         args += ["-v", f"{host_task}:/config/task.md:ro"]
@@ -101,7 +97,8 @@ def launch_run(
 
     if not quiet:
         log.info("Starting agent in background...")
-        log.info(f"Anchor: {anchor_hash[:12]}")
+        if anchor_hash:
+            log.info(f"Anchor: {anchor_hash[:12]}")
         if task_file:
             log.info(f"Task file: {task_file}")
         if inline_prompt:
@@ -121,22 +118,27 @@ def launch_run(
     cid = container_id.stdout.strip()
 
     if not quiet:
-        vcs_name = vcs.name
         print(f"Container ID: {cid}")
         print()
         print("========================================")
         print("Agent started successfully")
         print("========================================")
         print()
-        print(f"Anchor:       {anchor_hash[:12]}")
+        if anchor_hash:
+            print(f"Anchor:       {anchor_hash[:12]}")
         print(f"Check if running:\n  docker ps --filter id={cid}")
         print(f"\nWait for completion:\n  docker wait {cid}")
-        if vcs_name == "jj":
-            print(f"\nAfter completion, view results:\n  jj log -r '{anchor_hash}..{session}'\n  jj diff --from {anchor_hash} --to {session}")
-            print(f"\nMerge changes:\n  jj squash --from {session}")
-        else:
-            print(f"\nAfter completion, view results:\n  git log {anchor_hash}..{session}\n  git diff {anchor_hash}..{session}")
-            print(f"\nMerge changes:\n  git merge {session}")
+        # The anchor hash is only known synchronously in the host flow. In the
+        # delegated flow the peer stages the anchor itself; the resulting hash
+        # appears in the peer's summary.json (anchor_hash) once it completes.
+        if anchor_hash and not in_master_container():
+            vcs_name = get_backend().name
+            if vcs_name == "jj":
+                print(f"\nAfter completion, view results:\n  jj log -r '{anchor_hash}..{session}'\n  jj diff --from {anchor_hash} --to {session}")
+                print(f"\nMerge changes:\n  jj squash --from {session}")
+            else:
+                print(f"\nAfter completion, view results:\n  git log {anchor_hash}..{session}\n  git diff {anchor_hash}..{session}")
+                print(f"\nMerge changes:\n  git merge {session}")
         print()
 
     return {

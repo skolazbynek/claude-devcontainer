@@ -4,9 +4,16 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from typer.testing import CliRunner
 
-from cld.cli import app, _persistent_container_name, _persistent_container_status
+from cld.cli import (
+    _forget_session_bookmark,
+    _persistent_container_name,
+    _persistent_container_status,
+    _shutdown_persistent_container,
+    app,
+)
 from cld.docker import agent_container_name, master_container_name
 
 
@@ -133,14 +140,11 @@ class TestAgentSubcommand:
     def test_agent_starts_new_container_without_attaching(self, tmp_path):
         repo_root = tmp_path / "myrepo"
         repo_root.mkdir()
-        vcs_mock = MagicMock()
         with patch("cld.cli.require_docker"), \
              patch("cld.cli.ensure_image"), \
-             patch("cld.cli.find_repo_context", return_value=(repo_root, "")), \
+             patch("cld.cli.find_target_repo", return_value=repo_root), \
              patch("cld.cli.docker_agent_status", return_value="absent"), \
-             patch("cld.cli.get_backend", return_value=vcs_mock), \
-             patch("cld.cli.resolve_anchor", return_value="abc123"), \
-             patch("cld.cli.stage_anchor_with_scratch", return_value="def456"), \
+             patch("cld.cli.anchor_env_args", return_value=["-e", "AGENT_ANCHOR_HASH=def456"]), \
              patch("cld.cli.build_container_args", return_value=["--rm"]) as bca, \
              patch("cld.cli.stage_home_ro", return_value=[]), \
              patch("cld.cli.stage_ssh_agent", return_value=[]), \
@@ -159,7 +163,7 @@ class TestAgentSubcommand:
     def test_agent_reattach_running_does_not_attach(self, tmp_path):
         with patch("cld.cli.require_docker"), \
              patch("cld.cli.ensure_image"), \
-             patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
+             patch("cld.cli.find_target_repo", return_value=tmp_path), \
              patch("cld.cli.docker_agent_status", return_value="running"), \
              patch("cld.cli.os.execvp") as execvp_mock:
             result = runner.invoke(app, ["agent"])
@@ -170,7 +174,7 @@ class TestAgentSubcommand:
     def test_agent_reattach_stopped_starts_container(self, tmp_path):
         with patch("cld.cli.require_docker"), \
              patch("cld.cli.ensure_image"), \
-             patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
+             patch("cld.cli.find_target_repo", return_value=tmp_path), \
              patch("cld.cli.docker_agent_status", return_value="stopped"), \
              patch("cld.cli.subprocess.run") as run_mock:
             result = runner.invoke(app, ["agent", "-r", "somerev"])
@@ -180,7 +184,7 @@ class TestAgentSubcommand:
 
 class TestAgentStatusCommand:
     def test_absent(self, tmp_path):
-        with patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
+        with patch("cld.cli.find_target_repo", return_value=tmp_path), \
              patch("cld.cli.docker_agent_status", return_value="absent"):
             result = runner.invoke(app, ["agent", "status"])
         assert result.exit_code == 0, result.output
@@ -199,7 +203,7 @@ class TestAgentStatusCommand:
         (mailbox_root / name / "state.json").write_text(json.dumps(state))
         monkeypatch.setenv("CLD_MAILBOX_ROOT", str(mailbox_root))
 
-        with patch("cld.cli.find_repo_context", return_value=(repo_root, "")), \
+        with patch("cld.cli.find_target_repo", return_value=repo_root), \
              patch("cld.cli.docker_agent_status", return_value="running"):
             result = runner.invoke(app, ["agent", "status"])
         assert result.exit_code == 0, result.output
@@ -210,7 +214,7 @@ class TestAgentStatusCommand:
 
 class TestMasterStatusCommand:
     def test_master_status_skips_state_json(self, tmp_path):
-        with patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
+        with patch("cld.cli.find_target_repo", return_value=tmp_path), \
              patch("cld.cli.docker_master_status", return_value="absent"):
             result = runner.invoke(app, ["master", "status"])
         assert result.exit_code == 0, result.output
@@ -220,7 +224,7 @@ class TestMasterStatusCommand:
 class TestAgentLogsCommand:
     def test_absent_errors(self, tmp_path):
         with patch("cld.cli.require_docker"), \
-             patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
+             patch("cld.cli.find_target_repo", return_value=tmp_path), \
              patch("cld.cli.docker_agent_status", return_value="absent"):
             result = runner.invoke(app, ["agent", "logs"])
         assert result.exit_code == 1
@@ -229,7 +233,7 @@ class TestAgentLogsCommand:
     def test_tails_docker_logs(self, tmp_path):
         fake_result = MagicMock(stdout="log line 1\nlog line 2\n", stderr="")
         with patch("cld.cli.require_docker"), \
-             patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
+             patch("cld.cli.find_target_repo", return_value=tmp_path), \
              patch("cld.cli.docker_agent_status", return_value="running"), \
              patch("cld.cli.subprocess.run", return_value=fake_result) as run_mock:
             result = runner.invoke(app, ["agent", "logs", "-n", "50"])
@@ -243,7 +247,7 @@ class TestAgentLogsCommand:
 class TestAgentShutdown:
     def test_absent(self, tmp_path):
         with patch("cld.cli.require_docker"), \
-             patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
+             patch("cld.cli.find_target_repo", return_value=tmp_path), \
              patch("cld.cli.docker_agent_status", return_value="absent"):
             result = runner.invoke(app, ["agent", "shutdown"])
         assert result.exit_code == 0, result.output
@@ -263,11 +267,146 @@ class TestAgentShutdown:
 class TestAgentRestart:
     def test_absent_errors_with_hint(self, tmp_path):
         with patch("cld.cli.require_docker"), \
-             patch("cld.cli.find_repo_context", return_value=(tmp_path, "")), \
+             patch("cld.cli.find_target_repo", return_value=tmp_path), \
              patch("cld.cli.docker_agent_status", return_value="absent"):
             result = runner.invoke(app, ["agent", "restart"])
         assert result.exit_code == 1
         assert "agent" in result.output
+
+
+class TestShutdownForgetsBookmark:
+    """Shutdown drops the session bookmark so the next launch is a fresh lifecycle."""
+
+    def _jj_backend(self):
+        backend = MagicMock()
+        backend.name = "jj"
+        backend.run.return_value = MagicMock(returncode=0, stderr="")
+        return backend
+
+    def test_jj_backend_runs_bookmark_forget(self, tmp_path):
+        backend = self._jj_backend()
+        with patch("cld.cli.get_backend", return_value=backend), \
+             patch("cld.cli._stop_and_remove_container") as stop_mock:
+            ok = _shutdown_persistent_container("master", "cld_master_x", str(tmp_path), "cld_master_x")
+        assert ok
+        stop_mock.assert_called_once_with("cld_master_x")
+        backend.run.assert_called_once_with(["bookmark", "forget", "cld_master_x"])
+
+    def test_git_backend_skips_bookmark_forget(self, tmp_path):
+        backend = MagicMock()
+        backend.name = "git"
+        with patch("cld.cli.get_backend", return_value=backend), \
+             patch("cld.cli._stop_and_remove_container"):
+            ok = _shutdown_persistent_container("agent", "cld_agent_x", str(tmp_path), "cld_agent_x")
+        assert ok
+        backend.run.assert_not_called()
+
+    def test_bookmark_forget_failure_is_non_fatal(self, tmp_path):
+        backend = MagicMock()
+        backend.name = "jj"
+        backend.run.return_value = MagicMock(returncode=1, stderr="conflict")
+        with patch("cld.cli.get_backend", return_value=backend), \
+             patch("cld.cli._stop_and_remove_container"):
+            ok = _shutdown_persistent_container("master", "cld_master_x", str(tmp_path), "cld_master_x")
+        assert ok
+
+    def test_missing_repo_root_is_non_fatal(self, tmp_path):
+        gone = tmp_path / "gone"
+        with patch("cld.cli.get_backend") as get_backend_mock, \
+             patch("cld.cli._stop_and_remove_container"):
+            _forget_session_bookmark(str(gone), "cld_master_x")
+        get_backend_mock.assert_not_called()
+
+    def test_get_backend_failure_is_non_fatal(self, tmp_path):
+        with patch("cld.cli.get_backend", side_effect=RuntimeError("no vcs")), \
+             patch("cld.cli._stop_and_remove_container"):
+            ok = _shutdown_persistent_container("master", "cld_master_x", str(tmp_path), "cld_master_x")
+        assert ok
+
+    def test_shutdown_all_forgets_each_bookmark(self, tmp_path):
+        repo_a = tmp_path / "a"; repo_a.mkdir()
+        repo_b = tmp_path / "b"; repo_b.mkdir()
+        containers = [
+            {"name": "cld_master_a", "repo_root": str(repo_a), "session": "cld_master_a"},
+            {"name": "cld_master_b", "repo_root": str(repo_b), "session": "cld_master_b"},
+        ]
+        backend = self._jj_backend()
+        with patch("cld.cli.require_docker"), \
+             patch("cld.cli.docker_master_list", return_value=containers), \
+             patch("cld.cli.get_backend", return_value=backend), \
+             patch("cld.cli._stop_and_remove_container"):
+            result = runner.invoke(app, ["master", "shutdown", "--all"])
+        assert result.exit_code == 0, result.output
+        forget_calls = [c.args[0] for c in backend.run.call_args_list]
+        assert ["bookmark", "forget", "cld_master_a"] in forget_calls
+        assert ["bookmark", "forget", "cld_master_b"] in forget_calls
+
+
+class TestRestartPreservesBookmark:
+    """Restart bypasses `_shutdown_persistent_container` so the bookmark survives."""
+
+    def test_master_restart_does_not_forget_bookmark(self, tmp_path):
+        with patch("cld.cli.require_docker"), \
+             patch("cld.cli.find_target_repo", return_value=tmp_path), \
+             patch("cld.cli.docker_master_status", return_value="running"), \
+             patch("cld.cli._shutdown_persistent_container") as shutdown_mock, \
+             patch("cld.cli._forget_session_bookmark") as forget_mock, \
+             patch("cld.cli._stop_and_remove_container") as stop_mock, \
+             patch("cld.cli._run_persistent_devcontainer") as launch_mock:
+            result = runner.invoke(app, ["master", "restart"])
+        assert result.exit_code == 0, result.output
+        shutdown_mock.assert_not_called()
+        forget_mock.assert_not_called()
+        stop_mock.assert_called_once()
+        launch_mock.assert_called_once()
+
+    def test_agent_restart_does_not_forget_bookmark(self, tmp_path):
+        with patch("cld.cli.require_docker"), \
+             patch("cld.cli.find_target_repo", return_value=tmp_path), \
+             patch("cld.cli.docker_agent_status", return_value="running"), \
+             patch("cld.cli._shutdown_persistent_container") as shutdown_mock, \
+             patch("cld.cli._forget_session_bookmark") as forget_mock, \
+             patch("cld.cli._stop_and_remove_container") as stop_mock, \
+             patch("cld.cli._run_persistent_devcontainer") as launch_mock:
+            result = runner.invoke(app, ["agent", "restart"])
+        assert result.exit_code == 0, result.output
+        shutdown_mock.assert_not_called()
+        forget_mock.assert_not_called()
+        stop_mock.assert_called_once()
+        launch_mock.assert_called_once()
+
+
+class TestMasterReposCommand:
+    def test_errors_when_not_in_master(self):
+        result = runner.invoke(app, ["master", "repos"])
+        assert result.exit_code == 1
+        assert "master" in result.output.lower()
+
+    def test_lists_own_and_targets(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MASTER_MODE", "1")
+        monkeypatch.setenv("CLD_HOST_PROJECT_DIR", "/host/side/cld")
+        proj = tmp_path / ".cld.config"
+        proj.write_text('master_targets = ["/host/side/foo", "/host/side/bar"]\n')
+        with patch("cld.cli.Config.from_env", return_value=__import__(
+            "cld.config", fromlist=["Config"],
+        ).Config(host_project_dir="/host/side/cld",
+                 master_targets=("/host/side/foo", "/host/side/bar"))):
+            result = runner.invoke(app, ["master", "repos"])
+        assert result.exit_code == 0, result.output
+        assert "/host/side/cld\town" in result.output
+        assert "/host/side/foo\ttarget" in result.output
+        assert "/host/side/bar\ttarget" in result.output
+
+
+class TestChainBlockedInMaster:
+    def test_run_chain_blocked_inside_master(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MASTER_MODE", "1")
+        from cld.chain import run_chain
+        from cld.config import Config
+        chain_file = tmp_path / "c.yaml"
+        chain_file.write_text("name: dummy\nsteps: []\n")
+        with pytest.raises(RuntimeError, match="not yet supported from inside a master"):
+            run_chain(Config(), chain_file)
 
 
 class TestBuildCommand:

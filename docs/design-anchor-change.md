@@ -163,6 +163,16 @@ fresh workspace at the bookmark's last tip. Watchman-driven autosnapshots
 during the previous session's runtime guarantee that uncommitted edits
 made just before shutdown are visible on reattach.
 
+Shutdown of a persistent container (`cld master shutdown` / `cld agent
+shutdown`), in contrast, is terminal for the session. The host forgets
+the bookmark `<session>` from the origin store after `docker rm`, so the
+next `cld <role>` launch runs steps 1--3 again as a fresh lifecycle and
+`-r/--revision` is honored. Commits and op-log snapshots made during the
+prior life stay in the store (reachable via `jj log -r 'heads(all())'`
+and by change ID); only the named pointer is dropped. Invariant: bookmark
+`<session>` exists in the origin store iff a live-or-restart-paused
+lifecycle owns that session.
+
 ### 4.3 Per-command changes
 
 **`cld agent`**

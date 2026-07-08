@@ -420,6 +420,20 @@ def run_chain(
     state_writer: "StateWriter | None" = None,
     anchor_hash: str = "",
 ) -> ChainResult:
+    # Chain orchestration writes host-side scratch into the target repo's
+    # working copy and stages a chain-level anchor there. Neither is possible
+    # from inside a master container (own repo lives in a jj-secondary
+    # workspace; sibling repos aren't visible to master at all). Block until
+    # the chain-runner-in-peer refactor lands. See
+    # docs/design-master-sibling-launch.md.
+    from cld.docker import in_master_container
+    if in_master_container():
+        raise RuntimeError(
+            "`cld chain run` is not yet supported from inside a master container. "
+            "Run chains from the host, or launch individual agents from master "
+            "with `cld agent` / `cld run`."
+        )
+
     repo_root = find_repo_root()
     cld_root = Path(__file__).resolve().parent.parent
     vcs = get_backend()

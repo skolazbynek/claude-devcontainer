@@ -26,14 +26,25 @@ if [ ! -f "$TASK_FILE_MOUNT" ] && [ -z "$AGENT_INLINE_PROMPT" ]; then
     exit 1
 fi
 
-if [ -z "${AGENT_ANCHOR_HASH:-}" ]; then
-    echo "Error: AGENT_ANCHOR_HASH must be set" >&2
-    exit 1
-fi
-
 # Stage host configs before any VCS operation; jj working-copy changes need
 # user.email/user.name from ~/.config/jj.
 copy_host_configs
+
+# Anchor: prefer AGENT_ANCHOR_HASH (host cld staged it before docker run).
+# If unset, run delegated in-peer staging using AGENT_REVISION_HINT +
+# AGENT_SCRATCH (a `cld master` launched us; see docs/design-master-sibling-launch.md).
+if [ -z "${AGENT_ANCHOR_HASH:-}" ]; then
+    if [ -z "${AGENT_SCRATCH:-}" ]; then
+        echo "Error: need AGENT_ANCHOR_HASH or AGENT_SCRATCH" >&2
+        exit 1
+    fi
+    echo "[cld] delegated anchor staging (revision_hint='${AGENT_REVISION_HINT:-@}')"
+    if ! AGENT_ANCHOR_HASH=$(cd "$WORKSPACE_ORIGIN" && python3 -m cld.vcs.scratch); then
+        echo "Error: delegated anchor staging failed" >&2
+        exit 1
+    fi
+    export AGENT_ANCHOR_HASH
+fi
 
 BOOKMARK="$AGENT_NAME"
 ANCHOR="$AGENT_ANCHOR_HASH"

@@ -18,6 +18,9 @@ _LEAKY_VARS = (
     "CLD_HOST_PROJECT_DIR",
     "CLD_HOST_HOME",
     "CLD_MYSQL_CONFIG",
+    "MASTER_MODE",
+    "AGENT_MODE",
+    "MASTER_TARGETS",
 ) + (
     "CLD_LOG_LEVEL",
     "CLD_LOG_COLOR",

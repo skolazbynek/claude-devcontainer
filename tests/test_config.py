@@ -124,3 +124,20 @@ class TestLoadToml:
     def test_filters_unknown_keys(self, tmp_path):
         p = _write(tmp_path / "c.toml", 'base_image = "x"\nbogus = 1\n')
         assert _load_toml(p) == {"base_image": "x"}
+
+
+class TestMasterTargets:
+    def test_master_targets_loaded(self, tmp_path):
+        proj = _write(
+            tmp_path / ".cld.config",
+            'master_targets = ["~/projects/foo", "/abs/bar"]\n',
+        )
+        cfg = Config.from_env(user_config=tmp_path / "u", project_config=proj)
+        assert cfg.master_targets == ("~/projects/foo", "/abs/bar")
+
+    def test_deprecated_key_errors_with_migration_hint(self, tmp_path):
+        proj = _write(tmp_path / ".cld.config", 'master_extra_mounts_ro = ["~/repos"]\n')
+        with pytest.raises(RuntimeError) as excinfo:
+            _load_toml(proj)
+        assert "master_extra_mounts_ro" in str(excinfo.value)
+        assert "master_targets" in str(excinfo.value)

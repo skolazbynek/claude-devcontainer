@@ -7,7 +7,6 @@ ensure_own_mailbox
 MAILBOX_OK=$?
 
 BOOKMARK="${SESSION_NAME:?SESSION_NAME must be set}"
-ANCHOR="${AGENT_ANCHOR_HASH:?AGENT_ANCHOR_HASH must be set}"
 
 cd "$WORKSPACE_ORIGIN"
 
@@ -15,15 +14,34 @@ cd "$WORKSPACE_ORIGIN"
 # /workspace/current. jj stores everything into the origin's .jj/repo/store via
 # the RW bind mount at $WORKSPACE_ORIGIN, so bookmarks and (watchman-driven)
 # snapshots persist across `docker rm && docker run` even though the workspace
-# directory itself does not. If bookmark $BOOKMARK exists this is a restart;
-# reattach by pointing a fresh workspace at the bookmark's last tip. Otherwise
-# it's a first launch and we anchor at $ANCHOR (the split-produced B commit
-# containing .cld-run/*).
+# directory itself does not.
+#
+# Invariant: bookmark $BOOKMARK exists in the origin store <=> a live or
+# restart-paused lifecycle owns this session. `cld <role> restart` preserves
+# the bookmark (reattach at its tip). `cld <role> shutdown` forgets it so the
+# next launch is a fresh lifecycle honoring -r.
 if jj bookmark list -T 'name ++ "\n"' | grep -qx "$BOOKMARK"; then
     echo "[cld] reattaching workspace '$BOOKMARK'"
     jj workspace forget "$BOOKMARK" 2>&1 || true
     jj workspace add --name "$BOOKMARK" -r "$BOOKMARK" /workspace/current
 else
+    # First launch. Anchor comes from AGENT_ANCHOR_HASH (host cld staged it
+    # before docker run) or, if unset, from delegated in-peer staging using
+    # AGENT_REVISION_HINT + AGENT_SCRATCH (a `cld master` launched us; see
+    # docs/design-master-sibling-launch.md).
+    if [ -z "${AGENT_ANCHOR_HASH:-}" ]; then
+        if [ -z "${AGENT_SCRATCH:-}" ]; then
+            echo "Error: need AGENT_ANCHOR_HASH or AGENT_SCRATCH on first launch" >&2
+            exit 1
+        fi
+        echo "[cld] delegated anchor staging (revision_hint='${AGENT_REVISION_HINT:-@}')"
+        if ! AGENT_ANCHOR_HASH=$(python3 -m cld.vcs.scratch); then
+            echo "Error: delegated anchor staging failed" >&2
+            exit 1
+        fi
+        export AGENT_ANCHOR_HASH
+    fi
+    ANCHOR="$AGENT_ANCHOR_HASH"
     echo "[cld] first launch, anchor=${ANCHOR:0:12}"
     jj workspace add --name "$BOOKMARK" -r "$ANCHOR" /workspace/current
     (cd /workspace/current && jj bookmark set "$BOOKMARK" -r @ --allow-backwards)
@@ -72,6 +90,18 @@ elif [ -f "$TASK_FILE_MOUNT" ]; then
 fi
 
 if [ -n "${MASTER_MODE:-}" ]; then
+    # Materialize registered sibling targets as empty placeholder directories
+    # so `cd <target>` inside master's shell succeeds. No bind mount of the
+    # sibling repo exists in master; cld-inside-master resolves cwd to the
+    # host path via config lookup. See docs/design-master-sibling-launch.md.
+    if [ -n "${MASTER_TARGETS:-}" ]; then
+        IFS=':' read -r -a _cld_targets <<< "$MASTER_TARGETS"
+        for t in "${_cld_targets[@]}"; do
+            [ -n "$t" ] || continue
+            mkdir -p "$t" 2>/dev/null || echo "[WARN] could not create placeholder $t" >&2
+        done
+        unset _cld_targets
+    fi
     # Signal readiness as soon as setup is done, before the optional first-launch
     # prompt, so the host can attach immediately no matter how long the prompt runs.
     # /tmp (not /run, which is root-owned 755) is writable by the non-root container user.
@@ -86,7 +116,18 @@ fi
 
 if [ -n "${MASTER_MODE:-}" ]; then
     # PID 1 idles; user shells arrive via `docker exec` from the host.
-    exec sleep infinity
+    # Trap SIGTERM (docker stop) to forget the session bookmark from the
+    # origin's jj store before exit. This is the "peer self-cleanup" leg of
+    # docs/design-master-sibling-launch.md's shutdown mechanism -- master
+    # containers own their bookmark's full lifecycle.
+    _cld_master_shutdown() {
+        (cd "$WORKSPACE_ORIGIN" && jj bookmark forget "$SESSION_NAME" 2>&1) || true
+        exit 0
+    }
+    trap _cld_master_shutdown TERM INT
+    sleep infinity &
+    wait $!
+    exit 0
 fi
 
 if [ -n "${AGENT_MODE:-}" ]; then

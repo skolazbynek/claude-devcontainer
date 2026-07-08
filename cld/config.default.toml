@@ -38,11 +38,12 @@ home_mounts_devcontainer = [
     ".bashrc"
 ]
 
-# Host paths RO same-path bind-mounted into `cld master` containers (only master).
-# Lets you cd into any of these inside master's shell and run `cld agent` against
-# a sibling repo -- the sibling agent container gets RW via the docker socket;
-# master itself never has RW on the target repo.
-# master_extra_mounts_ro = ["~/repos", "~/work"]
+# Host paths registered as launchable targets from inside `cld master`.
+# Each path is materialized as an empty placeholder directory in master's shell
+# (no bind mount, no repo content); `cd <path> && cld agent` launches a peer
+# container with -v <path>:/workspace/origin:rw. Master itself never sees or
+# writes to the target repo.
+# master_targets = ["~/repos/foo", "~/work/bar"]
 
 # SSH agent forwarding into devcontainer sessions.
 # Omit this key to auto-detect from the host's $SSH_AUTH_SOCK.

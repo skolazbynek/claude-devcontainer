@@ -18,6 +18,7 @@ from cld.chain_state import ChainState, StateWriter, write_state, _utcnow_iso
 from cld.config import Config
 from cld.docker import (
     agent_container_name,
+    anchor_env_args,
     base_extra_paths,
     build_container_args,
     build_session_name,
@@ -27,8 +28,9 @@ from cld.docker import (
     docker_master_list,
     docker_master_status,
     ensure_image,
-    find_repo_context,
     find_repo_root,
+    find_target_repo,
+    in_master_container,
     master_container_name,
     require_docker,
     run_extra_paths,
@@ -181,18 +183,11 @@ def _run_devcontainer(
         ),
     )
 
-    repo_root, _workspace_rev = find_repo_context()
     session = build_session_name("cld", name)
-
-    vcs = get_backend()
-    base_anchor = resolve_anchor(vcs, revision)
-    anchor_hash = stage_anchor_with_scratch(
-        vcs, base_anchor, session, {"session": f"{session}\n".encode()},
-    )
-    log.info(f"Anchor: {anchor_hash[:12]} (base={base_anchor[:12]})")
+    repo_root = find_target_repo(cfg)
 
     args = build_container_args(repo_root, session, cfg, interactive=True)
-    args += ["-e", f"AGENT_ANCHOR_HASH={anchor_hash}"]
+    args += anchor_env_args(cfg, session, revision)
     if task_path:
         host_task = to_host_path(str(task_path.resolve()), cfg)
         args += ["-v", f"{host_task}:/config/task.md:ro"]
@@ -278,7 +273,7 @@ def _run_persistent_devcontainer(
         ),
     )
 
-    repo_root, _ = find_repo_context()
+    repo_root = find_target_repo(cfg)
     session = _persistent_container_name(role, repo_root)
     status = _persistent_container_status(role, session)
     log.info("%s devcontainer: name=%s, status=%s", role, session, status)
@@ -307,19 +302,14 @@ def _run_persistent_devcontainer(
     # the anchor B commit. On a subsequent restart the bookmark `<session>`
     # already exists in the origin store; the entrypoint detects it and
     # reattaches without re-staging an anchor, so this path only runs on the
-    # very first launch.
-    vcs = get_backend()
-    base_anchor = resolve_anchor(vcs, revision)
-    anchor_hash = stage_anchor_with_scratch(
-        vcs, base_anchor, session, {"session": f"{session}\n".encode()},
-    )
-    log.info("Anchor: %s (base=%s)", anchor_hash[:12], base_anchor[:12])
-
+    # very first launch. Inside master, `anchor_env_args` emits an unresolved
+    # revision hint + scratch envelope so the peer's entrypoint does the
+    # anchor work locally (master has no RW view of a sibling target).
     args = build_container_args(
         repo_root, session, cfg, interactive=False,
         master=(role == "master"), agent=(role == "agent"),
     )
-    args += ["-e", f"AGENT_ANCHOR_HASH={anchor_hash}"]
+    args += anchor_env_args(cfg, session, revision)
     if task_path:
         host_task = to_host_path(str(task_path.resolve()), cfg)
         args += ["-v", f"{host_task}:/config/task.md:ro"]
@@ -380,7 +370,7 @@ def _do_shutdown(role: str, all_: bool) -> None:
         if failed:
             raise typer.Exit(1)
         return
-    repo_root, _ = find_repo_context()
+    repo_root = find_target_repo(cfg)
     container_name = _persistent_container_name(role, repo_root)
     if _persistent_container_status(role, container_name) == "absent":
         typer.echo(f"No {role} container found for this repo.")
@@ -393,11 +383,13 @@ def _do_restart(role: str) -> None:
     require_docker()
     cfg = Config.from_env()
     setup_logging(cfg)
-    repo_root, _ = find_repo_context()
+    repo_root = find_target_repo(cfg)
     container_name = _persistent_container_name(role, repo_root)
     if _persistent_container_status(role, container_name) == "absent":
         typer.echo(f"No {role} container to restart. Start one with: cld {role}", err=True)
         raise typer.Exit(1)
+    # Bypasses _shutdown_persistent_container so the session bookmark
+    # survives; the container entrypoint reattaches at its tip.
     _stop_and_remove_container(container_name)
     _run_persistent_devcontainer(role, None, "", "", "", "", cfg)
 
@@ -405,7 +397,7 @@ def _do_restart(role: str) -> None:
 def _do_status(role: str) -> None:
     cfg = Config.from_env()
     setup_logging(cfg)
-    repo_root, _ = find_repo_context()
+    repo_root = find_target_repo(cfg)
     container_name = _persistent_container_name(role, repo_root)
     docker_status = _persistent_container_status(role, container_name)
     typer.echo(f"{role.capitalize()}: {container_name}")
@@ -434,7 +426,7 @@ def _do_logs(role: str, tail: int) -> None:
     require_docker()
     cfg = Config.from_env()
     setup_logging(cfg)
-    repo_root, _ = find_repo_context()
+    repo_root = find_target_repo(cfg)
     container_name = _persistent_container_name(role, repo_root)
     if _persistent_container_status(role, container_name) == "absent":
         typer.echo(f"No {role} container found for this repo.", err=True)
@@ -512,6 +504,30 @@ def master_logs(
     _do_logs("master", tail)
 
 
+@master_app.command("repos")
+@_handle_errors
+def master_repos():
+    """List host repos this master can launch peer containers against.
+
+    Only meaningful from inside a master container. Prints one path per line,
+    tagged 'own' for master's own repo (from CLD_HOST_PROJECT_DIR) and 'target'
+    for each entry in `master_targets`.
+    """
+    if not in_master_container():
+        typer.echo(
+            "Error: `cld master repos` only works from inside a master container. "
+            "Attach with `cld master` first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    if cfg.host_project_dir:
+        typer.echo(f"{cfg.host_project_dir}\town")
+    for entry in cfg.master_targets:
+        typer.echo(f"{os.path.expanduser(entry)}\ttarget")
+
+
 # --- Persistent repo agent (headless, mailbox-driven, per-repo) ---------------
 agent_app = typer.Typer(
     help="Persistent per-repo headless Claude agent (mailbox-driven; see docs/design-agent-messaging.md).",
@@ -575,15 +591,51 @@ def _stop_and_remove_container(name: str) -> None:
 
 
 def _shutdown_persistent_container(role: str, name: str, repo_root_str: str, session: str) -> bool:
-    """Stop and remove a master/agent container.
+    """Stop and remove a master/agent container; end the session's lifecycle.
 
-    The workspace lives inside the container's ephemeral filesystem, so
-    `docker rm` drops it automatically. The bookmark `<session>` and any
-    committed work remain in the origin's jj store for later reattach.
+    `docker rm` drops the ephemeral workspace. Forgetting the bookmark
+    `<session>` in the origin's jj store makes the next `cld <role>` launch
+    a fresh lifecycle (honoring `-r/--revision` again). Committed work and
+    op-log snapshots remain in the store, reachable by change ID -- see
+    `jj log -r 'heads(all())'`. `cld <role> restart` bypasses this function
+    (calls `_stop_and_remove_container` directly) so restart preserves the
+    bookmark and reattaches.
     """
     _stop_and_remove_container(name)
+    _forget_session_bookmark(repo_root_str, session)
     typer.echo(f"Stopped and removed {role} container: {name}")
     return True
+
+
+def _forget_session_bookmark(repo_root_str: str, session: str) -> None:
+    """Drop the session bookmark from the origin's jj store. Best-effort."""
+    repo_root = Path(repo_root_str)
+    if not repo_root.is_dir():
+        log.warning(
+            "Cannot forget bookmark %s: repo_root %s no longer exists. "
+            "Recover manually with: cd <repo> && jj bookmark forget %s",
+            session, repo_root, session,
+        )
+        return
+    try:
+        backend = get_backend(repo_root)
+    except RuntimeError as e:
+        log.warning(
+            "Cannot forget bookmark %s in %s: %s. "
+            "Recover manually with: cd %s && jj bookmark forget %s",
+            session, repo_root, e, repo_root, session,
+        )
+        return
+    if backend.name != "jj":
+        return
+    result = backend.run(["bookmark", "forget", session])
+    if result.returncode != 0:
+        log.warning(
+            "jj bookmark forget %s failed (rc=%d): %s. "
+            "Next `cld` launch may reattach to the stale bookmark; "
+            "recover with: cd %s && jj bookmark forget %s",
+            session, result.returncode, result.stderr.strip(), repo_root, session,
+        )
 
 
 @app.command()

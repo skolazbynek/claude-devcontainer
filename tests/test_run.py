@@ -50,13 +50,12 @@ class TestLaunchAgentExtensions:
 
         with (
             patch("cld.run.require_docker"),
-            patch("cld.run.find_repo_context", return_value=(Path("/fake/repo"), "")),
+            patch("cld.run.find_target_repo", return_value=Path("/fake/repo")),
             patch("cld.run.get_backend", return_value=mock_vcs),
             patch("cld.run.ensure_image"),
             patch("cld.run.build_session_name", return_value=session),
             patch("cld.run.build_container_args", return_value=[]),
-            patch("cld.run.resolve_anchor", return_value="deadbeef1234"),
-            patch("cld.run.stage_anchor_with_scratch", return_value="cafef00d1234"),
+            patch("cld.run.anchor_env_args", return_value=["-e", "AGENT_ANCHOR_HASH=cafef00d1234"]),
             patch("cld.run.subprocess.run", return_value=docker_result) as mock_run,
         ):
             launch_run(Config(), quiet=True, **kwargs)

@@ -217,6 +217,99 @@ def ensure_image(
     return expected
 
 
+def in_master_container() -> bool:
+    """True when the current process is running inside a `cld master` container."""
+    return bool(os.environ.get("MASTER_MODE"))
+
+
+def find_target_repo(cfg: Config) -> Path:
+    """Return the host path of the repo to target for a peer launch.
+
+    On the host, delegates to `find_repo_context()` (cwd-walk for .jj/.git).
+    Inside master, uses `resolve_master_target(Path.cwd(), cfg)` -- either
+    master's own repo (host path from CLD_HOST_PROJECT_DIR) or one of the
+    registered `master_targets` entries.
+    """
+    if in_master_container():
+        return Path(resolve_master_target(Path.cwd(), cfg))
+    return find_repo_context()[0]
+
+
+def anchor_env_args(cfg: Config, session: str, revision: str) -> list[str]:
+    """Return the docker `-e` args carrying anchor info to a peer container.
+
+    - On the host (traditional flow): stage the anchor here and emit
+      `AGENT_ANCHOR_HASH=<B>`. Reads jj history in the current working copy.
+    - Inside a master container (delegated flow): emit only
+      `AGENT_REVISION_HINT` and `AGENT_SCRATCH` and let the peer's entrypoint
+      run `resolve_anchor` + `stage_anchor_with_scratch` locally where its
+      view of the target repo is RW. Master does no jj read or write.
+    """
+    from cld.vcs import get_backend
+    from cld.vcs.anchor import resolve_anchor
+    from cld.vcs.scratch import encode_scratch_envelope, stage_anchor_with_scratch
+
+    scratch = {"session": f"{session}\n".encode()}
+
+    if in_master_container():
+        payload = encode_scratch_envelope(scratch)
+        return [
+            "-e", f"AGENT_REVISION_HINT={revision}",
+            "-e", f"AGENT_SCRATCH={payload}",
+        ]
+
+    vcs = get_backend()
+    base = resolve_anchor(vcs, revision)
+    anchor_hash = stage_anchor_with_scratch(vcs, base, session, scratch)
+    log.info("Anchor: %s (base=%s)", anchor_hash[:12], base[:12])
+    return ["-e", f"AGENT_ANCHOR_HASH={anchor_hash}"]
+
+
+def resolve_master_target(cwd: Path, cfg: Config) -> str:
+    """From inside a master container, return the host path of the target repo
+    selected by *cwd*.
+
+    Resolution:
+    - cwd (or ancestor) under ``/workspace/current`` or ``/workspace/origin``
+      → master's own repo, host path from ``CLD_HOST_PROJECT_DIR``.
+    - cwd (or ancestor) matches an entry in ``MASTER_TARGETS`` (colon-separated)
+      → that entry.
+    - Otherwise → RuntimeError with a hint about adding the path to
+      ``master_targets`` in cld config.
+
+    Only meaningful inside a master container; raises RuntimeError elsewhere.
+    """
+    if not in_master_container():
+        raise RuntimeError("resolve_master_target: not running inside a cld master container")
+    cwd = cwd.resolve()
+
+    def _is_within(child: Path, parent: str) -> bool:
+        parent_p = Path(parent)
+        try:
+            child.relative_to(parent_p)
+            return True
+        except ValueError:
+            return False
+
+    if _is_within(cwd, "/workspace/current") or _is_within(cwd, "/workspace/origin"):
+        if not cfg.host_project_dir:
+            raise RuntimeError(
+                "resolve_master_target: cwd is under /workspace/* but CLD_HOST_PROJECT_DIR "
+                "is unset -- master container was launched without host-path plumbing"
+            )
+        return cfg.host_project_dir
+
+    targets = [t for t in os.environ.get("MASTER_TARGETS", "").split(":") if t]
+    for entry in targets:
+        if _is_within(cwd, entry):
+            return entry
+
+    raise RuntimeError(
+        f"cwd {cwd} is not a registered target in this master. "
+        "Add its host path to `master_targets` in cld config and restart master."
+    )
+
+
 def to_host_path(path: str, cfg: Config) -> str:
     """Translate a container-internal path to the corresponding host path.
 
@@ -399,22 +492,27 @@ def build_container_args(
         args += ["-v", f"{host_mailbox_root}:{MAILBOX_MOUNT}:rw"]
         log.info("Mailbox mounted: %s -> %s", host_mailbox_root, MAILBOX_MOUNT)
 
-    # Master-only: RO same-path bind-mounts so the user can cd into any of
-    # these inside master's shell and run `cld agent` against a sibling repo.
-    # Same-path alignment (host path == container path) means path translation
-    # becomes an identity for anything under these roots.
-    if master:
-        for entry in cfg.master_extra_mounts_ro:
+    # Master-only: publish the registered sibling target paths as an env var
+    # so master's entrypoint can materialize them as empty placeholder
+    # directories (see docs/design-master-sibling-launch.md). Master gets no
+    # bind mount of a sibling repo -- the placeholder just lets `cd <path>`
+    # succeed and lets cld-inside-master resolve cwd to the host path.
+    # Host paths must exist on the host so the peer's -v mount will succeed
+    # later; we fail fast here rather than at peer-launch time.
+    if master and cfg.master_targets:
+        expanded_targets: list[str] = []
+        for entry in cfg.master_targets:
             expanded = os.path.expanduser(entry)
             if not Path(expanded).exists():
                 log.error(
-                    "master_extra_mounts_ro entry does not exist on host: %s "
+                    "master_targets entry does not exist on host: %s "
                     "(expanded from %r). Remove it or create the directory.",
                     expanded, entry,
                 )
                 sys.exit(1)
-            args += ["-v", f"{expanded}:{expanded}:ro"]
-            log.info("Master RO mount: %s (same-path)", expanded)
+            expanded_targets.append(expanded)
+            log.info("Master target registered: %s", expanded)
+        args += ["-e", "MASTER_TARGETS=" + ":".join(expanded_targets)]
 
     log.debug("Container args: %s", mask_secrets(repr(args)))
     return args

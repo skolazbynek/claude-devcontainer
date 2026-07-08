@@ -7,10 +7,13 @@ import pytest
 from cld.config import Config, _load_dotenv
 from cld.docker import (
     agent_container_name,
-    to_host_path,
+    anchor_env_args,
     build_session_name,
     find_repo_root,
+    in_master_container,
+    resolve_master_target,
     stage_home_ro,
+    to_host_path,
 )
 
 
@@ -147,3 +150,61 @@ class TestStageHomeRo:
         # not, so the host-translated string is just the resolved tmp path.
         args = stage_home_ro(".bashrc", cfg)
         assert args[1].startswith(str(tmp_path.resolve()) + "/.bashrc:")
+
+
+class TestResolveMasterTarget:
+    def test_errors_when_not_in_master(self, tmp_path):
+        # clean_env fixture already unsets MASTER_MODE
+        with pytest.raises(RuntimeError, match="not running inside a cld master"):
+            resolve_master_target(tmp_path, Config())
+
+    def test_own_repo_via_workspace_origin(self, monkeypatch):
+        monkeypatch.setenv("MASTER_MODE", "1")
+        cfg = Config(host_project_dir="/host/side/cld")
+        # /workspace/current is master's ephemeral workspace path. Path.resolve
+        # is lenient about non-existent paths so this works even on the host.
+        from pathlib import Path
+        assert resolve_master_target(Path("/workspace/current"), cfg) == "/host/side/cld"
+        assert resolve_master_target(Path("/workspace/origin/sub"), cfg) == "/host/side/cld"
+
+    def test_own_repo_errors_without_host_project_dir(self, monkeypatch):
+        monkeypatch.setenv("MASTER_MODE", "1")
+        from pathlib import Path
+        with pytest.raises(RuntimeError, match="CLD_HOST_PROJECT_DIR is unset"):
+            resolve_master_target(Path("/workspace/current"), Config())
+
+    def test_matches_master_targets_entry(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MASTER_MODE", "1")
+        target = tmp_path / "projects" / "foo"
+        (target / "subdir").mkdir(parents=True)
+        monkeypatch.setenv("MASTER_TARGETS", f"{target}:{tmp_path}/other")
+        assert resolve_master_target(target, Config()) == str(target)
+        assert resolve_master_target(target / "subdir", Config()) == str(target)
+
+    def test_unknown_cwd_errors(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MASTER_MODE", "1")
+        monkeypatch.setenv("MASTER_TARGETS", "")
+        elsewhere = tmp_path / "unrelated"
+        elsewhere.mkdir()
+        with pytest.raises(RuntimeError, match="not a registered target"):
+            resolve_master_target(elsewhere, Config())
+
+
+class TestAnchorEnvArgsMasterMode:
+    def test_master_mode_emits_hint_and_scratch(self, monkeypatch):
+        monkeypatch.setenv("MASTER_MODE", "1")
+        args = anchor_env_args(Config(), "sess1", "myrev")
+        # Args are alternating -e / KEY=VAL entries.
+        values = args[1::2]
+        assert "AGENT_REVISION_HINT=myrev" in values
+        assert any(v.startswith("AGENT_SCRATCH=") for v in values)
+        assert not any("AGENT_ANCHOR_HASH" in v for v in values)
+
+
+class TestInMasterContainer:
+    def test_true_when_env_set(self, monkeypatch):
+        monkeypatch.setenv("MASTER_MODE", "1")
+        assert in_master_container() is True
+
+    def test_false_when_unset(self):
+        assert in_master_container() is False

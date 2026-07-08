@@ -207,8 +207,29 @@ class AgentSupervisor:
                 time.sleep(self.poll_interval)
                 continue
             self.process_one(msg_id)
+        self._forget_session_bookmark()
         self._write_state("stopped")
         log.info("supervisor stopped cleanly")
+
+    def _forget_session_bookmark(self) -> None:
+        """Peer self-cleanup: drop the session bookmark from the origin store on
+        exit so `cld agent shutdown` yields a fresh lifecycle on next start.
+        See docs/design-master-sibling-launch.md (Shutdown / bookmark cleanup).
+        """
+        origin = os.environ.get("WORKSPACE_ORIGIN", "/workspace/origin")
+        try:
+            result = subprocess.run(
+                ["jj", "bookmark", "forget", self.session_name],
+                cwd=origin, capture_output=True, text=True,
+            )
+        except OSError as e:
+            log.warning("could not run jj bookmark forget: %s", e)
+            return
+        if result.returncode != 0:
+            log.warning(
+                "jj bookmark forget %s failed (rc=%d): %s",
+                self.session_name, result.returncode, (result.stderr or "").strip(),
+            )
 
 
 def main() -> None:

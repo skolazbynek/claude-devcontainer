@@ -1,8 +1,8 @@
-"""Host-side anchor + scratch staging.
+"""Anchor + scratch staging.
 
 `stage_anchor_with_scratch` writes cld-scratch files (`.cld-run/*`) into the
-host's working copy, then uses `jj split --onto <anchor>` to extract them into
-a dedicated child commit ``B`` of the anchor. ``B``'s hash becomes the
+working copy of a repo, then uses `jj split --onto <anchor>` to extract them
+into a dedicated child commit ``B`` of the anchor. ``B``'s hash becomes the
 container's `AGENT_ANCHOR_HASH` so the agent's workspace is layered on top of
 `B` (and thus sees the scratch files as tracked history rooted in the anchor
 tree). The user's original working-copy change stays where it was, minus the
@@ -11,8 +11,18 @@ tree). The user's original working-copy change stays where it was, minus the
 `.cld-run/` MUST NOT be gitignored: the split relies on jj snapshotting those
 paths into a commit. This module raises a clear error if the repo's ignore
 rules would exclude them.
+
+This module runs both host-side (traditional inline flow) and peer-side
+(delegated flow used when a `cld master` container launches a sibling: see
+docs/design-master-sibling-launch.md). The peer-side entrypoint invokes
+`python -m cld.vcs.scratch` which reads the delegated envelope from env and
+prints the resulting anchor hash to stdout.
 """
 
+import base64
+import json
+import os
+import sys
 from pathlib import Path
 
 from cld.log import get_logger
@@ -176,3 +186,54 @@ def _best_effort_undo(vcs: VcsBackend, pre_op_id: str, written: list[Path]) -> N
                 scratch_dir.rmdir()
         except OSError:
             pass
+
+
+def encode_scratch_envelope(scratch: dict[str, bytes]) -> str:
+    """Serialize `scratch` to a base64 string safe to carry through `docker run -e`."""
+    inner = {k: base64.b64encode(v).decode("ascii") for k, v in scratch.items()}
+    return base64.b64encode(json.dumps(inner).encode("utf-8")).decode("ascii")
+
+
+def decode_scratch_envelope(payload: str) -> dict[str, bytes]:
+    """Inverse of `encode_scratch_envelope`. Raises RuntimeError on malformed input."""
+    try:
+        inner = json.loads(base64.b64decode(payload).decode("utf-8"))
+        return {k: base64.b64decode(v) for k, v in inner.items()}
+    except (ValueError, TypeError) as e:
+        raise RuntimeError(f"AGENT_SCRATCH could not be decoded: {e}") from e
+
+
+def stage_from_env() -> str:
+    """Peer-side entrypoint: read the delegated envelope and stage the anchor.
+
+    Reads:
+    - ``WORKSPACE_ORIGIN`` -- absolute path to the repo checkout inside the peer
+      container (RW). ``get_backend`` picks this up automatically.
+    - ``SESSION_NAME``     -- required.
+    - ``AGENT_REVISION_HINT`` -- unresolved revision string (empty = default @).
+    - ``AGENT_SCRATCH``    -- base64 envelope from `encode_scratch_envelope`.
+
+    Returns the resulting anchor commit hash (B).
+    """
+    from cld.vcs import get_backend
+    from cld.vcs.anchor import resolve_anchor
+
+    session = os.environ.get("SESSION_NAME") or ""
+    if not session:
+        raise RuntimeError("stage_from_env: SESSION_NAME is required")
+    scratch_b64 = os.environ.get("AGENT_SCRATCH") or ""
+    if not scratch_b64:
+        raise RuntimeError("stage_from_env: AGENT_SCRATCH is required")
+    scratch = decode_scratch_envelope(scratch_b64)
+
+    vcs = get_backend()
+    base = resolve_anchor(vcs, os.environ.get("AGENT_REVISION_HINT") or "")
+    return stage_anchor_with_scratch(vcs, base, session, scratch)
+
+
+if __name__ == "__main__":
+    try:
+        print(stage_from_env())
+    except Exception as e:  # noqa: BLE001 -- surface any staging error to the shell caller
+        print(f"stage_from_env failed: {e}", file=sys.stderr)
+        sys.exit(1)
