@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Tooling for running Claude Code in Docker containers with VCS workspace isolation. Supports **jujutsu (jj)** natively and falls back to **git** when jj is not installed.
 
+> **Developer workflows / use-cases:** see `docs/workflows-brainstorm.md` for the end-to-end, multi-command developer journeys this tool is meant to support (hub, backlog burn-down, chain, cross-repo change, standing teammate).
+
 - **Ephemeral devcontainer** (`cld` bare) -- Interactive session with neovim, jj/git, poetry. Drops into bash with `--dangerously-skip-permissions`. Container is `--rm`.
 - **Persistent master** (`cld master`) -- Persistent per-repo interactive devcontainer. Start-or-attach; idempotent per repo. Same interactive shell as the ephemeral one, but stays up so packages/history/state persist across attaches.
 - **Persistent repo agent** (`cld agent`) -- Persistent per-repo headless Claude agent. Runs the `claude-devcontainer` image with `AGENT_MODE=1`; the entrypoint execs the supervisor daemon (`python -m cld.messenger.agent_loop`). Receives tasks via the mailbox/messenger transport (see "Messenger" below and `docs/design-agent-messaging.md`). One long-lived Claude session per repo.

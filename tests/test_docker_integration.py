@@ -120,6 +120,18 @@ class TestBuildContainerArgs:
         assert "org.cld.kind=agent" in args
         assert "AGENT_MODE=1" in env_pairs
 
+    def test_master_target_outside_home_fails_fast(self, jj_repo, tmp_path):
+        # Placeholders can only be mirrored under the container $HOME, so a
+        # target outside the host home dir must be rejected at build time
+        # rather than silently failing to materialize inside master.
+        outside = tmp_path / "repo-outside-home"
+        outside.mkdir()
+        cfg = Config(master_targets=(str(outside),), mailbox_root=str(tmp_path / "mb"))
+        with pytest.raises(SystemExit):
+            build_container_args(
+                jj_repo.repo_root, "cld_master_x_abcd1234", cfg, master=True
+            )
+
     def test_nested_mailbox_mount_does_not_mkdir_or_touch_docker(self, jj_repo, caplog):
         """When host_project_dir/host_home make us 'nested' (cld running inside
         another container), the real host path isn't in our filesystem view.

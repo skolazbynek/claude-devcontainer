@@ -31,6 +31,7 @@ from cld.docker import (
     find_repo_root,
     find_target_repo,
     in_master_container,
+    MAILBOX_MOUNT,
     master_container_name,
     require_docker,
     run_extra_paths,
@@ -389,7 +390,7 @@ def _do_restart(role: str) -> None:
         raise typer.Exit(1)
     # Bypasses _shutdown_persistent_container so the session bookmark
     # survives; the container entrypoint reattaches at its tip.
-    _stop_and_remove_container(container_name)
+    _stop_and_remove_container(container_name, restart=True)
     _run_persistent_devcontainer(role, None, "", "", "", "", cfg)
 
 
@@ -403,7 +404,10 @@ def _do_status(role: str) -> None:
     typer.echo(f"  Container: {docker_status}")
     if role != "agent":
         return
-    state_path = Path(cfg.mailbox_root).expanduser() / container_name / "state.json"
+    # Inside master the host mailbox_root ($HOME/.cld/mailboxes) is not mounted;
+    # only MAILBOX_MOUNT is. Use it so `cld agent status` works from master too.
+    mailbox_root = Path(MAILBOX_MOUNT) if in_master_container() else Path(cfg.mailbox_root).expanduser()
+    state_path = mailbox_root / container_name / "state.json"
     if not state_path.is_file():
         typer.echo("  Supervisor state: unavailable (not started yet, or mailbox_root misconfigured)")
         return
@@ -582,10 +586,24 @@ def agent_logs(
     _do_logs("agent", tail)
 
 
-def _stop_and_remove_container(name: str) -> None:
-    """Stop and remove a container. Idempotent."""
+def _stop_and_remove_container(name: str, *, restart: bool = False) -> None:
+    """Stop and remove a container. Idempotent.
+
+    restart=True stops via SIGUSR1 so the container keeps its session bookmark
+    for the fresh container to reattach, waiting briefly for a clean exit and
+    falling back to SIGKILL (which also skips the forget) past the grace
+    period. A plain stop (SIGTERM) lets the container forget its bookmark.
+    """
     log.info("Stopping container: %s", name)
-    subprocess.run(["docker", "stop", name], capture_output=True)
+    if restart:
+        subprocess.run(["docker", "kill", "--signal=SIGUSR1", name], capture_output=True)
+        try:
+            subprocess.run(["docker", "wait", name], capture_output=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            subprocess.run(["docker", "kill", name], capture_output=True)
+            subprocess.run(["docker", "wait", name], capture_output=True)
+    else:
+        subprocess.run(["docker", "stop", name], capture_output=True)
     subprocess.run(["docker", "rm", name], capture_output=True)
 
 
@@ -651,6 +669,13 @@ def _forget_session_state(repo_root_str: str, session: str) -> None:
 def build(no_cache: bool = typer.Option(False, "--no-cache", help="Force rebuild without cache")):
     """Build base, devcontainer, and run images (base first)."""
     require_docker()
+    if in_master_container():
+        typer.echo(
+            "Error: images cannot be built from inside a master container "
+            "(no build context). Run `cld build` on the host instead.",
+            err=True,
+        )
+        raise typer.Exit(1)
     cfg = Config.from_env()
     setup_logging(cfg)
     log.info("build: no_cache=%s", no_cache)

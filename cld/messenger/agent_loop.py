@@ -84,6 +84,7 @@ class AgentSupervisor:
         self.cost_usd_total = 0.0
         self.started_at = _now_iso()
         self._stop = False
+        self._restarting = False
 
         mailbox.ensure_mailbox(mailbox_root, session_name)
         self.state_path = mailbox.mailbox_dir(mailbox_root, session_name) / "state.json"
@@ -197,8 +198,14 @@ class AgentSupervisor:
         log.info("stop requested (SIGTERM)")
         self._stop = True
 
+    def request_restart(self, *_args) -> None:
+        log.info("restart requested (SIGUSR1); keeping session bookmark for reattach")
+        self._restarting = True
+        self._stop = True
+
     def run(self) -> None:
         signal.signal(signal.SIGTERM, self.request_stop)
+        signal.signal(signal.SIGUSR1, self.request_restart)
         self.kickoff()
         log.info("supervisor idle, polling %s every %.1fs", self.session_name, self.poll_interval)
         while not self._stop:
@@ -207,7 +214,8 @@ class AgentSupervisor:
                 time.sleep(self.poll_interval)
                 continue
             self.process_one(msg_id)
-        self._forget_session_bookmark()
+        if not self._restarting:
+            self._forget_session_bookmark()
         self._write_state("stopped")
         log.info("supervisor stopped cleanly")
 

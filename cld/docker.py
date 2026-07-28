@@ -163,6 +163,23 @@ def ensure_image(
     MCP stdio servers where stdout = JSON-RPC and must stay clean.
     Returns the content hash of the (now-current) image.
     """
+    if in_master_container():
+        # Inside a master container we share the host's docker daemon (so its
+        # images are already visible) but have no build context -- imgs/ isn't
+        # baked into /opt/cld -- and the host owns image building. Never attempt
+        # a rebuild here; trust the host-built image, or fail clearly if the
+        # host never built it.
+        exists = bool(subprocess.run(
+            ["docker", "images", "-q", image], capture_output=True, text=True,
+        ).stdout.strip())
+        if not exists:
+            raise RuntimeError(
+                f"image '{image}' not found and cannot be built from inside a "
+                "master container. Build it on the host first with `cld build`."
+            )
+        log.debug("inside master; trusting host-built image %s (no rebuild)", image)
+        return ""
+
     parent_hash: str | None = None
     if parent_image:
         parent_name, parent_dockerfile, parent_context, parent_extras = parent_image
@@ -299,8 +316,13 @@ def resolve_master_target(cwd: Path, cfg: Config) -> str:
         return cfg.host_project_dir
 
     targets = [t for t in os.environ.get("MASTER_TARGETS", "").split(":") if t]
+    # Placeholder dirs live at the container mirror of each host target (the
+    # devcontainer entrypoint swaps the host-home prefix for $HOME). Translate
+    # cwd back to its host path before matching so a cwd under the mirror
+    # resolves to the registered host target.
+    cwd_host = Path(to_host_path(str(cwd), cfg))
     for entry in targets:
-        if _is_within(cwd, entry):
+        if _is_within(cwd_host, entry):
             return entry
 
     raise RuntimeError(
@@ -507,6 +529,17 @@ def build_container_args(
                     "master_targets entry does not exist on host: %s "
                     "(expanded from %r). Remove it or create the directory.",
                     expanded, entry,
+                )
+                sys.exit(1)
+            # Peer placeholders are mirrored under the container $HOME (the only
+            # writable root), so a target must live under the host home dir.
+            if expanded != home and not expanded.startswith(home + os.sep):
+                log.error(
+                    "master_targets entry is not under your home directory: %s "
+                    "(expanded from %r). Placeholders can only be mirrored under "
+                    "%s inside master; move the repo under your home dir or "
+                    "launch it directly (not via master).",
+                    expanded, entry, home,
                 )
                 sys.exit(1)
             expanded_targets.append(expanded)

@@ -181,6 +181,19 @@ class TestResolveMasterTarget:
         assert resolve_master_target(target, Config()) == str(target)
         assert resolve_master_target(target / "subdir", Config()) == str(target)
 
+    def test_matches_via_container_mirror(self, monkeypatch):
+        # Placeholder dirs live at the container mirror ($HOME/...) of a host
+        # target; resolve translates cwd back to the host path before matching.
+        monkeypatch.setenv("MASTER_MODE", "1")
+        host_target = "/home/host/projects/foo"
+        monkeypatch.setenv("MASTER_TARGETS", host_target)
+        cfg = Config(host_home="/home/host")
+        from pathlib import Path
+        from cld.docker import CONTAINER_HOME
+        mirror = Path(f"{CONTAINER_HOME}/projects/foo")
+        assert resolve_master_target(mirror, cfg) == host_target
+        assert resolve_master_target(mirror / "subdir", cfg) == host_target
+
     def test_unknown_cwd_errors(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MASTER_MODE", "1")
         monkeypatch.setenv("MASTER_TARGETS", "")
@@ -188,6 +201,41 @@ class TestResolveMasterTarget:
         elsewhere.mkdir()
         with pytest.raises(RuntimeError, match="not a registered target"):
             resolve_master_target(elsewhere, Config())
+
+
+class TestEnsureImageNested:
+    def test_trusts_host_image_when_present(self, monkeypatch):
+        # Inside master (MASTER_MODE set) ensure_image must not build; it probes
+        # the shared daemon and returns if the host-built image is present.
+        monkeypatch.setenv("MASTER_MODE", "1")
+        import cld.docker as docker_mod
+        from pathlib import Path
+        from unittest.mock import MagicMock, patch
+        with patch.object(docker_mod.subprocess, "run") as run_mock:
+            run_mock.return_value = MagicMock(stdout="deadbeef\n")
+            result = docker_mod.ensure_image(
+                "claude-devcontainer:latest",
+                Path("/opt/cld/imgs/x/Dockerfile"),
+                Path("/opt/cld"),
+            )
+        assert result == ""
+        cmds = [c.args[0] for c in run_mock.call_args_list]
+        assert all("build" not in cmd for cmd in cmds)  # never attempts a build
+        assert any(cmd[:3] == ["docker", "images", "-q"] for cmd in cmds)
+
+    def test_raises_when_host_image_missing(self, monkeypatch):
+        monkeypatch.setenv("MASTER_MODE", "1")
+        import cld.docker as docker_mod
+        from pathlib import Path
+        from unittest.mock import MagicMock, patch
+        with patch.object(docker_mod.subprocess, "run") as run_mock:
+            run_mock.return_value = MagicMock(stdout="")
+            with pytest.raises(RuntimeError, match="cannot be built from inside a master"):
+                docker_mod.ensure_image(
+                    "missing:img",
+                    Path("/opt/cld/imgs/x/Dockerfile"),
+                    Path("/opt/cld"),
+                )
 
 
 class TestAnchorEnvArgsMasterMode:

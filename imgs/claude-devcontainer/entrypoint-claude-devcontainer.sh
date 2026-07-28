@@ -26,6 +26,22 @@ cd "$WORKSPACE_ORIGIN"
 # --name` fail with "Workspace named X already exists" -- silently, since
 # there's no set -e -- and leave /workspace/current an empty dir. No-op when
 # absent (first-ever launch).
+if [ -e /workspace/current/.jj ]; then
+    # Warm restart: `docker start` of a stopped container (not `docker rm &&
+    # docker run`). The ephemeral /workspace/current and its jj workspace
+    # registration persisted along with the container's writable layer, so
+    # installed packages, history, and in-progress edits are all intact. Do
+    # NOT forget + re-add -- `jj workspace add` refuses a non-empty dir and
+    # would crash the boot (exit 1). Reuse the workspace in place, reconcile a
+    # possibly-stale working copy (a sibling workspace on the same origin store
+    # may have advanced it), and recover the anchor for downstream consumers.
+    echo "[cld] warm restart: reusing existing workspace at /workspace/current"
+    (cd /workspace/current && jj workspace update-stale 2>/dev/null || true)
+    AGENT_ANCHOR_HASH=$(jj log --no-graph -n 1 \
+        -r "heads(ancestors(${BOOKMARK}) & description(exact:'cld anchor: ${SESSION_NAME}'))" \
+        -T commit_id 2>/dev/null || true)
+    export AGENT_ANCHOR_HASH
+else
 jj workspace forget "$BOOKMARK" 2>&1 || true
 
 if jj bookmark list -T 'name ++ "\n"' | grep -qx "$BOOKMARK"; then
@@ -68,6 +84,7 @@ else
     export AGENT_ANCHOR_HASH
     echo "[cld] anchor=${AGENT_ANCHOR_HASH:0:12}"
     (cd /workspace/current && jj bookmark set "$BOOKMARK" -r @ --allow-backwards)
+fi
 fi
 
 # Enable watchman auto-snapshot inside the workspace so background file
@@ -125,9 +142,17 @@ if [ -n "${MASTER_MODE:-}" ]; then
         IFS=':' read -r -a _cld_targets <<< "$MASTER_TARGETS"
         for t in "${_cld_targets[@]}"; do
             [ -n "$t" ] || continue
-            mkdir -p "$t" 2>/dev/null || echo "[WARN] could not create placeholder $t" >&2
+            # $t is a host path (e.g. /home/<user>/projects/x). The unprivileged
+            # container user can only create under its own $HOME, so mirror the
+            # target by swapping the host-home prefix ($CLD_HOST_HOME) for $HOME.
+            # build_container_args guarantees every target lives under host home.
+            _mirror="$t"
+            case "$t" in
+                "${CLD_HOST_HOME:-/nonexistent}"/*) _mirror="$HOME/${t#"${CLD_HOST_HOME}"/}";;
+            esac
+            mkdir -p "$_mirror" 2>/dev/null || echo "[WARN] could not create placeholder $_mirror (target $t)" >&2
         done
-        unset _cld_targets
+        unset _cld_targets _mirror
     fi
     # Signal readiness as soon as setup is done, before the optional first-launch
     # prompt, so the host can attach immediately no matter how long the prompt runs.
@@ -151,7 +176,13 @@ if [ -n "${MASTER_MODE:-}" ]; then
         (cd "$WORKSPACE_ORIGIN" && jj bookmark forget "$SESSION_NAME" 2>&1) || true
         exit 0
     }
+    # SIGUSR1 (docker kill --signal from `cld master restart`) exits without
+    # forgetting the bookmark, so the fresh container reattaches at its tip.
+    _cld_master_restart() {
+        exit 0
+    }
     trap _cld_master_shutdown TERM INT
+    trap _cld_master_restart USR1
     sleep infinity &
     wait $!
     exit 0
