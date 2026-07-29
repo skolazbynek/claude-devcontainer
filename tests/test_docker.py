@@ -1,6 +1,7 @@
 """Tests for pure helpers in cld.docker."""
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -13,8 +14,11 @@ from cld.docker import (
     in_master_container,
     resolve_master_target,
     stage_home_ro,
+    stage_host_broker,
+    stage_test_env,
     to_host_path,
 )
+from cld.docker import _filter_env
 
 
 class TestBuildSessionName:
@@ -256,3 +260,98 @@ class TestInMasterContainer:
 
     def test_false_when_unset(self):
         assert in_master_container() is False
+
+
+class TestFilterEnv:
+    def test_whitelists_keys(self, tmp_path):
+        env = tmp_path / ".env"
+        env.write_text("A=1\nB=2\nC=3\n")
+        assert _filter_env(env, ("A", "C")) == {"A": "1", "C": "3"}
+
+    def test_ignores_comments_blanks_and_non_assignments(self, tmp_path):
+        env = tmp_path / ".env"
+        env.write_text("# comment\n\nA=1\nJUSTAWORD\n")
+        assert _filter_env(env, ("A", "JUSTAWORD")) == {"A": "1"}
+
+    def test_handles_export_prefix_and_strips_whitespace(self, tmp_path):
+        env = tmp_path / ".env"
+        env.write_text("export A = 1 \n")
+        assert _filter_env(env, ("A",)) == {"A": "1"}
+
+
+class TestStageTestEnv:
+    def test_no_keys_is_noop(self, tmp_path):
+        assert stage_test_env(tmp_path, Config()) == []
+
+    def test_missing_file_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        cfg = Config(pyproject_dir="nope", test_env_keys=("A",))
+        assert stage_test_env(tmp_path, cfg) == []
+
+    def test_no_matching_keys_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".env").write_text("B=2\n")
+        cfg = Config(test_env_keys=("A",))
+        assert stage_test_env(tmp_path, cfg) == []
+
+    def test_happy_path_mounts_derived_not_raw(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        raw = tmp_path / ".env"
+        raw.write_text("DB_PASSWORD=s3cr'et\nAPI_TOKEN=leakme\n")
+        cfg = Config(test_env_keys=("DB_PASSWORD",))
+        args = stage_test_env(tmp_path, cfg)
+        assert args[0] == "-v"
+        derived, mount, mode = args[1].split(":")
+        assert mount == "/run/secrets/test.env"
+        assert mode == "ro"
+        assert args[2:] == ["-e", "TEST_ENV_FILE=/run/secrets/test.env"]
+        # The raw .env is never the mount source.
+        assert str(raw) != derived
+        derived_path = Path(derived)
+        assert derived_path.stat().st_mode & 0o777 == 0o600
+        body = derived_path.read_text()
+        # Whitelisted key present and shell-quote-escaped; unlisted key absent.
+        assert body == "DB_PASSWORD='s3cr'\\''et'\n"
+        assert "API_TOKEN" not in body
+
+    def test_pyproject_dir_resolves_against_repo_root(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        repo = tmp_path / "repo"
+        (repo / "sub").mkdir(parents=True)
+        (repo / "sub" / ".env").write_text("A=1\n")
+        cfg = Config(pyproject_dir="sub", test_env_keys=("A",))
+        args = stage_test_env(repo, cfg)
+        assert args and args[0] == "-v"
+
+
+class TestStageHostBroker:
+    def test_no_key_is_noop(self):
+        assert stage_host_broker(Config()) == []
+
+    def test_missing_key_returns_empty(self, tmp_path):
+        cfg = Config(host_broker_key=str(tmp_path / "nope"))
+        assert stage_host_broker(cfg) == []
+
+    def test_key_only_wires_gateway_and_endpoint(self, tmp_path):
+        key = tmp_path / "broker_key"
+        key.write_text("k")
+        cfg = Config(host_broker_key=str(key), host_broker_endpoint="host.docker.internal:2222")
+        args = stage_host_broker(cfg)
+        assert args[:2] == ["--add-host", "host.docker.internal:host-gateway"]
+        assert "-v" in args and f"{key}:/run/secrets/host-broker-key:ro" in args
+        assert "-e" in args and "CLD_HOST_BROKER=host.docker.internal:2222" in args
+        # No known_hosts mount when it isn't configured.
+        assert not any("host-broker-known" in a for a in args)
+
+    def test_known_hosts_mounted_when_present(self, tmp_path):
+        key = tmp_path / "broker_key"; key.write_text("k")
+        known = tmp_path / "known_hosts"; known.write_text("h")
+        cfg = Config(host_broker_key=str(key), host_broker_known_hosts=str(known))
+        args = stage_host_broker(cfg)
+        assert f"{known}:/run/secrets/host-broker-known:ro" in args
+
+    def test_endpoint_override_passed_through(self, tmp_path):
+        key = tmp_path / "broker_key"; key.write_text("k")
+        cfg = Config(host_broker_key=str(key), host_broker_endpoint="me@1.2.3.4:2200")
+        args = stage_host_broker(cfg)
+        assert "CLD_HOST_BROKER=me@1.2.3.4:2200" in args

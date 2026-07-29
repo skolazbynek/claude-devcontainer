@@ -276,7 +276,7 @@ Containers run as host UID/GID with `--cap-drop=ALL`, `--security-opt=no-new-pri
 
 ## Configuration
 
-Any command checks for `~/.config/cld/config.toml` and creates a default file if it doesn't exist. Adjust it as you need - especially what paths are mounted into the devcontainer. You can create a per-project overrides with `<repo_root>/.cld.config`.
+Any command checks for `~/.config/cld/config.toml` and creates a default file if it doesn't exist. Adjust it as you need - especially what paths are mounted into the devcontainer. You can create a per-project overrides with `<repo_root>/.cld/config.toml`.
 
 ### Resolution order
 
@@ -284,13 +284,13 @@ Lowest → highest priority:
 
 1. Dataclass defaults
 2. User TOML — `~/.config/cld/config.toml`
-3. Project TOML — `<repo_root>/.cld.config` (walked up from cwd)
+3. Project TOML — `<repo_root>/.cld/config.toml` (walked up from cwd)
 4. `.env` in cwd
 5. `CLD_*` env vars
 
 ### TOML schema
 
-Flat snake_case keys mirroring `Config` field names. Unknown keys are warned about on stderr and ignored. `host_project_dir` / `host_home` are container-internal and not exposed.
+Flat snake_case keys mirroring `Config` field names, valid in both `~/.config/cld/config.toml` (user-wide) and `<repo_root>/.cld/config.toml` (per-repo). Unknown keys are warned about on stderr and ignored. Array-typed keys take a TOML array of strings. `host_project_dir` / `host_home` are container-internal and not exposed via TOML.
 
 ```toml
 base_image = "claude-base:latest"
@@ -301,6 +301,38 @@ agent_timeout = 1800
 poll_interval = 30
 debug = false
 ```
+
+Full set of keys:
+
+| Key | Type | Default | Purpose |
+|---|---|---|---|
+| `base_image` | string | `"claude-base:latest"` | Common base Docker image |
+| `devcontainer_image` | string | `"claude-devcontainer:latest"` | Devcontainer image (`cld`, `cld master`) |
+| `run_image` | string | `"claude-run:latest"` | One-shot run image (`cld run`) |
+| `mysql_config` | string | `""` | Path to a `.cnf` file, mounted RO at `/run/secrets/mysql.cnf` |
+| `pyproject_dir` | string | `"."` | Directory (relative to repo root) holding `pyproject.toml` and `.env`. Whitelisted test secrets are extracted from `<pyproject_dir>/.env`; no-op until `test_env_keys` is set. Also read by `host-run`'s broker to find the repo's secrets and pytest's project subdirectory |
+| `test_env_keys` | array of strings | `[]` | Whitelisted keys extracted from `<pyproject_dir>/.env` and injected into the container's test subprocess (via `cldtest`) only. Off until non-empty |
+| `ssl_certs_path` | string | `""` | Opt-in override: host path (dir or PEM file) that **replaces** the baked CA bundle. Empty = use the baked bundle |
+| `home_mounts_always` | array of strings | `[".claude.json", ".config/anthropic", ".config/claude", ".config/jj"]` | RO `$HOME` paths staged into every container |
+| `home_mounts_devcontainer` | array of strings | `[".gitconfig", ".bashrc", ".config/nvim", ".local/state/nvim", ".cache/nvim"]` | Additional RO `$HOME` paths staged only for interactive devcontainer sessions |
+| `master_targets` | array of strings | `[]` | Host repo paths registered as launchable sibling targets from inside `cld master` |
+| `ignore_gitignore` | array of strings | `[]` | Gitignored files (e.g. `.env`) to symlink from `/workspace/origin` into the isolated workspace |
+| `agent_timeout` | int (seconds) | `1800` | Chain orchestrator's per-agent wait timeout |
+| `poll_interval` | int (seconds) | `30` | Chain orchestrator's docker-ps poll interval |
+| `chain_max_parallel` | int | `4` | Max agents launched concurrently in a chain's parallel group |
+| `chain_default_model` | string | `""` | Model override for chain agents; empty = each step's own default |
+| `ssh_auth_sock` | string | unset (auto-detect) | SSH agent forwarding into `cld`/`cld master`. Unset = auto-detect host `$SSH_AUTH_SOCK`; `""` = explicitly disable; a path = use that socket |
+| `mailbox_root` | string | `"~/.cld/mailboxes"` | Host root of the inter-container mailbox tree (bind-mounted RW into every master/agent) |
+| `agent_max_turns` | int | `30` | Per-message turn cap passed to the repo agent's `claude -p --max-turns` |
+| `agent_kickoff_persona` | string | `"agent"` | Persona used to kick off a new `cld agent` Claude session |
+| `host_broker_key` | string | `""` | Host path to the restricted host-test-broker **private** key. Setting this enables the `host-run` wrapper inside `cld master`. Master-only |
+| `host_broker_endpoint` | string | `"host.docker.internal:2222"` | Broker SSH endpoint, `[user@]host:port` (default login user `zet`) |
+| `host_broker_known_hosts` | string | `""` | Host path to the pinned `known_hosts` for the broker; required for `host-run`'s strict host-key check |
+| `log_level` | string | `"INFO"` | Root level for the `cld` logger hierarchy: `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `log_color` | string | `"auto"` | ANSI color in log output: `auto` (TTY-detect) / `always` / `never` |
+| `debug` | bool | `false` | Diagnostics flag; back-compat alias for `log_level = "DEBUG"` when `log_level` is otherwise unset |
+
+Every key above also has a `CLD_*` env var equivalent that overrides it (see below) except the array-typed ones (`test_env_keys`, `home_mounts_always`, `home_mounts_devcontainer`, `master_targets`, `ignore_gitignore`), which are TOML-only.
 
 ### `CLD_*` env vars (defaults shown)
 

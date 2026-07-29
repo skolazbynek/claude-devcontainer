@@ -26,6 +26,13 @@ MAILBOX_MOUNT = "/var/cld/mailboxes"
 # Allowlist only -- avoid leaking gh/aws/gcloud/etc creds.
 _RO_HOME_MOUNT_ROOT = "/tmp/host-config"
 
+# Whitelisted test secrets land here (RO), never the raw .env. See stage_test_env.
+_TEST_ENV_MOUNT = "/run/secrets/test.env"
+
+# Host test-broker key + pinned known_hosts land here (RO). See stage_host_broker.
+_HOST_BROKER_KEY_MOUNT = "/run/secrets/host-broker-key"
+_HOST_BROKER_KNOWN_HOSTS_MOUNT = "/run/secrets/host-broker-known"
+
 
 def find_repo_root(start: Path | None = None) -> Path:
     """Locate the VCS repository root (jj or git) by walking up from *start*.
@@ -486,6 +493,16 @@ def build_container_args(
         else:
             log.warning(f"CLD_MYSQL_CONFIG set but file not found: {cfg.mysql_config}")
 
+    # Test-env secrets (conditional): whitelisted keys extracted host-side from
+    # <cfg.pyproject_dir>/.env into a derived container-private file. The raw
+    # .env is never mounted. No-op unless test_env_keys is set.
+    args += stage_test_env(repo_root, cfg)
+
+    # Host test broker (master only): mount the restricted key + known_hosts and
+    # install the host-run wrapper. No-op unless host_broker_key is set.
+    if master:
+        args += stage_host_broker(cfg)
+
     # Mailbox tree (master/agent persistent roles only) -- shared RW mount so
     # every master and agent container sees the same mailbox filesystem.
     if master or agent:
@@ -656,6 +673,44 @@ def stage_ssh_agent(cfg: Config) -> list[str]:
     ]
 
 
+def stage_host_broker(cfg: Config) -> list[str]:
+    """Return docker args wiring a master container to the host test broker.
+
+    Mounts the restricted broker private key (and, if given, the pinned
+    known_hosts) RO, adds a host-gateway alias so the container can reach the
+    host-side sshd, and sets ``CLD_HOST_BROKER`` so ``container-init.sh`` installs
+    the ``host-run`` wrapper. No-op unless ``cfg.host_broker_key`` is set. The
+    broker only accepts ``cld_master_*`` sessions, so this is master-only.
+    See docs/design-host-test-running.md.
+    """
+    if not cfg.host_broker_key:
+        return []
+    key = Path(cfg.host_broker_key).expanduser()
+    if not key.is_file():
+        log.warning("host_broker_key set but not found: %s", key)
+        return []
+    host_key = to_host_path(str(key.resolve()), cfg)
+    args = [
+        "--add-host", "host.docker.internal:host-gateway",
+        "-v", f"{host_key}:{_HOST_BROKER_KEY_MOUNT}:ro",
+        "-e", f"CLD_HOST_BROKER={cfg.host_broker_endpoint}",
+    ]
+    if cfg.host_broker_known_hosts:
+        known = Path(cfg.host_broker_known_hosts).expanduser()
+        if known.is_file():
+            host_known = to_host_path(str(known.resolve()), cfg)
+            args += ["-v", f"{host_known}:{_HOST_BROKER_KNOWN_HOSTS_MOUNT}:ro"]
+        else:
+            log.warning("host_broker_known_hosts set but not found: %s", known)
+    else:
+        log.warning(
+            "host_broker_key set but host_broker_known_hosts is empty -- "
+            "host-run's strict host-key check will fail without a pinned known_hosts"
+        )
+    log.info("Host test broker wired: key -> %s, endpoint %s", _HOST_BROKER_KEY_MOUNT, cfg.host_broker_endpoint)
+    return args
+
+
 def stage_home_ro(rel_path: str, cfg: Config) -> list[str]:
     """Stage ``$HOME/<rel_path>`` RO under ``/tmp/host-config/<rel_path>``.
 
@@ -667,3 +722,79 @@ def stage_home_ro(rel_path: str, cfg: Config) -> list[str]:
         return []
     host_path = to_host_path(str(local_path.resolve()), cfg)
     return ["-v", f"{host_path}:{_RO_HOME_MOUNT_ROOT}/{rel_path}:ro"]
+
+
+def _shell_single_quote(value: str) -> str:
+    """Wrap *value* in single quotes so a POSIX shell sources it verbatim."""
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
+def _filter_env(src: Path, keys: Iterable[str]) -> dict[str, str]:
+    """Return the ``KEY=value`` pairs of *src* whose key is in *keys*.
+
+    Parsing mirrors ``config._load_dotenv`` (split on first ``=``, strip
+    surrounding whitespace, skip blanks/comments) plus an optional ``export``
+    prefix.
+    """
+    allow = set(keys)
+    out: dict[str, str] = {}
+    for line in src.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):]
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        if key in allow:
+            out[key] = value.strip()
+    return out
+
+
+def _write_derived_test_env(repo_root: Path, values: dict[str, str]) -> Path:
+    """Write *values* to a 0600 shell-sourceable file under ~/.cld/test-env.
+
+    One file per repo (overwritten each launch) so orphans stay bounded.
+    """
+    dest_dir = Path.home() / ".cld" / "test-env"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_dir.chmod(0o700)
+    sha = hashlib.sha1(str(repo_root).encode()).hexdigest()[:8]
+    dest = dest_dir / f"{repo_root.name}_{sha}.env"
+    body = "".join(f"{k}={_shell_single_quote(v)}\n" for k, v in values.items())
+    dest.write_text(body)
+    dest.chmod(0o600)
+    return dest
+
+
+def stage_test_env(repo_root: Path, cfg: Config) -> list[str]:
+    """Return -v/-e args exposing whitelisted test secrets to the container.
+
+    Reads ``<repo_root>/<cfg.pyproject_dir>/.env``, keeps only the keys in
+    ``cfg.test_env_keys``, and writes them to a derived 0600 file mounted RO
+    at ``/run/secrets/test.env`` with ``TEST_ENV_FILE`` pointing at it. The
+    container's ``cldtest`` wrapper sources it into the test subprocess only.
+    The raw ``.env`` is never mounted -- unlisted keys never enter the
+    container at all. No-op unless ``test_env_keys`` is set.
+    """
+    if not cfg.test_env_keys:
+        return []
+    src = repo_root / cfg.pyproject_dir / ".env"
+    if not src.is_file():
+        log.warning("test_env_keys set but %s not found", src)
+        return []
+    selected = _filter_env(src, cfg.test_env_keys)
+    missing = [k for k in cfg.test_env_keys if k not in selected]
+    if missing:
+        log.warning("test_env_keys absent from %s: %s", src.name, ", ".join(missing))
+    if not selected:
+        log.warning("no test_env_keys present in %s -- skipping test-env injection", src)
+        return []
+    derived = _write_derived_test_env(repo_root, selected)
+    log.info("Test-env: injecting %d key(s) into %s", len(selected), _TEST_ENV_MOUNT)
+    return [
+        "-v", f"{derived}:{_TEST_ENV_MOUNT}:ro",
+        "-e", f"TEST_ENV_FILE={_TEST_ENV_MOUNT}",
+    ]

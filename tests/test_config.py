@@ -31,25 +31,25 @@ class TestTomlLayering:
         assert cfg.agent_timeout == 99
 
     def test_project_only(self, tmp_path):
-        proj = _write(tmp_path / ".cld.config", 'base_image = "p-base"\n')
+        proj = _write(tmp_path / ".cld/config.toml", 'base_image = "p-base"\n')
         cfg = Config.from_env(user_config=tmp_path / "missing", project_config=proj)
         assert cfg.base_image == "p-base"
 
     def test_project_overrides_user(self, tmp_path):
         user = _write(tmp_path / "user.toml", 'base_image = "u"\nrun_image = "u-run"\n')
-        proj = _write(tmp_path / ".cld.config", 'base_image = "p"\n')
+        proj = _write(tmp_path / ".cld/config.toml", 'base_image = "p"\n')
         cfg = Config.from_env(user_config=user, project_config=proj)
         assert cfg.base_image == "p"
         assert cfg.run_image == "u-run"  # only project's keys override
 
     def test_env_overrides_toml(self, tmp_path, monkeypatch):
-        proj = _write(tmp_path / ".cld.config", 'base_image = "p"\n')
+        proj = _write(tmp_path / ".cld/config.toml", 'base_image = "p"\n')
         monkeypatch.setenv("CLD_BASE_IMAGE", "env-base")
         cfg = Config.from_env(user_config=tmp_path / "u", project_config=proj)
         assert cfg.base_image == "env-base"
 
     def test_dotenv_overrides_toml(self, tmp_path):
-        proj = _write(tmp_path / ".cld.config", 'base_image = "p"\n')
+        proj = _write(tmp_path / ".cld/config.toml", 'base_image = "p"\n')
         dotenv = _write(tmp_path / ".env", "CLD_BASE_IMAGE=dotenv-base\n")
         cfg = Config.from_env(dotenv=dotenv, user_config=tmp_path / "u", project_config=proj)
         assert cfg.base_image == "dotenv-base"
@@ -61,20 +61,20 @@ class TestTomlLayering:
         assert cfg.debug is False
 
     def test_unknown_key_warns_but_loads(self, tmp_path, capsys):
-        proj = _write(tmp_path / ".cld.config", 'base_image = "p"\nbogus = 1\n')
+        proj = _write(tmp_path / ".cld/config.toml", 'base_image = "p"\nbogus = 1\n')
         cfg = Config.from_env(user_config=tmp_path / "u", project_config=proj)
         assert cfg.base_image == "p"
         err = capsys.readouterr().err
         assert "unknown key 'bogus'" in err
 
     def test_malformed_toml_does_not_crash(self, tmp_path, capsys):
-        proj = _write(tmp_path / ".cld.config", "this = is = not valid toml\n")
+        proj = _write(tmp_path / ".cld/config.toml", "this = is = not valid toml\n")
         cfg = Config.from_env(user_config=tmp_path / "u", project_config=proj)
         assert cfg.base_image == "claude-base:latest"
         assert "failed to read" in capsys.readouterr().err
 
     def test_int_and_bool_types(self, tmp_path):
-        proj = _write(tmp_path / ".cld.config", "agent_timeout = 42\npoll_interval = 7\ndebug = true\n")
+        proj = _write(tmp_path / ".cld/config.toml", "agent_timeout = 42\npoll_interval = 7\ndebug = true\n")
         cfg = Config.from_env(user_config=tmp_path / "u", project_config=proj)
         assert cfg.agent_timeout == 42
         assert cfg.poll_interval == 7
@@ -90,7 +90,7 @@ class TestMessengerConfig:
 
     def test_toml_overrides(self, tmp_path):
         proj = _write(
-            tmp_path / ".cld.config",
+            tmp_path / ".cld/config.toml",
             'mailbox_root = "/custom/mailboxes"\nagent_max_turns = 10\nagent_kickoff_persona = "custom-persona"\n',
         )
         cfg = Config.from_env(user_config=tmp_path / "u", project_config=proj)
@@ -99,7 +99,7 @@ class TestMessengerConfig:
         assert cfg.agent_kickoff_persona == "custom-persona"
 
     def test_env_overrides_toml(self, tmp_path, monkeypatch):
-        proj = _write(tmp_path / ".cld.config", 'mailbox_root = "/toml/mailboxes"\n')
+        proj = _write(tmp_path / ".cld/config.toml", 'mailbox_root = "/toml/mailboxes"\n')
         monkeypatch.setenv("CLD_MAILBOX_ROOT", "/env/mailboxes")
         cfg = Config.from_env(user_config=tmp_path / "u", project_config=proj)
         assert cfg.mailbox_root == "/env/mailboxes"
@@ -107,11 +107,11 @@ class TestMessengerConfig:
 
 class TestFindProjectConfig:
     def test_finds_in_start_dir(self, tmp_path):
-        cfg = _write(tmp_path / ".cld.config", "")
+        cfg = _write(tmp_path / ".cld/config.toml", "")
         assert _find_project_config(tmp_path) == cfg
 
     def test_walks_up_from_nested(self, tmp_path):
-        cfg = _write(tmp_path / ".cld.config", "")
+        cfg = _write(tmp_path / ".cld/config.toml", "")
         nested = tmp_path / "a" / "b"
         nested.mkdir(parents=True)
         assert _find_project_config(nested) == cfg
@@ -129,14 +129,14 @@ class TestLoadToml:
 class TestMasterTargets:
     def test_master_targets_loaded(self, tmp_path):
         proj = _write(
-            tmp_path / ".cld.config",
+            tmp_path / ".cld/config.toml",
             'master_targets = ["~/projects/foo", "/abs/bar"]\n',
         )
         cfg = Config.from_env(user_config=tmp_path / "u", project_config=proj)
         assert cfg.master_targets == ("~/projects/foo", "/abs/bar")
 
     def test_deprecated_key_errors_with_migration_hint(self, tmp_path):
-        proj = _write(tmp_path / ".cld.config", 'master_extra_mounts_ro = ["~/repos"]\n')
+        proj = _write(tmp_path / ".cld/config.toml", 'master_extra_mounts_ro = ["~/repos"]\n')
         with pytest.raises(RuntimeError) as excinfo:
             _load_toml(proj)
         assert "master_extra_mounts_ro" in str(excinfo.value)

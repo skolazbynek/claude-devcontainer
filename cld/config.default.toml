@@ -9,6 +9,14 @@ run_image = "claude-run:latest"
 # no auto-detect / auto-mount anymore.
 # ssl_certs_path = "/etc/ssl/certs"
 
+# Test secrets. Whitelisted keys are read host-side from <pyproject_dir>/.env
+# and injected into the container's test subprocess only (via the `cldtest`
+# wrapper) -- the raw .env is never mounted and unlisted keys never enter the
+# container. Feature is off until test_env_keys is non-empty. pyproject_dir also
+# names the subdirectory holding pyproject.toml (e.g. for the host test broker).
+# pyproject_dir = "."                          # relative to the repo root
+# test_env_keys = ["DB_HOST", "DB_PASSWORD", "REDIS_URL"]
+
 # Agent-wait tunables (used by chain orchestrator)
 agent_timeout = 1800   # seconds to wait for an agent before declaring timeout
 poll_interval = 30     # seconds between docker-ps polls
@@ -54,3 +62,11 @@ home_mounts_devcontainer = [
 # mailbox_root = "~/.cld/mailboxes"  # host root for the mailbox tree
 # agent_max_turns = 30               # per-message turn cap for the agent supervisor
 # agent_kickoff_persona = "agent"  # persona used to kick off a new agent session
+
+# Host test broker (master only). Set host_broker_key to enable a `host-run`
+# wrapper inside master that runs the repo's tests on the host via the standalone
+# `runtests` container, keeping secrets off the container. Requires host-side
+# setup (see host-broker/README.md). Off until host_broker_key is set.
+# host_broker_key = "~/.cld/broker/broker_key"
+# host_broker_endpoint = "host.docker.internal:2222"   # [user@]host:port
+# host_broker_known_hosts = "~/.cld/broker/known_hosts"

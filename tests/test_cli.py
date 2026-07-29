@@ -389,7 +389,8 @@ class TestMasterReposCommand:
     def test_lists_own_and_targets(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MASTER_MODE", "1")
         monkeypatch.setenv("CLD_HOST_PROJECT_DIR", "/host/side/cld")
-        proj = tmp_path / ".cld.config"
+        proj = tmp_path / ".cld/config.toml"
+        proj.parent.mkdir(parents=True, exist_ok=True)
         proj.write_text('master_targets = ["/host/side/foo", "/host/side/bar"]\n')
         with patch("cld.cli.Config.from_env", return_value=__import__(
             "cld.config", fromlist=["Config"],
