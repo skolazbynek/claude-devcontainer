@@ -65,7 +65,7 @@ class AgentSupervisor:
         repo_root: Path,
         mailbox_root: Path,
         persona_path: Path,
-        model: str = "",
+        model: str = "sonnet",
         max_turns: int = 30,
         claude_bin: str = "claude",
         poll_interval: float = _DEFAULT_POLL_INTERVAL,

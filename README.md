@@ -310,8 +310,7 @@ Full set of keys:
 | `devcontainer_image` | string | `"claude-devcontainer:latest"` | Devcontainer image (`cld`, `cld master`) |
 | `run_image` | string | `"claude-run:latest"` | One-shot run image (`cld run`) |
 | `mysql_config` | string | `""` | Path to a `.cnf` file, mounted RO at `/run/secrets/mysql.cnf` |
-| `pyproject_dir` | string | `"."` | Directory (relative to repo root) holding `pyproject.toml` and `.env`. Whitelisted test secrets are extracted from `<pyproject_dir>/.env`; no-op until `test_env_keys` is set. Also read by `host-run`'s broker to find the repo's secrets and pytest's project subdirectory |
-| `test_env_keys` | array of strings | `[]` | Whitelisted keys extracted from `<pyproject_dir>/.env` and injected into the container's test subprocess (via `cldtest`) only. Off until non-empty |
+| `pyproject_dir` | string | `"."` | Directory (relative to repo root) holding `pyproject.toml` and `.env`. Not a `Config` field -- read directly out of `.cld/config.toml` by `host-broker.sh` on the host, for the host test broker's `PROJECT_SUBDIR` and secrets path (see "Host-side test running" in `CLAUDE.md`) |
 | `ssl_certs_path` | string | `""` | Opt-in override: host path (dir or PEM file) that **replaces** the baked CA bundle. Empty = use the baked bundle |
 | `home_mounts_always` | array of strings | `[".claude.json", ".config/anthropic", ".config/claude", ".config/jj"]` | RO `$HOME` paths staged into every container |
 | `home_mounts_devcontainer` | array of strings | `[".gitconfig", ".bashrc", ".config/nvim", ".local/state/nvim", ".cache/nvim"]` | Additional RO `$HOME` paths staged only for interactive devcontainer sessions |
@@ -332,7 +331,7 @@ Full set of keys:
 | `log_color` | string | `"auto"` | ANSI color in log output: `auto` (TTY-detect) / `always` / `never` |
 | `debug` | bool | `false` | Diagnostics flag; back-compat alias for `log_level = "DEBUG"` when `log_level` is otherwise unset |
 
-Every key above also has a `CLD_*` env var equivalent that overrides it (see below) except the array-typed ones (`test_env_keys`, `home_mounts_always`, `home_mounts_devcontainer`, `master_targets`, `ignore_gitignore`), which are TOML-only.
+Every key above also has a `CLD_*` env var equivalent that overrides it (see below) except the array-typed ones (`home_mounts_always`, `home_mounts_devcontainer`, `master_targets`, `ignore_gitignore`) and `pyproject_dir` (not a `Config` field), which are TOML-only.
 
 ### `CLD_*` env vars (defaults shown)
 

@@ -13,16 +13,6 @@ if [ -n "${MYSQL_DEFAULTS_FILE:-}" ] && [ -f "$MYSQL_DEFAULTS_FILE" ]; then
     chmod +x /tmp/bin/mysql
 fi
 
-# Inject whitelisted test secrets into the test subprocess only. TEST_ENV_FILE
-# holds only the config-whitelisted keys (never the raw .env); the wrapper
-# sources them into the child's environment so they stay out of the interactive
-# shell and claude's ambient env. Run tests via: cldtest <cmd>
-if [ -n "${TEST_ENV_FILE:-}" ] && [ -f "$TEST_ENV_FILE" ]; then
-    printf '#!/bin/bash\nset -a\n. %s\nset +a\nexec "$@"\n' "$TEST_ENV_FILE" > /tmp/bin/cldtest
-    chmod +x /tmp/bin/cldtest
-    echo "[INFO] Test-env ready: run tests via 'cldtest <cmd>' (e.g. cldtest poetry run pytest)"
-fi
-
 # Install the host-run wrapper when a host test broker is configured. It ships
 # arbitrary args to the broker as base64(NUL-joined argv) so they can only ever
 # become pytest argv, never a host command; the broker runs the `runtests`

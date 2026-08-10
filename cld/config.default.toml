@@ -9,14 +9,6 @@ run_image = "claude-run:latest"
 # no auto-detect / auto-mount anymore.
 # ssl_certs_path = "/etc/ssl/certs"
 
-# Test secrets. Whitelisted keys are read host-side from <pyproject_dir>/.env
-# and injected into the container's test subprocess only (via the `cldtest`
-# wrapper) -- the raw .env is never mounted and unlisted keys never enter the
-# container. Feature is off until test_env_keys is non-empty. pyproject_dir also
-# names the subdirectory holding pyproject.toml (e.g. for the host test broker).
-# pyproject_dir = "."                          # relative to the repo root
-# test_env_keys = ["DB_HOST", "DB_PASSWORD", "REDIS_URL"]
-
 # Agent-wait tunables (used by chain orchestrator)
 agent_timeout = 1800   # seconds to wait for an agent before declaring timeout
 poll_interval = 30     # seconds between docker-ps polls

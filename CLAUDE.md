@@ -107,7 +107,7 @@ All Python-side runtime tunables live in `cld/config.py:Config` (frozen dataclas
 
 **Resolution order (lowest → highest priority):** dataclass defaults < user TOML (`~/.config/cld/config.toml`) < project TOML (`<repo_root>/.cld/config.toml`, walked up from cwd) < `.env` in cwd < `CLD_*` env vars.
 
-TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `devcontainer_image`, `run_image`, `mysql_config`, `pyproject_dir`, `test_env_keys`, `ssl_certs_path`, `agent_timeout`, `poll_interval`, `debug`, `home_mounts_always`, `home_mounts_devcontainer`, `master_targets`, `chain_max_parallel`, `chain_default_model`, `log_level`, `log_color`, `ignore_gitignore`, `mailbox_root`, `agent_max_turns`, `agent_kickoff_persona`, `host_broker_key`, `host_broker_endpoint`, `host_broker_known_hosts`). Array fields accept TOML arrays of strings. Unknown keys are warned about on stderr and ignored. `host_project_dir` / `host_home` are container-internal and not configurable via TOML.
+TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `devcontainer_image`, `run_image`, `mysql_config`, `ssl_certs_path`, `agent_timeout`, `poll_interval`, `debug`, `home_mounts_always`, `home_mounts_devcontainer`, `master_targets`, `chain_max_parallel`, `chain_default_model`, `log_level`, `log_color`, `ignore_gitignore`, `mailbox_root`, `agent_max_turns`, `agent_kickoff_persona`, `host_broker_key`, `host_broker_endpoint`, `host_broker_known_hosts`). Array fields accept TOML arrays of strings. Unknown keys are warned about on stderr and ignored. `host_project_dir` / `host_home` are container-internal and not configurable via TOML. One exception to the field-mirroring rule: `pyproject_dir` is accepted (silently, not warned on) but has no `Config` field -- it's consumed only by `host-broker.sh`'s own TOML parser, not by Python, for the host test broker's `PROJECT_SUBDIR` (see "Host-side test running" below).
 
 `CLD_*` env vars (read by `Config.from_env`):
 
@@ -117,7 +117,6 @@ TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `de
 | `CLD_DEVCONTAINER_IMAGE` | `claude-devcontainer:latest` | Devcontainer image |
 | `CLD_RUN_IMAGE` | `claude-run:latest` | Agent image |
 | `CLD_MYSQL_CONFIG` | `""` | Path to a `.cnf` file, mounted ro at `/run/secrets/mysql.cnf` |
-| `CLD_PYPROJECT_DIR` | `.` | Directory (relative to repo root) holding `pyproject.toml` and `.env`; test secrets are read from `<pyproject_dir>/.env`. Only keys in `test_env_keys` are extracted; feature is off until `test_env_keys` is set. |
 | `CLD_SSL_CERTS_PATH` | `""` | Opt-in override: host path (dir or PEM file) that **replaces** the baked CA bundle. Empty = use baked bundle (internal Seznam CAs + Debian defaults). No auto-detect. |
 | `CLD_HOST_PROJECT_DIR` | `""` | Set by host launcher into containers; lets in-container Python translate `/workspace/*` paths back to host paths for sibling `-v` mounts |
 | `CLD_HOST_HOME` | `""` | Same idea for `$HOME` paths |
@@ -149,7 +148,6 @@ Container-side env vars consumed by shell entrypoints (NOT read by Python `Confi
 | `WORKSPACE_FILES` | `build_container_args` -> container | Colon-separated list of gitignored files to symlink from origin into workspace (set from config `ignore_gitignore`) |
 | `AGENT_COMMIT_MSG_LLM` / `AGENT_SYSTEM_PROMPT_FILE` | user -> container | Optional agent overrides |
 | `MYSQL_DEFAULTS_FILE` | `build_container_args` -> container | Credentials path inside container |
-| `TEST_ENV_FILE` | `build_container_args` -> container | Path (`/run/secrets/test.env`) to the whitelisted test secrets; the `cldtest` wrapper sources it into the test subprocess |
 | `CLD_HOST_BROKER` | `stage_host_broker` -> master | Broker endpoint `[user@]host:port`; presence (with the mounted key) triggers `container-init.sh` to install the `host-run` wrapper |
 | `WORKSPACE_ORIGIN` | `container-init.sh` -> Python | `/workspace/origin` (read by `vcs/detect.py`) |
 
@@ -167,26 +165,9 @@ ignore_gitignore = [".env", ".envrc"]
 
 On container startup, `link_workspace_files()` symlinks each file from `/workspace/origin` into `/workspace/current`. If a file doesn't exist in origin, a warning is logged and linking continues. Symlinks are transparent to applications and reflect updates to the origin file.
 
-## Test secrets (`cldtest`)
-
-For running the target repo's tests (which need MySQL/Redis/etc. credentials from a gitignored `.env`), a whitelist of keys is injected without ever mounting the raw `.env`. Set in `.cld/config.toml`:
-
-```toml
-test_env_keys = ["DB_HOST", "DB_PASSWORD", "REDIS_URL"]   # pyproject_dir defaults to "."
-```
-
-`stage_test_env` (host side, in `build_container_args`) reads `<pyproject_dir>/.env`, keeps only the whitelisted keys, and writes them to a per-repo 0600 file under `~/.cld/test-env/`, mounted RO at `/run/secrets/test.env` with `TEST_ENV_FILE` set. The entrypoint installs a `cldtest` wrapper that sources that file and execs its args, so secrets reach only the test subprocess:
-
-```bash
-cldtest poetry run pytest tests/
-cldtest pytest -k foo
-```
-
-Design notes: unlisted keys never enter the container, and injected keys stay out of the interactive shell and claude's ambient env. Because master runs claude and the user shell as the same UID under `--cap-drop=ALL`/`--security-opt=no-new-privileges`, a determined claude can still `cat /run/secrets/test.env` (same posture as the existing `/run/secrets/mysql.cnf`); true claude-vs-pytest isolation would require a separate container and was rejected for simplicity. No-op unless `test_env_keys` is set.
-
 ## Host-side test running (`runtests` + host broker)
 
-An alternative to `cldtest` that keeps secrets **entirely off the container**: master triggers a fixed host-side command over SSH that runs the tests in a separate ephemeral container. Full design + rationale: `docs/design-host-test-running.md`. Three decoupled pieces:
+Running the target repo's tests needs MySQL/Redis/etc. credentials from a gitignored `.env`, which must never reach the master container or claude's ambient environment. `master` triggers a fixed host-side command over SSH that runs the tests in a separate ephemeral container, keeping secrets **entirely off the container**. Full design + rationale: `docs/design-host-test-running.md`. Three decoupled pieces:
 
 - **`runtests/`** — a standalone, self-contained container project (own Debian-slim Dockerfile + `entrypoint.sh`, no cld dependency; movable to its own repo). Single job: `jj workspace add -r <REVISION>` into an isolated workspace under `$HOME` (never touching the origin's `@`), source a mounted `.env`, `poetry install`, then `pytest "$@"`. Contract is env + argv only: `-v <repo>:/repo`, `REVISION` (default `@`), `-v <.env>:/secrets/.env:ro`, `PROJECT_SUBDIR`, arbitrary pytest argv. Ships **Poetry 2.x** (reads PEP 621 `[project]`). Output is bounded for context hygiene: `PYTEST_ADDOPTS` defaults to `--tb=short --disable-warnings -q --maxfail=30` (explicit argv wins) and `OUTPUT_MAX_BYTES` (default 64 KiB) caps the returned log to its tail. Build with `runtests/build.sh`.
 - **`host-broker/`** — host-side glue: `host-broker.sh` is an sshd `ForceCommand` target invoked as `<action> <session> <base64-argv>`. It dispatches the action to a shell function `action_<name>` (adding an action = defining a function; unknown ⇒ denied), validates the session (`^cld_master_…$`), and decodes the argv from base64(NUL-joined) without `eval`. **Multi-repo, no whitelist:** it resolves the target repo from the calling master container's host-set `org.cld.repo-root` label (`docker inspect <session>`), then resolves that session's current change from the jj store (store-reading only, never moving the working copy). Secrets default to `<repo>/.env`, overridable by `pyproject_dir` in the repo's own `.cld/config.toml` (also gives `PROJECT_SUBDIR`). The default `run_tests` action does `docker run --rm runtests …` with that `.env` mounted (skipped if absent). Broker config is broker-wide only (`RUNTESTS_IMAGE`, `PATH`). Ships with a sample hardened `sshd_cld_broker.conf`, `keygen.sh`, and `brokerctl.sh` (operate the sshd: `start`/`restart`/`shutdown`/`status`/`logs`, detached, PID-tracked under `$CLD_BROKER_DIR`). Setup: `host-broker/README.md`.

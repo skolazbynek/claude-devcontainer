@@ -26,9 +26,6 @@ MAILBOX_MOUNT = "/var/cld/mailboxes"
 # Allowlist only -- avoid leaking gh/aws/gcloud/etc creds.
 _RO_HOME_MOUNT_ROOT = "/tmp/host-config"
 
-# Whitelisted test secrets land here (RO), never the raw .env. See stage_test_env.
-_TEST_ENV_MOUNT = "/run/secrets/test.env"
-
 # Host test-broker key + pinned known_hosts land here (RO). See stage_host_broker.
 _HOST_BROKER_KEY_MOUNT = "/run/secrets/host-broker-key"
 _HOST_BROKER_KNOWN_HOSTS_MOUNT = "/run/secrets/host-broker-known"
@@ -493,11 +490,6 @@ def build_container_args(
         else:
             log.warning(f"CLD_MYSQL_CONFIG set but file not found: {cfg.mysql_config}")
 
-    # Test-env secrets (conditional): whitelisted keys extracted host-side from
-    # <cfg.pyproject_dir>/.env into a derived container-private file. The raw
-    # .env is never mounted. No-op unless test_env_keys is set.
-    args += stage_test_env(repo_root, cfg)
-
     # Host test broker (master only): mount the restricted key + known_hosts and
     # install the host-run wrapper. No-op unless host_broker_key is set.
     if master:
@@ -722,79 +714,3 @@ def stage_home_ro(rel_path: str, cfg: Config) -> list[str]:
         return []
     host_path = to_host_path(str(local_path.resolve()), cfg)
     return ["-v", f"{host_path}:{_RO_HOME_MOUNT_ROOT}/{rel_path}:ro"]
-
-
-def _shell_single_quote(value: str) -> str:
-    """Wrap *value* in single quotes so a POSIX shell sources it verbatim."""
-    return "'" + value.replace("'", "'\\''") + "'"
-
-
-def _filter_env(src: Path, keys: Iterable[str]) -> dict[str, str]:
-    """Return the ``KEY=value`` pairs of *src* whose key is in *keys*.
-
-    Parsing mirrors ``config._load_dotenv`` (split on first ``=``, strip
-    surrounding whitespace, skip blanks/comments) plus an optional ``export``
-    prefix.
-    """
-    allow = set(keys)
-    out: dict[str, str] = {}
-    for line in src.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export "):]
-        key, sep, value = line.partition("=")
-        if not sep:
-            continue
-        key = key.strip()
-        if key in allow:
-            out[key] = value.strip()
-    return out
-
-
-def _write_derived_test_env(repo_root: Path, values: dict[str, str]) -> Path:
-    """Write *values* to a 0600 shell-sourceable file under ~/.cld/test-env.
-
-    One file per repo (overwritten each launch) so orphans stay bounded.
-    """
-    dest_dir = Path.home() / ".cld" / "test-env"
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_dir.chmod(0o700)
-    sha = hashlib.sha1(str(repo_root).encode()).hexdigest()[:8]
-    dest = dest_dir / f"{repo_root.name}_{sha}.env"
-    body = "".join(f"{k}={_shell_single_quote(v)}\n" for k, v in values.items())
-    dest.write_text(body)
-    dest.chmod(0o600)
-    return dest
-
-
-def stage_test_env(repo_root: Path, cfg: Config) -> list[str]:
-    """Return -v/-e args exposing whitelisted test secrets to the container.
-
-    Reads ``<repo_root>/<cfg.pyproject_dir>/.env``, keeps only the keys in
-    ``cfg.test_env_keys``, and writes them to a derived 0600 file mounted RO
-    at ``/run/secrets/test.env`` with ``TEST_ENV_FILE`` pointing at it. The
-    container's ``cldtest`` wrapper sources it into the test subprocess only.
-    The raw ``.env`` is never mounted -- unlisted keys never enter the
-    container at all. No-op unless ``test_env_keys`` is set.
-    """
-    if not cfg.test_env_keys:
-        return []
-    src = repo_root / cfg.pyproject_dir / ".env"
-    if not src.is_file():
-        log.warning("test_env_keys set but %s not found", src)
-        return []
-    selected = _filter_env(src, cfg.test_env_keys)
-    missing = [k for k in cfg.test_env_keys if k not in selected]
-    if missing:
-        log.warning("test_env_keys absent from %s: %s", src.name, ", ".join(missing))
-    if not selected:
-        log.warning("no test_env_keys present in %s -- skipping test-env injection", src)
-        return []
-    derived = _write_derived_test_env(repo_root, selected)
-    log.info("Test-env: injecting %d key(s) into %s", len(selected), _TEST_ENV_MOUNT)
-    return [
-        "-v", f"{derived}:{_TEST_ENV_MOUNT}:ro",
-        "-e", f"TEST_ENV_FILE={_TEST_ENV_MOUNT}",
-    ]

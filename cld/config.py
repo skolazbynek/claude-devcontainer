@@ -46,8 +46,6 @@ _TOML_KEYS = {
     "devcontainer_image",
     "run_image",
     "mysql_config",
-    "pyproject_dir",
-    "test_env_keys",
     "agent_timeout",
     "poll_interval",
     "debug",
@@ -67,6 +65,11 @@ _TOML_KEYS = {
     "host_broker_key",
     "host_broker_endpoint",
     "host_broker_known_hosts",
+    # Not a Config field -- no Python code reads this. Recognized here only so
+    # _load_toml() doesn't warn "unknown key" on repos that set it; the value
+    # is read directly out of .cld/config.toml by host-broker.sh's own parser
+    # (PROJECT_SUBDIR for the host test broker / runtests container).
+    "pyproject_dir",
 }
 
 
@@ -170,15 +173,6 @@ class Config:
     # Optional MySQL credentials (path to a .cnf file on the host)
     mysql_config: str = ""
 
-    # Test secrets: whitelisted keys extracted host-side from ``<pyproject_dir>/.env``
-    # and injected into the container's test subprocess only (never the raw
-    # file, never claude's ambient env or the workspace). ``pyproject_dir`` is
-    # relative to the repo root and also names the directory holding
-    # pyproject.toml, e.g. for the host test broker's PROJECT_SUBDIR.
-    # No-op unless ``test_env_keys`` is set.
-    pyproject_dir: str = "."
-    test_env_keys: tuple[str, ...] = ()
-
     # SSL CA certificates path on the host (dir or file).
     # Empty = auto-detect: /etc/ssl/certs (Linux) then /etc/ssl/cert.pem (macOS).
     # Set explicitly to use a custom CA bundle; leave empty to skip if neither found.
@@ -270,8 +264,6 @@ class Config:
             devcontainer_image=_env_str("CLD_DEVCONTAINER_IMAGE", layered.get("devcontainer_image", "claude-devcontainer:latest")),
             run_image=_env_str("CLD_RUN_IMAGE", layered.get("run_image", "claude-run:latest")),
             mysql_config=_env_str("CLD_MYSQL_CONFIG", layered.get("mysql_config", "")),
-            pyproject_dir=_env_str("CLD_PYPROJECT_DIR", layered.get("pyproject_dir", ".")),
-            test_env_keys=tuple(layered.get("test_env_keys", ())),
             ssl_certs_path=_env_str("CLD_SSL_CERTS_PATH", layered.get("ssl_certs_path", "")),
             host_project_dir=_env_str("CLD_HOST_PROJECT_DIR"),
             host_home=_env_str("CLD_HOST_HOME"),

@@ -36,11 +36,15 @@ command -v host-run || command -v /tmp/bin/host-run
 ```
 
 If neither is found, this repo's master isn't configured with a host test
-broker (`host_broker_key` unset in its `.cld/config.toml`). Don't try
-to set one up yourself -- that's host-side infrastructure the user configures
-out-of-band. Fall back to whatever the repo normally uses: the `cldtest`
-wrapper if `[INFO] Test-env ready` was printed at container start, otherwise
-the project's plain test command (e.g. `poetry run pytest`).
+broker (`host_broker_key` unset in its `.cld/config.toml`). Don't try to set
+one up yourself -- that's host-side infrastructure the user configures
+out-of-band. Don't fall back to running the plain test command in-container
+either: without the broker there is no other way to get real DB/Redis/etc.
+secrets into this container, and a suite run without them is not a
+meaningful test result -- it'll look like it ran while actually testing
+nothing real (or erroring on missing config in a way that's easy to
+misread as a code bug). Tell the user the broker isn't configured for this
+repo and stop.
 
 If `command -v host-run` finds nothing but `/tmp/bin/host-run` exists, use
 the full path for the rest of this skill -- PATH may not include `/tmp/bin`
