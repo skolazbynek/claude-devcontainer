@@ -8,7 +8,6 @@ import pytest
 from cld.config import Config, _load_dotenv
 from cld.docker import (
     agent_container_name,
-    anchor_env_args,
     build_session_name,
     find_repo_root,
     in_master_container,
@@ -206,49 +205,22 @@ class TestResolveMasterTarget:
 
 
 class TestEnsureImageNested:
-    def test_trusts_host_image_when_present(self, monkeypatch):
-        # Inside master (MASTER_MODE set) ensure_image must not build; it probes
-        # the shared daemon and returns if the host-built image is present.
+    def test_raises_inside_master_no_daemon(self, monkeypatch):
+        # Inside master there is no docker daemon (socket removed) and container
+        # launches are delegated to the host broker, so ensure_image must never
+        # be reached; if it is, it fails clearly rather than touching docker.
         monkeypatch.setenv("MASTER_MODE", "1")
         import cld.docker as docker_mod
         from pathlib import Path
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
         with patch.object(docker_mod.subprocess, "run") as run_mock:
-            run_mock.return_value = MagicMock(stdout="deadbeef\n")
-            result = docker_mod.ensure_image(
-                "claude-devcontainer:latest",
-                Path("/opt/cld/imgs/x/Dockerfile"),
-                Path("/opt/cld"),
-            )
-        assert result == ""
-        cmds = [c.args[0] for c in run_mock.call_args_list]
-        assert all("build" not in cmd for cmd in cmds)  # never attempts a build
-        assert any(cmd[:3] == ["docker", "images", "-q"] for cmd in cmds)
-
-    def test_raises_when_host_image_missing(self, monkeypatch):
-        monkeypatch.setenv("MASTER_MODE", "1")
-        import cld.docker as docker_mod
-        from pathlib import Path
-        from unittest.mock import MagicMock, patch
-        with patch.object(docker_mod.subprocess, "run") as run_mock:
-            run_mock.return_value = MagicMock(stdout="")
-            with pytest.raises(RuntimeError, match="cannot be built from inside a master"):
+            with pytest.raises(RuntimeError, match="cannot be ensured from inside a master"):
                 docker_mod.ensure_image(
                     "missing:img",
                     Path("/opt/cld/imgs/x/Dockerfile"),
                     Path("/opt/cld"),
                 )
-
-
-class TestAnchorEnvArgsMasterMode:
-    def test_master_mode_emits_hint_and_scratch(self, monkeypatch):
-        monkeypatch.setenv("MASTER_MODE", "1")
-        args = anchor_env_args(Config(), "sess1", "myrev")
-        # Args are alternating -e / KEY=VAL entries.
-        values = args[1::2]
-        assert "AGENT_REVISION_HINT=myrev" in values
-        assert any(v.startswith("AGENT_SCRATCH=") for v in values)
-        assert not any("AGENT_ANCHOR_HASH" in v for v in values)
+        run_mock.assert_not_called()  # never touches the (absent) daemon
 
 
 class TestInMasterContainer:

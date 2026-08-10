@@ -1,5 +1,21 @@
 # Launching sibling containers from inside master
 
+> **Update (docker socket removed).** This document describes the original
+> socket-mediated design, where `cld <cmd>` inside master ran `docker run`
+> directly over a mounted `/var/run/docker.sock`. The socket has since been
+> **removed from all containers** (it was equivalent to host root). The
+> supported in-master launch surface is now narrowed to **`cld agent`** (start
+> + restart/shutdown/status/logs) and is **mediated by the host broker**:
+> `cld agent` resolves the cwd's target (as below), then delegates to the
+> broker's `agent` action, which runs host-side `cld agent` for that repo
+> (validated against master's host-set `org.cld.targets` label). Bare `cld`,
+> `cld run`, `cld master`, `cld chain`, and interactive attach from inside
+> master are **not** supported. See `cld/host_docker.py`,
+> `host-broker/host-broker.sh`, and the README "No docker socket in containers"
+> section. The cwd→target resolution, `master_targets` placeholders, and
+> `cld master repos` below are unchanged; only the launch *mechanism* moved
+> from socket to broker.
+
 ## Goal
 
 `cld <anything>` invoked inside a **master** container behaves identically to
@@ -19,9 +35,10 @@ One rule, applied everywhere:
 Consequences:
 
 - Target selection is **cwd-based only**. No `--repo` flag, no aliasing.
-- `docker ps` and `docker inspect` return the same picture from host or master
-  (single daemon via `/var/run/docker.sock`), so `status`, `logs`,
-  `shutdown --all` transparently see every peer regardless of origin.
+- Enumeration and lifecycle from master go through the broker (`list-containers`
+  / `agent` actions), which run `docker`/`cld` on the host's single daemon, so
+  `status`, `logs`, `shutdown --all` see every peer regardless of origin --
+  same picture as the host, without a socket in the container.
 - Messenger MCP already works this way; nothing changes there.
 - The `agent-start` skill remains a thin wrapper around `cd <target> && cld agent`.
 

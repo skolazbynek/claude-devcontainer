@@ -23,8 +23,11 @@ The skill assumes it is running inside a container started by `cld master`.
 Confirm this before proceeding:
 
 ```bash
-[ -S /var/run/docker.sock ] && [ -d /var/cld/mailboxes ] && echo master-ok
+[ -x /tmp/bin/host-run ] && [ -d /var/cld/mailboxes ] && echo master-ok
 ```
+
+(`cld agent` from inside master reaches the host Docker daemon through the
+`host-run` broker wrapper -- there is no docker socket in-container.)
 
 If the check fails, stop and tell the user this skill only works from inside
 a master container.

@@ -248,7 +248,7 @@ cld agent status
 cld agent shutdown
 ```
 
-Master itself has no filesystem view of the target repo -- only a placeholder directory so `cd` works. The peer container gets RW at `/workspace/origin` (via the docker socket master uses for peer discovery), does its own anchor staging (`resolve_anchor` + `stage_anchor_with_scratch`) on boot from the `AGENT_REVISION_HINT` + `AGENT_SCRATCH` env vars master passes, and forgets its bookmark on SIGTERM so master never writes to RepoB. `cld master repos` inside master's shell lists what it can target.
+Master itself has no filesystem view of the target repo -- only a placeholder directory so `cd` works. `cld agent` in master resolves that placeholder to the target's host path and hands it to the host broker, which runs host-side `cld agent` for RepoB (validated against master's `org.cld.targets` label). The peer container it launches gets RW at `/workspace/origin`, does its own anchor staging on boot, and forgets its bookmark on SIGTERM so master never writes to RepoB. `cld master repos` inside master's shell lists what it can target.
 
 ### Workspace isolation
 
@@ -260,9 +260,14 @@ Host `~/.claude.json` is mounted read-only. The entrypoint builds a container-lo
 
 All RO `$HOME` mounts (claude/anthropic/jj configs, `~/.claude.json`, plus devcontainer-only `~/.gitconfig`, `~/.bashrc`, and the nvim dirs `~/.config/nvim` / `~/.local/state/nvim` / `~/.cache/nvim`) are staged read-only under `/tmp/host-config/<rel>` and copied into `$HOME` on startup by `copy_host_configs`. Changes made inside the container do not persist to the host. The agent image has no editor and skips the devcontainer-only entries.
 
-### Docker socket
+### No docker socket in containers
 
-The devcontainer mounts `/var/run/docker.sock` so the messenger can enumerate peer containers via `docker ps` (used by `list_agents`). Path translation converts container paths to host paths for volume mounts.
+No container mounts `/var/run/docker.sock` (it was equivalent to host root; see the security notes below). The two things that needed in-container docker now go through the host broker over SSH:
+
+- **Peer enumeration** (`list_agents`, `cld agent status`): master calls the broker's `list-containers` action, which runs `docker ps` on the host and streams structured records back. Agents don't enumerate at all -- message replies address the sender by the full name carried in the message, delivered by filesystem, so agents need no host channel.
+- **Launching a sibling `cld agent` from inside master**: `cld agent` in master resolves the cwd's target repo and calls the broker's `agent` action, which runs host-side `cld agent` for that repo (validated against the master's host-set `org.cld.targets` label). Arg-building, anchor staging, and image builds all happen natively on the host.
+
+See `cld/host_docker.py` (the host-vs-broker seam) and `host-broker/host-broker.sh` (the actions). Path translation (`CLD_HOST_PROJECT_DIR`/`CLD_HOST_HOME`) still converts container paths to host paths for target resolution; it is now set unconditionally rather than riding along with the socket mount.
 
 ### Security model and known gaps
 
@@ -271,7 +276,7 @@ Containers run as host UID/GID with `--cap-drop=ALL`, `--security-opt=no-new-pri
 **Known gaps -- read carefully before shipping anything sensitive into a container:**
 
 - **No outbound network firewall.** Once an agent is running, it can reach any host on the public internet and exfiltrate anything mounted in (`~/.claude` tokens, `~/.claude.json` MCP creds, `~/.config/*` creds, `CLD_MYSQL_CONFIG`). Anthropic's reference devcontainer ships an `init-firewall.sh` with default-deny outbound and a small allowlist; cld does not (yet) ship an equivalent.
-- **`/var/run/docker.sock` mount = host root.** When the docker socket is mounted (it is, to let the messenger enumerate peer containers), an agent inside can run `docker run -v /:/host --privileged ...` and read or modify anything on the host. This effectively bypasses every other security control. If you don't need cross-container messenger discovery, comment out the docker.sock block in `cld/docker.py`.
+- **No docker socket is mounted (was: host root).** Earlier versions mounted `/var/run/docker.sock` for peer enumeration, which let an agent run `docker run -v /:/host --privileged ...` and read or modify anything on the host -- bypassing every other control. The socket is gone; master's only host channel is now the broker key (a fixed, non-eval action allowlist with label-validated targets -- see the host broker section), and agents have no host channel at all. A leaked broker key grants that action set (run-tests + sibling `cld agent` lifecycle for allowlisted repos), which is strictly narrower than arbitrary host root but still privileged -- protect the key accordingly.
 - **`~/.claude` is mounted rw.** A malicious agent can both read your OAuth tokens and overwrite session state.
 
 ## Configuration

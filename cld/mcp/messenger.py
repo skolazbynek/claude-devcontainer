@@ -48,8 +48,9 @@ def send(to: str, subject: str, body: str) -> dict:
     log.info("MCP tool: send (to=%s, subject=%s)", to, subject)
     try:
         frm = _own_name()
-        resolved = mailbox.resolve_recipient(to)
-        msg = mailbox.write_message(_mailbox_root(), frm, resolved, subject, body)
+        root = _mailbox_root()
+        resolved = mailbox.resolve_recipient(to, root=root)
+        msg = mailbox.write_message(root, frm, resolved, subject, body)
         return {"id": msg["id"]}
     except (RuntimeError, ValueError) as e:
         return {"error": str(e)}

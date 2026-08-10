@@ -14,8 +14,9 @@
 # ADD AN ACTION: define a function named `action_<name>` (hyphens in <name>
 # become underscores, so `run-tests` -> `action_run_tests`). It receives the
 # decoded argv as "$@" and may use the shared context prepared by the
-# dispatcher: $REPO (host repo path), $REV (session's current change),
-# $SECRETS_ENV_FILE (may not exist), $PROJECT_SUBDIR, and $RUNTESTS_IMAGE.
+# dispatcher: $session (validated master session id) and $REPO (its host repo
+# path). Revision/secrets are per-action -- run-tests resolves them via
+# `resolve_test_context`; add your own helper if your action needs more.
 set -euo pipefail
 
 CONF="${CLD_BROKER_CONF:-/etc/cld/host-broker.conf}"
@@ -36,13 +37,82 @@ cld_conf_get() {
 # Each runs on the host as your user and receives the decoded pytest/tool argv
 # as "$@". `exec` so the child's stdout/stderr/exit code flow straight back.
 
+# run-tests needs the session's current revision + the project's .env; resolve
+# those lazily here (not in the shared dispatcher) so read-only actions like
+# list-containers don't depend on the session bookmark being resolvable.
+resolve_test_context() {
+    REV=$(jj -R "$REPO" log --no-graph -n1 -r "$session" -T commit_id) \
+        || { echo "cannot resolve revision for $session" >&2; exit 3; }
+    PROJECT_SUBDIR=$(cld_conf_get "$REPO/.cld/config.toml" pyproject_dir)
+    : "${PROJECT_SUBDIR:=.}"
+    case "$PROJECT_SUBDIR" in
+        /*) SECRETS_ENV_FILE="$PROJECT_SUBDIR/.env" ;;
+        .)  SECRETS_ENV_FILE="$REPO/.env" ;;
+        *)  SECRETS_ENV_FILE="$REPO/$PROJECT_SUBDIR/.env" ;;
+    esac
+}
+
 action_run_tests() {
+    resolve_test_context
     local secret_args=()
     [ -f "$SECRETS_ENV_FILE" ] && secret_args=(-v "$SECRETS_ENV_FILE:/secrets/.env:ro")
     exec docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
         -v "$REPO:/repo" "${secret_args[@]}" \
         -e "REVISION=$REV" -e "PROJECT_SUBDIR=$PROJECT_SUBDIR" \
         "$RUNTESTS_IMAGE" "$@"
+}
+
+# Enumerate cld containers for the messenger / `cld agent status`. Read-only:
+# the sole argv is an optional kind filter (agent|master). Emits one
+# tab-separated `name<TAB>kind<TAB>repo<TAB>raw-status` line per container.
+action_list_containers() {
+    local kind="${1:-}"
+    local filter=(--filter label=org.cld.kind)
+    [ -n "$kind" ] && filter=(--filter "label=org.cld.kind=$kind")
+    docker ps -a "${filter[@]}" --format '{{.Names}}'"$(printf '\t')"'{{.Status}}' \
+      | while IFS=$'\t' read -r name status; do
+            [ -n "$name" ] || continue
+            local labels ckind repo
+            labels=$(docker inspect "$name" --format \
+                '{{index .Config.Labels "org.cld.kind"}}|{{index .Config.Labels "org.cld.repo-root"}}' \
+                2>/dev/null) || continue
+            ckind="${labels%%|*}"
+            repo="${labels#*|}"
+            printf '%s\t%s\t%s\t%s\n' "$name" "$ckind" "$repo" "$status"
+        done
+}
+
+# Launch / manage a sibling `cld agent` on the host for one of this master's
+# registered repos. The caller (cld inside master) sends <target> <op> [args].
+# Security: <target> is validated against the master's host-set labels
+# (org.cld.repo-root + org.cld.targets), never trusted from the caller alone,
+# and <op> against a fixed set -- so this can only ever run `cld agent` for a
+# repo the host already sanctioned, never an arbitrary command or path.
+action_agent() {
+    local target="${1:-}" op="${2:-}"
+    shift 2 2>/dev/null || { echo "denied: agent needs <target> <op>" >&2; exit 2; }
+    case "$op" in
+        start|restart|shutdown|status|logs) ;;
+        *) echo "denied: bad agent op '$op'" >&2; exit 2 ;;
+    esac
+
+    local targets allowed=0 t
+    targets=$(docker inspect "$session" --format '{{index .Config.Labels "org.cld.targets"}}' 2>/dev/null) || true
+    [ "$target" = "$REPO" ] && allowed=1
+    local IFS=:
+    for t in $targets; do [ "$target" = "$t" ] && allowed=1; done
+    unset IFS
+    [ "$allowed" = 1 ] || { echo "denied: target '$target' not registered for $session" >&2; exit 3; }
+    { [ -d "$target/.jj" ] || [ -d "$target/.git" ]; } \
+        || { echo "denied: target '$target' is not a repo" >&2; exit 3; }
+
+    # `cld agent` (no subcommand) starts; the rest are subcommands.
+    cd "$target" || { echo "cannot cd to $target" >&2; exit 3; }
+    if [ "$op" = start ]; then
+        exec cld agent "$@"
+    else
+        exec cld agent "$op" "$@"
+    fi
 }
 
 # Template for a second action -- copy, rename, point at its image, enable by
@@ -71,21 +141,9 @@ REPO=$(docker inspect "$session" --format '{{index .Config.Labels "org.cld.repo-
 [ -n "$REPO" ] && { [ -d "$REPO/.jj" ] || [ -d "$REPO/.git" ]; } \
     || { echo "no master/repo for session $session" >&2; exit 3; }
 
-# Shared context: resolve the session's current change (store-reading only, per
-# design decision 5 -- never moves the store's working copy).
-REV=$(jj -R "$REPO" log --no-graph -n1 -r "$session" -T commit_id) \
-    || { echo "cannot resolve revision for $session" >&2; exit 3; }
-
-# Project subdirectory: `pyproject_dir` in the repo's own cld config (default
-# "."), relative to the repo root. Holds both pyproject.toml and .env; missing
-# .env is fine -- the runner just runs without it.
-PROJECT_SUBDIR=$(cld_conf_get "$REPO/.cld/config.toml" pyproject_dir)
-: "${PROJECT_SUBDIR:=.}"
-case "$PROJECT_SUBDIR" in
-    /*) SECRETS_ENV_FILE="$PROJECT_SUBDIR/.env" ;;
-    .)  SECRETS_ENV_FILE="$REPO/.env" ;;
-    *)  SECRETS_ENV_FILE="$REPO/$PROJECT_SUBDIR/.env" ;;
-esac
+# Per-action context (REV, secrets, target validation) is resolved inside each
+# action_* function now, so read-only actions don't pay for -- or fail on --
+# resolution they don't need.
 
 # Arbitrary argv, decoded from base64(NUL-joined argv). Never eval'd, so it can
 # only ever become arguments to the action's command.

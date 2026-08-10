@@ -12,6 +12,7 @@ from cld.docker import (
     build_session_name,
     ensure_image,
     find_target_repo,
+    in_master_container,
     require_docker,
     run_extra_paths,
     to_host_path,
@@ -41,6 +42,13 @@ def launch_run(
     resolved base revision + scratch envelope. The final ``AGENT_ANCHOR_HASH``
     (== B) is computed peer-side and surfaces in the agent's ``summary.json``.
     """
+    if in_master_container():
+        log.error(
+            "`cld run` is not supported from inside a master container "
+            "(no docker daemon). Run it on the host, or use `cld agent` to "
+            "launch a sibling agent."
+        )
+        sys.exit(1)
     require_docker()
     if not task_file and not inline_prompt:
         log.error("No task file or prompt provided")

@@ -148,6 +148,9 @@ class TestOutboxSnapshot:
 
 
 class TestListContainers:
+    """mailbox.list_containers delegates to the host-docker seam; on the host
+    (in_master_container False) that hits the local daemon."""
+
     def test_parses_docker_output(self, tmp_path):
         ps_result = type("R", (), {
             "returncode": 0,
@@ -158,7 +161,8 @@ class TestListContainers:
             type("R", (), {"returncode": 0, "stdout": "agent|/home/u/repoA\n"})(),
             type("R", (), {"returncode": 0, "stdout": "master|/home/u/repoB\n"})(),
         ]
-        with patch("cld.messenger.mailbox.subprocess.run", side_effect=[ps_result, *inspect_results]):
+        with patch("cld.host_docker.in_master_container", return_value=False), \
+             patch("cld.host_docker.subprocess.run", side_effect=[ps_result, *inspect_results]):
             containers = list_containers()
         assert containers == [
             {"name": "cld_agent_repoA", "kind": "agent", "repo": "/home/u/repoA", "status": "running"},
@@ -167,7 +171,8 @@ class TestListContainers:
 
     def test_docker_failure_returns_empty(self, tmp_path):
         fail_result = type("R", (), {"returncode": 1, "stdout": "", "stderr": "docker not found"})()
-        with patch("cld.messenger.mailbox.subprocess.run", return_value=fail_result):
+        with patch("cld.host_docker.in_master_container", return_value=False), \
+             patch("cld.host_docker.subprocess.run", return_value=fail_result):
             assert list_containers() == []
 
 
@@ -180,6 +185,13 @@ class TestResolveRecipient:
 
     def test_full_name_used_verbatim(self):
         assert resolve_recipient("cld_master_repoB_ef567890", self._CONTAINERS) == "cld_master_repoB_ef567890"
+
+    def test_existing_mailbox_short_circuits_without_enumeration(self, tmp_path):
+        # Reply path: `to` names an existing mailbox dir -> return verbatim and
+        # never call list_containers (so agents can reply with no host channel).
+        (tmp_path / "cld_agent_repoA").mkdir()
+        with patch("cld.messenger.mailbox.list_containers", side_effect=AssertionError("enumerated")):
+            assert resolve_recipient("cld_agent_repoA", root=tmp_path) == "cld_agent_repoA"
 
     def test_shortname_prefers_agent_over_master(self):
         assert resolve_recipient("repoA", self._CONTAINERS) == "cld_agent_repoA"

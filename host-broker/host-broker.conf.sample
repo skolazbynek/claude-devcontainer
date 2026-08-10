@@ -8,6 +8,7 @@
 
 RUNTESTS_IMAGE=runtests:latest
 
-# The forced command runs with a minimal PATH; make jj + docker (and any other
-# tools your actions call) reachable:
+# The forced command runs with a minimal PATH; make jj, docker, and cld (the
+# `agent` action runs host-side `cld agent`) -- plus any other tools your
+# actions call -- reachable:
 # PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin

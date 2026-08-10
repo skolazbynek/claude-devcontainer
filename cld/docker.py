@@ -168,21 +168,15 @@ def ensure_image(
     Returns the content hash of the (now-current) image.
     """
     if in_master_container():
-        # Inside a master container we share the host's docker daemon (so its
-        # images are already visible) but have no build context -- imgs/ isn't
-        # baked into /opt/cld -- and the host owns image building. Never attempt
-        # a rebuild here; trust the host-built image, or fail clearly if the
-        # host never built it.
-        exists = bool(subprocess.run(
-            ["docker", "images", "-q", image], capture_output=True, text=True,
-        ).stdout.strip())
-        if not exists:
-            raise RuntimeError(
-                f"image '{image}' not found and cannot be built from inside a "
-                "master container. Build it on the host first with `cld build`."
-            )
-        log.debug("inside master; trusting host-built image %s (no rebuild)", image)
-        return ""
+        # No docker daemon inside master (socket removed). Image building is the
+        # host's job, and container launches from inside master are delegated to
+        # the host broker (which runs host-side `cld`, ensuring images there), so
+        # this should never be reached. Fail clearly if it somehow is.
+        raise RuntimeError(
+            f"image '{image}' cannot be ensured from inside a master container "
+            "(no docker daemon). Container launches are delegated to the host "
+            "broker; build images on the host with `cld build`."
+        )
 
     parent_hash: str | None = None
     if parent_image:
@@ -259,12 +253,12 @@ def find_target_repo(cfg: Config) -> Path:
 def anchor_env_args(cfg: Config, session: str, revision: str) -> list[str]:
     """Return the docker `-e` args carrying anchor info to a peer container.
 
-    Uniform for host and delegated (inside-master) launches: the host resolves
-    the revision to a commit hash when it has a jj view, or leaves it symbolic
-    when running inside master (which has no RW view of the target repo). The
-    peer entrypoint uses this as the base for ``jj workspace add`` and then
-    creates the anchor commit B inside that workspace via ``stage_from_env``.
-    See docs/design-anchor-change.md.
+    The host resolves the base revision to a commit hash from its jj view; the
+    peer entrypoint uses it as the base for ``jj workspace add`` and then creates
+    the anchor commit B inside that workspace via ``stage_from_env``. See
+    docs/design-anchor-change.md. Only ever called host-side now: launches from
+    inside master are delegated to the host broker (see cld/host_docker.py), so
+    the container itself never builds a peer's args.
     """
     from cld.vcs import get_backend
     from cld.vcs.anchor import resolve_anchor
@@ -273,11 +267,8 @@ def anchor_env_args(cfg: Config, session: str, revision: str) -> list[str]:
     scratch = {"session": f"{session}\n".encode()}
     payload = encode_scratch_envelope(scratch)
 
-    if in_master_container():
-        hint = revision
-    else:
-        hint = resolve_anchor(get_backend(), revision)
-        log.info("Anchor base: %s", hint[:12])
+    hint = resolve_anchor(get_backend(), revision)
+    log.info("Anchor base: %s", hint[:12])
 
     return [
         "-e", f"AGENT_REVISION_HINT={hint}",
@@ -366,7 +357,8 @@ def build_container_args(
     """Build the base ``docker run`` argument list every launcher needs.
 
     Sets up security constraints, volume mounts (repo, claude config,
-    docker socket, mysql), and environment variables. Devcontainer-only
+    mysql), and environment variables. No docker socket is mounted (see the
+    note in the body). Devcontainer-only
     mounts (gitconfig, bashrc, nvim) are added by the launcher in cli.py.
 
     ``master`` and ``agent`` are mutually exclusive persistent-container
@@ -453,27 +445,27 @@ def build_container_args(
     args += ["-e", f"SESSION_NAME={session_name}"]
     log.info(f"Session name: {session_name}")
 
+    # Host-path plumbing: lets in-container code translate /workspace/* and
+    # $HOME back to host paths (path translation, sibling-target resolution).
+    # Always set -- these used to ride along with the docker socket mount, which
+    # has since been removed (the host channel is now the broker; see
+    # cld/host_docker.py and docs/design-host-test-running.md).
+    args += [
+        "-e", f"CLD_HOST_PROJECT_DIR={host_repo_root}",
+        "-e", f"CLD_HOST_HOME={host_home}",
+    ]
+
     # Workspace setup: gitignored files to symlink into workspace
     if cfg.ignore_gitignore:
         workspace_files = ":".join(cfg.ignore_gitignore)
         args += ["-e", f"WORKSPACE_FILES={workspace_files}"]
         log.debug(f"Workspace files to link: {workspace_files}")
 
-    # Docker socket (conditional)
-    docker_sock = Path("/var/run/docker.sock")
-    sock_present = docker_sock.is_socket()
-    log.debug("Docker socket probe: path=%s found=%s", docker_sock, sock_present)
-    if sock_present:
-        docker_gid = docker_sock.stat().st_gid
-        args += [
-            "-v", f"{docker_sock}:{docker_sock}",
-            "--group-add", str(docker_gid),
-            "-e", f"CLD_HOST_PROJECT_DIR={repo_root}",
-            "-e", f"CLD_HOST_HOME={home}",
-        ]
-        log.info("Docker socket mounted (messenger list_agents via docker ps)")
-    else:
-        log.warning("Docker socket not found, messenger list_agents will be unavailable")
+    # No docker socket is mounted into any container (it was equivalent to host
+    # root). In-container docker needs -- peer enumeration and sibling `cld
+    # agent` launches from inside master -- go through the host broker over SSH
+    # (see cld/host_docker.py, host-broker/host-broker.sh). The broker key is
+    # mounted master-only by stage_host_broker below.
 
     # MySQL (conditional)
     if cfg.mysql_config:
@@ -504,14 +496,13 @@ def build_container_args(
             # Bare host: our own filesystem view already *is* the host view.
             mailbox_root.mkdir(parents=True, exist_ok=True)
         else:
-            # Nested (cld running inside another container, sibling-container
-            # pattern): the real host path isn't in our filesystem view.
-            # Deliberately do NOT reach across the docker socket to create it
-            # there -- container isolation from the host is a hard
-            # requirement even though the socket happens to be shared for
-            # launching sibling containers. If the path doesn't already exist
-            # on the real host, `docker run` will auto-create it as root and
-            # the non-root container user won't be able to write into it.
+            # Nested (cld running inside another container): the real host path
+            # isn't in our filesystem view, and with no docker socket mounted
+            # there is no way (nor any wish) to reach across to the host to
+            # create it -- container isolation from the host is a hard
+            # requirement. If the path doesn't already exist on the real host,
+            # `docker run` will auto-create it as root and the non-root
+            # container user won't be able to write into it.
             log.warning(
                 "Mailbox root %s is outside this process's filesystem view "
                 "(nested cld). If it doesn't already exist on the real host, "
@@ -553,7 +544,12 @@ def build_container_args(
                 sys.exit(1)
             expanded_targets.append(expanded)
             log.info("Master target registered: %s", expanded)
-        args += ["-e", "MASTER_TARGETS=" + ":".join(expanded_targets)]
+        joined = ":".join(expanded_targets)
+        args += ["-e", f"MASTER_TARGETS={joined}"]
+        # Host-set, immutable allowlist the broker validates sibling `cld agent`
+        # launches against (a container can rewrite its MASTER_TARGETS env but
+        # not this label). See action_agent in host-broker/host-broker.sh.
+        args += ["--label", f"org.cld.targets={joined}"]
 
     log.debug("Container args: %s", mask_secrets(repr(args)))
     return args

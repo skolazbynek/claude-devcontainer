@@ -8,12 +8,13 @@ Layout under a mailbox root (``~/.cld/mailboxes`` by default, see ``cld.config``
     <root>/<container_name>/outbox.log -- append-only audit trail of sent messages
 
 All mutations are same-filesystem ``rename()`` calls, so no reader ever observes
-a partial write. Pure filesystem + subprocess (docker) code -- no MCP/FastMCP
-imports here so it stays unit-testable with ``tmp_path``.
+a partial write. Pure filesystem code -- no MCP/FastMCP imports here so it stays
+unit-testable with ``tmp_path``. Container enumeration (the one non-filesystem
+bit) is delegated to ``cld.host_docker`` and imported lazily inside
+``list_containers``.
 """
 
 import json
-import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -157,50 +158,32 @@ def outbox_changed_since(root: Path, name: str, snapshot: int) -> bool:
 
 
 def list_containers(kind: str | None = None) -> list[dict]:
-    """Enumerate cld containers via Docker labels.
+    """Enumerate cld containers, ``{name, kind, repo, status}`` per entry.
 
-    *kind* filters to ``"agent"`` or ``"master"``; omit for both. Each entry is
-    ``{name, kind, repo, status}``. Uses ``docker ps -a`` so stopped masters are
-    included (agent containers run ``--rm`` and disappear once exited).
+    *kind* filters to ``"agent"`` or ``"master"``; omit for both. Delegates to
+    the host-docker seam: the local daemon on the host, the SSH broker inside
+    master (there is no docker socket in-container). Stopped masters are
+    included; agent containers run ``--rm`` and disappear once exited.
     """
-    filters = ["--filter", f"label=org.cld.kind={kind}"] if kind else ["--filter", "label=org.cld.kind"]
-    result = subprocess.run(
-        ["docker", "ps", "-a", *filters, "--format", "{{.Names}}\t{{.Status}}"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        log.warning("docker ps failed: %s", result.stderr.strip())
-        return []
-
-    containers = []
-    for line in result.stdout.strip().splitlines():
-        if not line:
-            continue
-        name, _, status = line.partition("\t")
-        inspect = subprocess.run(
-            ["docker", "inspect", name, "--format",
-             '{{index .Config.Labels "org.cld.kind"}}|{{index .Config.Labels "org.cld.repo-root"}}'],
-            capture_output=True, text=True,
-        )
-        if inspect.returncode != 0:
-            continue
-        parts = inspect.stdout.strip().split("|", 1)
-        containers.append({
-            "name": name,
-            "kind": parts[0] if parts else "",
-            "repo": parts[1] if len(parts) > 1 else "",
-            "status": "running" if status.lower().startswith("up") else "stopped",
-        })
-    return containers
+    from cld.host_docker import list_cld_containers
+    return list_cld_containers(kind)
 
 
-def resolve_recipient(to: str, containers: list[dict] | None = None) -> str:
+def resolve_recipient(to: str, containers: list[dict] | None = None, root: Path | None = None) -> str:
     """Resolve a shortname (repo basename) or full container name to a full container name.
 
-    Prefers an ``agent`` over a ``master`` when both exist for the same basename.
-    Raises ValueError if *to* is a shortname matching containers from two different
-    repo roots (ambiguous), or if it isn't found at all.
+    When *root* is given and *to* already names an existing mailbox directory
+    under it, return *to* directly -- this is the reply path (the recipient's
+    full name comes from the message's ``from`` field), and it needs no container
+    enumeration, so agents can reply without any host channel.
+
+    Otherwise enumerate: prefer an ``agent`` over a ``master`` when both exist
+    for the same basename. Raises ValueError if *to* is a shortname matching
+    containers from two different repo roots (ambiguous), or isn't found at all.
     """
+    if root is not None and mailbox_dir(root, to).is_dir():
+        return to
+
     all_containers = containers if containers is not None else list_containers()
 
     for c in all_containers:

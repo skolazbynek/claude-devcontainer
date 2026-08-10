@@ -31,7 +31,6 @@ from cld.docker import (
     find_repo_root,
     find_target_repo,
     in_master_container,
-    MAILBOX_MOUNT,
     master_container_name,
     require_docker,
     run_extra_paths,
@@ -39,6 +38,7 @@ from cld.docker import (
     stage_ssh_agent,
     to_host_path,
 )
+from cld.host_docker import broker_agent_op, broker_available
 from cld.run import launch_run
 from cld.log import get_logger, setup_logging
 from cld.prompts import resolve_prompt_ref
@@ -152,6 +152,7 @@ def _run_devcontainer(
     extra_args: list[str] | None,
 ) -> None:
     """Ephemeral interactive devcontainer launch. Persistent master/agent live in their own sub-apps."""
+    _reject_in_master("cld")
     require_docker()
     task_path = Path(task_file) if task_file else None
     if task_path and not task_path.is_file():
@@ -235,6 +236,41 @@ def _wait_for_container_ready(name: str, sentinel: str, timeout: int = 60) -> bo
 
 def _persistent_container_name(role: str, repo_root: Path) -> str:
     return master_container_name(repo_root) if role == "master" else agent_container_name(repo_root)
+
+
+def _dispatch_agent_to_broker(cfg: Config, op: str, extra_args: list[str] | None = None) -> None:
+    """From inside master, delegate a `cld agent <op>` to the host broker.
+
+    Master has no docker daemon (socket removed); the broker runs host-side
+    `cld agent <op>` for the cwd-selected target repo and streams its output
+    back. Exits with the broker's exit code. See cld/host_docker.py.
+    """
+    if not broker_available():
+        typer.echo(
+            "Error: the host broker is not configured for this master, so `cld agent` "
+            "cannot reach the host to launch a sibling agent. Set `host_broker_key` "
+            "(and `host_broker_known_hosts`) in cld config and restart master.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    target = str(find_target_repo(cfg))  # resolve_master_target: cwd -> host path
+    log.info("Delegating `cld agent %s` for %s to host broker", op or "start", target)
+    raise typer.Exit(broker_agent_op(target, op, extra_args))
+
+
+def _reject_in_master(cmd: str) -> None:
+    """Abort a command that isn't supported from inside a master container.
+
+    Only `cld agent <op>` (delegated to the broker) and `cld master repos`
+    (config-only) work in-master; everything else needs a real host daemon.
+    """
+    if in_master_container():
+        typer.echo(
+            f"Error: `{cmd}` is not supported from inside a master container. "
+            "Run it on the host, or use `cld agent` to launch a sibling agent.",
+            err=True,
+        )
+        raise typer.Exit(1)
 
 
 def _persistent_container_status(role: str, name: str) -> str:
@@ -404,9 +440,9 @@ def _do_status(role: str) -> None:
     typer.echo(f"  Container: {docker_status}")
     if role != "agent":
         return
-    # Inside master the host mailbox_root ($HOME/.cld/mailboxes) is not mounted;
-    # only MAILBOX_MOUNT is. Use it so `cld agent status` works from master too.
-    mailbox_root = Path(MAILBOX_MOUNT) if in_master_container() else Path(cfg.mailbox_root).expanduser()
+    # Host-only path now: `cld agent status` from inside master is delegated to
+    # the broker, which runs this on the host against the real mailbox_root.
+    mailbox_root = Path(cfg.mailbox_root).expanduser()
     state_path = mailbox_root / container_name / "state.json"
     if not state_path.is_file():
         typer.echo("  Supervisor state: unavailable (not started yet, or mailbox_root misconfigured)")
@@ -464,6 +500,7 @@ def master(
     """Start (or attach to) the persistent master devcontainer for this repo."""
     if ctx.invoked_subcommand is not None:
         return
+    _reject_in_master("cld master")
     remaining = list(ctx.args)
     task_file = remaining[0] if remaining else None
     task_path = Path(task_file) if task_file else None
@@ -479,6 +516,7 @@ def master(
 @_handle_errors
 def master_restart():
     """Restart the master devcontainer for this repo, picking up image/code changes."""
+    _reject_in_master("cld master restart")
     _do_restart("master")
 
 
@@ -488,6 +526,7 @@ def master_shutdown(
     all_: bool = typer.Option(False, "--all", help="Stop all master containers on this host"),
 ):
     """Stop and remove the master devcontainer for this repo (or all with --all)."""
+    _reject_in_master("cld master shutdown")
     _do_shutdown("master", all_)
 
 
@@ -495,6 +534,7 @@ def master_shutdown(
 @_handle_errors
 def master_status():
     """Print status of the master devcontainer for this repo."""
+    _reject_in_master("cld master status")
     _do_status("master")
 
 
@@ -504,6 +544,7 @@ def master_logs(
     tail: int = typer.Option(80, "-n", "--tail", help="Number of lines to show"),
 ):
     """Tail the master container's log output."""
+    _reject_in_master("cld master logs")
     _do_logs("master", tail)
 
 
@@ -551,6 +592,13 @@ def agent(
         return
     cfg = Config.from_env()
     setup_logging(cfg)
+    if in_master_container():
+        extra: list[str] = []
+        if model:
+            extra += ["-m", model]
+        if revision:
+            extra += ["-r", revision]
+        _dispatch_agent_to_broker(cfg, "start", extra)
     _run_persistent_devcontainer("agent", None, "", model, revision, "", cfg)
 
 
@@ -558,6 +606,8 @@ def agent(
 @_handle_errors
 def agent_restart():
     """Restart the repo agent for this repo, picking up image/code changes."""
+    if in_master_container():
+        _dispatch_agent_to_broker(Config.from_env(), "restart")
     _do_restart("agent")
 
 
@@ -567,6 +617,8 @@ def agent_shutdown(
     all_: bool = typer.Option(False, "--all", help="Stop all agent containers on this host"),
 ):
     """Stop and remove the repo agent for this repo (or all with --all)."""
+    if in_master_container():
+        _dispatch_agent_to_broker(Config.from_env(), "shutdown", ["--all"] if all_ else None)
     _do_shutdown("agent", all_)
 
 
@@ -574,6 +626,8 @@ def agent_shutdown(
 @_handle_errors
 def agent_status():
     """Print status of the repo agent for this repo (docker + supervisor phase)."""
+    if in_master_container():
+        _dispatch_agent_to_broker(Config.from_env(), "status")
     _do_status("agent")
 
 
@@ -583,6 +637,8 @@ def agent_logs(
     tail: int = typer.Option(80, "-n", "--tail", help="Number of lines to show"),
 ):
     """Tail the repo agent's log output (= supervisor stderr)."""
+    if in_master_container():
+        _dispatch_agent_to_broker(Config.from_env(), "logs", ["-n", str(tail)])
     _do_logs("agent", tail)
 
 

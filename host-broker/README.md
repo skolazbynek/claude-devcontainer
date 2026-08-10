@@ -55,8 +55,10 @@ claude's only host channel).
 1. **Keys.** `./keygen.sh /etc/cld` (or any dir), then note the printed
    `known_hosts` line.
 2. **Config.** Copy `host-broker.conf.sample` to `/etc/cld/host-broker.conf` and
-   set `RUNTESTS_IMAGE` + `PATH`. There is nothing per-repo to set -- the repo
-   and its secrets path are resolved per request.
+   set `RUNTESTS_IMAGE` + `PATH`. `PATH` must include both `docker` and `cld`
+   (the `agent` action runs host-side `cld agent` for sibling launches). There
+   is nothing per-repo to set -- the repo and its secrets path are resolved per
+   request.
 3. **Broker script.** Install `host-broker.sh` at `/opt/cld/host-broker.sh`
    (path referenced by `ForceCommand`), `chmod +x`.
 4. **sshd.** Edit `sshd_cld_broker.conf` (`AllowUsers`, `ListenAddress` for your
@@ -105,12 +107,19 @@ action_lint() {
 ```
 
 It receives the decoded argv as `"$@"` and the shared context the dispatcher
-already prepared: `$REPO` (resolved from the session label), `$REV` (the
-session's current change), `$SECRETS_ENV_FILE` (may not exist),
-`$PROJECT_SUBDIR`, and `$RUNTESTS_IMAGE`. Call it from a container with
-`host-run --action lint <args>` (no `--action` ⇒ `run-tests`). An action name
-that has no matching function is denied, so enabling/disabling is just
-defining/removing the function.
+prepared: `$session` (validated master session id) and `$REPO` (resolved from
+the session label). Per-action context is resolved lazily inside the action --
+`run-tests` calls `resolve_test_context` for `$REV` / `$SECRETS_ENV_FILE` /
+`$PROJECT_SUBDIR` -- so read-only actions don't depend on the session bookmark
+being resolvable. Call it from a container with `host-run --action lint <args>`
+(no `--action` ⇒ `run-tests`). An action name that has no matching function is
+denied, so enabling/disabling is just defining/removing the function.
+
+**Built-in actions:** `run-tests` (default; pytest in the `runtests` container),
+`list-containers` (read-only cld-container enumeration for the messenger /
+`cld agent status`), and `agent` (`<target> <op>` -- launch/manage a sibling
+`cld agent` on the host, with `<target>` validated against the master's
+host-set `org.cld.repo-root` + `org.cld.targets` labels).
 
 ## Security notes
 

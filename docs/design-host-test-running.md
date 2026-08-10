@@ -27,7 +27,7 @@ streamed test output.
 
 | # | Decision |
 |---|---|
-| 1 | The docker socket is being removed from `cld master` (out of scope for this work). **Design assumes master has no docker socket** — SSH is `claude`'s only host channel, so secrets genuinely stay away from `claude`. |
+| 1 | The docker socket is **no longer mounted** into any cld container. **Master has no docker socket** — the broker (SSH) is `claude`'s only host channel, so secrets genuinely stay away from `claude`. In-container docker needs (peer enumeration, sibling `cld agent` launches) route through broker actions; see `cld/host_docker.py` and the `list-containers`/`agent` actions in `host-broker/host-broker.sh`. |
 | 2 | The **raw `.env` may be mounted** into the `runtests` container (`claude` cannot reach that container). |
 | 3 | `runtests` accepts an **arbitrary `REVISION`**; when run ad-hoc it **defaults to `@`**. In the brokered path the broker supplies the change. |
 | 4 | The broker passes **the current change of the `cld master` container's jj workspace**. |

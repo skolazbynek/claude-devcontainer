@@ -62,6 +62,9 @@ RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.
 RUN curl -sSL https://install.python-poetry.org | POETRY_HOME=~/.opt/poetry python3 - && \
     ln -s ~/.opt/poetry/bin/poetry ~/.local/bin/poetry
 
+# Install uv/uvx (needed by uvx-based MCP servers, e.g. mcp-grafana)
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="$HOME/.local/bin" sh
+
 # Install cld runtime dependencies (keep in sync with pyproject.toml).
 RUN pip install --user "mcp[cli]>=1.0" "typer>=0.9" "pyyaml>=6.0,<7.0"
 
