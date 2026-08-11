@@ -55,6 +55,10 @@ home_mounts_devcontainer = [
 # agent_max_turns = 30               # per-message turn cap for the agent supervisor
 # agent_kickoff_persona = "agent"  # persona used to kick off a new agent session
 
+# Task-scoped agents (see docs/design-task-agents.md)
+# max_task_agents = 4       # max running task-agents per master
+# peer_absolute_limit = 10  # hop budget for a peer edge whose --peer spec omits one
+
 # Host test broker (master only). Set host_broker_key to enable a `host-run`
 # wrapper inside master that runs the repo's tests on the host via the standalone
 # `runtests` container, keeping secrets off the container. Requires host-side

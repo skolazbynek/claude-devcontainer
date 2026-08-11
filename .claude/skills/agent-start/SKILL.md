@@ -13,7 +13,12 @@ user-invocable: true
 
 Launches a persistent per-repo agent as a sibling container of the current
 master. `cld agent` is idempotent per repo -- if one already exists (running
-or stopped), it reports that and returns without re-launching. Sibling agents
+or stopped), it reports that and returns without re-launching.
+
+**Wrong skill for one bounded piece of work.** A repo agent is a standing
+teammate that lives as long as its container; for a task with a definition of
+done, a deliverable branch and a teardown, use `task-agent-start` instead. Many
+task-agents can run per repo; only one repo agent can. Sibling agents
 communicate via the mailbox/messenger transport once running (see the
 `messenger-send` skill).
 

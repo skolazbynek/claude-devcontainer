@@ -73,3 +73,20 @@ class TestBrokerAgentOp:
     def test_propagates_exit_code(self):
         with patch("cld.host_docker.subprocess.run", return_value=_cp(returncode=1)):
             assert host_docker.broker_agent_op("/repo/y", "shutdown") == 1
+
+
+class TestBrokerTaskAgentOp:
+    def test_uses_its_own_action_and_forwards_argv(self):
+        """A separate action from `agent`: different op set, and its own argv rules."""
+        argv = ["@implementer", "-n", "add-oauth", "-p", "do it", "--peer", "cld_agent_x_y:3"]
+        with patch("cld.host_docker.subprocess.run", return_value=_cp(returncode=0)) as run:
+            rc = host_docker.broker_task_agent_op("/repo/y", "start", argv)
+        assert rc == 0
+        cmd = run.call_args[0][0]
+        assert cmd[0].endswith("host-run")
+        assert cmd[1:] == ["--action", "task-agent", "/repo/y", "start", *argv]
+        assert run.call_args.kwargs["capture_output"] is False
+
+    def test_propagates_exit_code(self):
+        with patch("cld.host_docker.subprocess.run", return_value=_cp(returncode=2)):
+            assert host_docker.broker_task_agent_op("/repo/y", "shutdown", ["--all"]) == 2

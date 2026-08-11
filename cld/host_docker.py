@@ -145,3 +145,15 @@ def broker_agent_op(target: str, op: str, extra_args: list[str] | None = None) -
     """
     result = _run_host_run("agent", target, op, *(extra_args or []), capture=False)
     return result.returncode
+
+
+def broker_task_agent_op(target: str, op: str, extra_args: list[str] | None = None) -> int:
+    """Delegate a `cld task-agent <op>` for *target* to the host broker.
+
+    Same seam as ``broker_agent_op``, separate action: the broker's task-agent action
+    has its own op set and enforces the argv rules a container must not be able to
+    bypass -- it denies ``--force`` and a caller-supplied ``--parent``, and stamps the
+    calling master's session as the parent itself (see host-broker/host-broker.sh).
+    """
+    result = _run_host_run("task-agent", target, op, *(extra_args or []), capture=False)
+    return result.returncode

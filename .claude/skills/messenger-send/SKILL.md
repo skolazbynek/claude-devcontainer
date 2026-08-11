@@ -23,6 +23,10 @@ python -m cld.messenger.agents
 The recipient is the container `name` (or its repo basename as a shortname).
 An agent is preferred over a master when both exist for the same shortname.
 
+**Task-agents and peers must be addressed by full container name** -- several
+task-agents can share one repo, so a basename identifies nothing and the send is
+refused as ambiguous.
+
 ## Step 2: Draft subject and body
 
 From the user's intent, draft:
@@ -50,3 +54,14 @@ rm -f "$BODY_FILE"
 ```
 
 Report the returned id to the user.
+
+## Hop budget (agent-to-agent only)
+
+A message between two task-agents counts against that edge's absolute hop budget, and
+the output reports your position: `sent: <id>  a -> b  (hop 3/10)`. Converge as it
+nears the limit -- land the exchange rather than letting it drift.
+
+Once the budget is spent the send is **refused** (exit 1) and nothing is delivered, in
+either direction, ever again on that edge. Do not retry it and do not work around it:
+tell your master, whose channel is never budgeted, and let it decide what happens next.
+Messages to a master are never counted.

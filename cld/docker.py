@@ -2,11 +2,13 @@
 
 import hashlib
 import os
+import re
 import secrets
 import shutil
 import subprocess
 import sys
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from cld.config import Config
@@ -345,6 +347,45 @@ def to_host_path(path: str, cfg: Config) -> str:
     return path
 
 
+@dataclass(frozen=True)
+class TaskAgentSpec:
+    """Immutable spawn facts for one task-scoped agent (docs/design-task-agents.md).
+
+    ``parent_master`` is empty when a human launched the agent directly on the
+    host: it is the label a master's fleet operations key on, so attributing an
+    unrequested agent to a master would hand it authority to reap one it never
+    spawned. ``peers`` maps each allowed peer's full container name to that
+    edge's hop budget (D28).
+    """
+
+    slug: str
+    parent_master: str = ""
+    deliverable_branch: str = ""
+    peers: dict[str, int] = field(default_factory=dict)
+
+    def peers_env(self) -> str:
+        """Encode ``peers`` for the container: ``name:hops`` pairs, comma-separated.
+
+        Comma rather than the repo's usual colon-separated list convention,
+        because ``:`` is the name/budget delimiter inside each pair.
+        """
+        return ",".join(f"{name}:{hops}" for name, hops in sorted(self.peers.items()))
+
+
+def parse_peers_env(value: str) -> dict[str, int]:
+    """Inverse of ``TaskAgentSpec.peers_env`` -- read by the supervisor in the container."""
+    peers: dict[str, int] = {}
+    for segment in value.split(","):
+        segment = segment.strip()
+        if not segment:
+            continue
+        name, _, hops = segment.partition(":")
+        if not name or not hops.isdigit():
+            raise ValueError(f"malformed peer spec {segment!r}: expected '<name>:<hops>'")
+        peers[name] = int(hops)
+    return peers
+
+
 def build_container_args(
     repo_root: Path,
     session_name: str,
@@ -353,6 +394,7 @@ def build_container_args(
     interactive: bool = False,
     master: bool = False,
     agent: bool = False,
+    task_agent: TaskAgentSpec | None = None,
 ) -> list[str]:
     """Build the base ``docker run`` argument list every launcher needs.
 
@@ -361,13 +403,14 @@ def build_container_args(
     note in the body). Devcontainer-only
     mounts (gitconfig, bashrc, nvim) are added by the launcher in cli.py.
 
-    ``master`` and ``agent`` are mutually exclusive persistent-container
-    roles (the latter is the headless messaging agent, unrelated to the
-    one-shot `cld agent` command); either one adds the ``org.cld.kind``
-    label set and mounts the shared mailbox tree.
+    ``master``, ``agent`` and ``task_agent`` are mutually exclusive
+    persistent-container roles (``agent`` is the headless messaging agent,
+    unrelated to the one-shot `cld agent` command; ``task_agent`` is the
+    task-scoped one); any of them adds the ``org.cld.kind`` label set and
+    mounts the shared mailbox tree.
     """
-    if master and agent:
-        raise ValueError("master and agent are mutually exclusive roles")
+    if sum((master, agent, bool(task_agent))) > 1:
+        raise ValueError("master, agent and task_agent are mutually exclusive roles")
 
     home = os.path.expanduser("~")
     host_home = to_host_path(home, cfg)
@@ -378,8 +421,8 @@ def build_container_args(
     if interactive:
         args += ["-it"]
 
-    if master or agent:
-        kind = "master" if master else "agent"
+    if master or agent or task_agent:
+        kind = "master" if master else "task-agent" if task_agent else "agent"
         args += [
             "--name", session_name,
             "--label", f"org.cld.kind={kind}",
@@ -387,6 +430,24 @@ def build_container_args(
             "--label", f"org.cld.session={session_name}",
             "-e", f"{'MASTER_MODE' if master else 'AGENT_MODE'}=1",
         ]
+        if task_agent:
+            # TASK_AGENT_MODE modifies the AGENT_MODE branch (same mailbox
+            # precondition, readiness sentinel and supervisor exec) rather than
+            # being a fourth mode. Labels are host-set, so the cap and the
+            # own-fleet check can trust them; the env vars are what the
+            # in-container supervisor turns into meta.json.
+            args += [
+                "--label", f"org.cld.task={task_agent.slug}",
+                "--label", f"org.cld.parent-master={task_agent.parent_master}",
+                "-e", "TASK_AGENT_MODE=1",
+                "-e", f"AGENT_TASK_SLUG={task_agent.slug}",
+                "-e", f"AGENT_PARENT_MASTER={task_agent.parent_master}",
+                "-e", f"AGENT_DELIVERABLE_BRANCH={task_agent.deliverable_branch}",
+                "-e", f"AGENT_PEERS={task_agent.peers_env()}",
+                # In-container Config.from_env() sees no host user TOML, so the
+                # operator's configured fallback budget has to be passed in.
+                "-e", f"CLD_PEER_ABSOLUTE_LIMIT={cfg.peer_absolute_limit}",
+            ]
     else:
         args += ["--rm"]
 
@@ -487,9 +548,9 @@ def build_container_args(
     if master:
         args += stage_host_broker(cfg)
 
-    # Mailbox tree (master/agent persistent roles only) -- shared RW mount so
-    # every master and agent container sees the same mailbox filesystem.
-    if master or agent:
+    # Mailbox tree (persistent roles only) -- shared RW mount so every master,
+    # agent and task-agent container sees the same mailbox filesystem.
+    if master or agent or task_agent:
         mailbox_root = Path(cfg.mailbox_root).expanduser()
         host_mailbox_root = to_host_path(str(mailbox_root), cfg)
         if host_mailbox_root == str(mailbox_root):
@@ -570,6 +631,41 @@ def agent_container_name(repo_root: Path) -> str:
     return f"cld_agent_{repo_root.name}"
 
 
+_TASK_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def task_agent_container_name(repo_root: Path, slug: str, suffix: int = 0) -> str:
+    """Container name for a task-scoped agent: ``cld_agent_<repo>_<slug>[-<suffix>]``.
+
+    The ``cld_agent_`` prefix is deliberately shared with the repo agent -- the
+    ``org.cld.kind`` label is the discriminator, not the name (see
+    docs/design-task-agents.md D5). *suffix* > 1 is the collision disambiguator.
+    """
+    if not _TASK_SLUG_RE.match(slug):
+        raise ValueError(
+            f"invalid task slug {slug!r}: expected kebab-case (lowercase letters, "
+            "digits and dashes, starting with a letter or digit)"
+        )
+    base = f"cld_agent_{repo_root.name}_{slug}"
+    return f"{base}-{suffix}" if suffix > 1 else base
+
+
+def allocate_task_agent_name(repo_root: Path, slug: str) -> str:
+    """Return the first task-agent name for *slug* that no container holds yet.
+
+    Docker is the liveness ground truth here: an archived mailbox from a reaped
+    agent must not block its slug from being reused (§4). The master should still
+    prefer a fresh slug so names stay meaningful.
+    """
+    suffix = 0
+    while True:
+        name = task_agent_container_name(repo_root, slug, suffix)
+        if _docker_status(name) == "absent":
+            return name
+        log.info("task-agent name %s is taken; trying the next suffix", name)
+        suffix = max(suffix, 1) + 1
+
+
 def _docker_status(name: str) -> str:
     """Return 'running', 'stopped', or 'absent' for the named container."""
     result = subprocess.run(
@@ -590,34 +686,56 @@ def docker_agent_status(name: str) -> str:
     return _docker_status(name)
 
 
-def _docker_kind_list(kind: str) -> list[dict]:
-    """Return all containers of *kind* ('master' or 'agent') with their org.cld.* labels."""
-    label_filter = f"label=org.cld.kind={kind}"
+def docker_task_agent_status(name: str) -> str:
+    return _docker_status(name)
+
+
+# `docker inspect` exposes a container's labels at .Config.Labels; there is no
+# top-level .Labels (that's a `docker ps --format` field) and referencing a
+# missing *field* fails the whole template, which would silently drop every
+# container. A missing label *key* is fine -- index on a map yields "".
+_INSPECT_LABELS = (
+    ("repo_root", "org.cld.repo-root"),
+    ("session", "org.cld.session"),
+    ("kind", "org.cld.kind"),
+    ("parent", "org.cld.parent-master"),
+    ("task", "org.cld.task"),
+)
+_INSPECT_FORMAT = "|".join(f'{{{{index .Config.Labels "{label}"}}}}' for _, label in _INSPECT_LABELS)
+
+
+def _docker_kind_list(kind: str, *, running_only: bool = False) -> list[dict]:
+    """Return containers of *kind* ('master', 'agent', 'task-agent') with their org.cld.* labels.
+
+    Records are ``{name, repo_root, session, kind, parent, task}``; the last two are
+    empty for roles that don't set them. ``running_only`` filters docker-side --
+    the task-agent cap counts running containers only, and `docker ps -a` would
+    otherwise let stopped corpses refuse a spawn (see docs/design-task-agents.md §9).
+    """
+    filters = ["--filter", f"label=org.cld.kind={kind}"]
+    if running_only:
+        filters += ["--filter", "status=running"]
     result = subprocess.run(
-        ["docker", "ps", "-a", "--filter", label_filter, "--format", "{{.Names}}"],
+        ["docker", "ps", "-a", *filters, "--format", "{{.Names}}"],
         capture_output=True, text=True,
     )
-    log_subprocess(log, ["docker", "ps", "-a", "--filter", label_filter], result)
+    log_subprocess(log, ["docker", "ps", "-a", *filters], result)
     if result.returncode != 0:
         return []
+    keys = [key for key, _ in _INSPECT_LABELS]
     containers: list[dict] = []
     for name in result.stdout.strip().splitlines():
         if not name:
             continue
         inspect = subprocess.run(
-            ["docker", "inspect", name, "--format",
-             '{{index .Labels "org.cld.repo-root"}}|{{index .Labels "org.cld.session"}}'],
+            ["docker", "inspect", name, "--format", _INSPECT_FORMAT],
             capture_output=True, text=True,
         )
         log_subprocess(log, ["docker", "inspect", name], inspect)
         if inspect.returncode != 0:
             continue
-        parts = inspect.stdout.strip().split("|", 1)
-        containers.append({
-            "name": name,
-            "repo_root": parts[0] if parts else "",
-            "session": parts[1] if len(parts) > 1 else "",
-        })
+        values = (inspect.stdout.strip().split("|") + [""] * len(keys))[:len(keys)]
+        containers.append({"name": name, **dict(zip(keys, values, strict=True))})
     return containers
 
 
@@ -629,6 +747,93 @@ def docker_master_list() -> list[dict]:
 def docker_agent_list() -> list[dict]:
     """Return all repo agent containers with their org.cld.* labels."""
     return _docker_kind_list("agent")
+
+
+def docker_task_agent_list(*, running_only: bool = False) -> list[dict]:
+    """Return all task-agent containers with their org.cld.* labels."""
+    return _docker_kind_list("task-agent", running_only=running_only)
+
+
+def assert_task_agent_capacity(cfg: Config, parent_master: str) -> None:
+    """Raise if *parent_master* already runs ``cfg.max_task_agents`` task-agents.
+
+    Running containers only -- stopped corpses must not refuse a spawn. The empty
+    parent (a human-launched agent with no master) is counted as its own group:
+    the cap exists to bound shared jj-store contention, which doesn't care who
+    spawned what. See docs/design-task-agents.md §9.
+    """
+    running = [c for c in docker_task_agent_list(running_only=True) if c["parent"] == parent_master]
+    if len(running) < cfg.max_task_agents:
+        return
+    listed = ", ".join(f"{c['name']} ({c['task'] or 'no task'})" for c in running)
+    raise RuntimeError(
+        f"task-agent cap reached for {parent_master or 'host-launched agents (no master)'}: "
+        f"{len(running)}/{cfg.max_task_agents} running [{listed}]. Reap one with "
+        "`cld task-agent shutdown <name>`, or raise max_task_agents / CLD_MAX_TASK_AGENTS."
+    )
+
+
+def resolve_task_agent_anchor(cfg: Config, repo_root: Path, revision: str) -> str:
+    """Resolve *revision* to a commit hash, refusing an anchor inside a live agent's stack.
+
+    A live agent may squash or rebase its own stack at any moment, so anchoring on
+    it pins the new agent to a base its owner has since revised -- silently, and
+    unfixable without re-anchoring from scratch. Teardown is the "finished" signal,
+    so the refusal names the owning agent and asks for it to be reaped first (§8, §9).
+
+    Scoped to task-agents running in *repo_root*, not to one master's fleet: the
+    hazard is store-level, so another master's live agent is just as dangerous.
+    jj-only -- peer-side anchor staging has no git equivalent. Anchoring on the
+    shared base still passes, since a live agent's anchor is a *child* of it.
+    """
+    from cld.messenger import mailbox
+    from cld.vcs import get_backend
+    from cld.vcs.anchor import resolve_anchor
+
+    vcs = get_backend(repo_root)
+    anchor = resolve_anchor(vcs, revision)
+    if vcs.name != "jj":
+        log.debug("live-stack anchor check skipped: %s backend has no equivalent", vcs.name)
+        return anchor
+
+    host_repo = to_host_path(str(repo_root), cfg)
+    mailbox_root = Path(cfg.mailbox_root).expanduser()
+    live: dict[str, str] = {}
+    for c in docker_task_agent_list(running_only=True):
+        if c["repo_root"] != host_repo:
+            continue
+        meta = mailbox.read_meta(mailbox_root, c["name"]) or {}
+        if meta.get("anchor"):
+            live[meta["anchor"]] = c["name"]
+    if not live:
+        return anchor
+
+    descendants = " | ".join(f"{a}::" for a in live)
+    probe = vcs.run(["log", "-r", f"{anchor} & ({descendants})", "--no-graph", "-T", "commit_id", "-n", "1"])
+    if probe.returncode != 0:
+        # Our own bookkeeping (a meta.json anchor no longer in the store) must not
+        # block a legitimate spawn -- warn and let it through.
+        log.warning(
+            "could not evaluate the live-stack anchor check against %s: %s",
+            ", ".join(f"{name}@{a[:12]}" for a, name in live.items()), (probe.stderr or "").strip(),
+        )
+        return anchor
+    if not probe.stdout.strip():
+        return anchor
+
+    # Only on refusal, and bounded by the cap: find which agent owns the stack.
+    owner, owner_anchor = next(iter(live.items()))[::-1]
+    for live_anchor, name in live.items():
+        hit = vcs.run(["log", "-r", f"{anchor} & {live_anchor}::", "--no-graph", "-T", "commit_id", "-n", "1"])
+        if hit.returncode == 0 and hit.stdout.strip():
+            owner, owner_anchor = name, live_anchor
+            break
+    raise RuntimeError(
+        f"refusing to anchor on {anchor[:12]}: it is inside the live stack of task-agent "
+        f"{owner} (anchor {owner_anchor[:12]}). A live agent can still rewrite that stack. "
+        f"Reap it first (`cld task-agent shutdown {owner}`) -- teardown is what makes its "
+        "deliverable branch safe to anchor on -- or anchor on the shared base instead."
+    )
 
 
 _CONTAINER_SSH_AUTH_SOCK = "/run/host-ssh-agent.sock"

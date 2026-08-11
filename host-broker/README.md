@@ -117,9 +117,17 @@ denied, so enabling/disabling is just defining/removing the function.
 
 **Built-in actions:** `run-tests` (default; pytest in the `runtests` container),
 `list-containers` (read-only cld-container enumeration for the messenger /
-`cld agent status`), and `agent` (`<target> <op>` -- launch/manage a sibling
-`cld agent` on the host, with `<target>` validated against the master's
-host-set `org.cld.repo-root` + `org.cld.targets` labels).
+`cld agent status`), `agent` (`<target> <op>` -- launch/manage a sibling
+`cld agent` on the host) and `task-agent` (`<target> <op>` -- the `cld task-agent`
+lifecycle verbs). Both launcher actions validate `<target>` against the master's
+host-set `org.cld.repo-root` + `org.cld.targets` labels through the shared
+`validate_target`.
+
+`task-agent` is the only action that creates a container with a caller-chosen file
+mounted inside it, so it also polices its argv: `--force` is denied (overriding a
+reap-readiness refusal stays a human act), a caller-supplied `--parent` is denied and
+the validated `$session` appended instead, and `start`'s persona positional must be a
+bare name -- a path there would let a container read any host file you can.
 
 ## Security notes
 

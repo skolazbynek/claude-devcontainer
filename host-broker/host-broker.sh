@@ -82,21 +82,11 @@ action_list_containers() {
         done
 }
 
-# Launch / manage a sibling `cld agent` on the host for one of this master's
-# registered repos. The caller (cld inside master) sends <target> <op> [args].
-# Security: <target> is validated against the master's host-set labels
-# (org.cld.repo-root + org.cld.targets), never trusted from the caller alone,
-# and <op> against a fixed set -- so this can only ever run `cld agent` for a
-# repo the host already sanctioned, never an arbitrary command or path.
-action_agent() {
-    local target="${1:-}" op="${2:-}"
-    shift 2 2>/dev/null || { echo "denied: agent needs <target> <op>" >&2; exit 2; }
-    case "$op" in
-        start|restart|shutdown|status|logs) ;;
-        *) echo "denied: bad agent op '$op'" >&2; exit 2 ;;
-    esac
-
-    local targets allowed=0 t
+# Shared by both launcher actions: <target> is validated against the master's
+# host-set labels (org.cld.repo-root + org.cld.targets), never trusted from the
+# caller alone -- so an action can only ever run for a repo the host sanctioned.
+validate_target() {
+    local target="$1" targets allowed=0 t
     targets=$(docker inspect "$session" --format '{{index .Config.Labels "org.cld.targets"}}' 2>/dev/null) || true
     [ "$target" = "$REPO" ] && allowed=1
     local IFS=:
@@ -105,6 +95,19 @@ action_agent() {
     [ "$allowed" = 1 ] || { echo "denied: target '$target' not registered for $session" >&2; exit 3; }
     { [ -d "$target/.jj" ] || [ -d "$target/.git" ]; } \
         || { echo "denied: target '$target' is not a repo" >&2; exit 3; }
+}
+
+# Launch / manage a sibling `cld agent` on the host for one of this master's
+# registered repos. The caller (cld inside master) sends <target> <op> [args];
+# <op> is checked against a fixed set, so this can never run an arbitrary command.
+action_agent() {
+    local target="${1:-}" op="${2:-}"
+    shift 2 2>/dev/null || { echo "denied: agent needs <target> <op>" >&2; exit 2; }
+    case "$op" in
+        start|restart|shutdown|status|logs) ;;
+        *) echo "denied: bad agent op '$op'" >&2; exit 2 ;;
+    esac
+    validate_target "$target"
 
     # `cld agent` (no subcommand) starts; the rest are subcommands.
     cd "$target" || { echo "cannot cd to $target" >&2; exit 3; }
@@ -113,6 +116,57 @@ action_agent() {
     else
         exec cld agent "$op" "$@"
     fi
+}
+
+# Launch / manage a task-scoped agent for one of this master's registered repos
+# (docs/design-task-agents.md §9). Same target validation as `agent`, plus three
+# argv rules that make this safe to expose to a container:
+#
+#   --force   denied outright. Overriding a reap-readiness refusal is a human act;
+#             a master must not be able to discard uncaptured work or break a third
+#             agent's edge (§7).
+#   --parent  denied from the caller and appended by us as the validated $session,
+#             so an agent's recorded owner is host-set and cannot be forged.
+#   persona   must be a bare name. It is resolved host-side and mounted into the new
+#             container, so a path would let a container read any host file the user
+#             can (cld.prompts.persona_resolve rejects it too; this is the boundary).
+action_task_agent() {
+    local target="${1:-}" op="${2:-}"
+    shift 2 2>/dev/null || { echo "denied: task-agent needs <target> <op>" >&2; exit 2; }
+    # Exactly the ops the container route delegates. `transcript` is absent on
+    # purpose: the mailbox is bind-mounted into master, so it never needs the host.
+    case "$op" in
+        start|status|logs|shutdown) ;;
+        *) echo "denied: bad task-agent op '$op'" >&2; exit 2 ;;
+    esac
+    validate_target "$target"
+
+    local a
+    for a in "$@"; do
+        case "$a" in
+            --force)  echo "denied: --force is host-only" >&2; exit 2 ;;
+            --parent) echo "denied: --parent is set by the broker" >&2; exit 2 ;;
+        esac
+    done
+
+    # start's first positional is the persona. Checked here and nowhere else in argv:
+    # task text legitimately contains slashes, so a blanket path check would deny
+    # ordinary work like -p "fix cld/cli.py".
+    if [ "$op" = start ]; then
+        case "${1:-}" in
+            ""|-*)   echo "denied: task-agent start needs a persona name first" >&2; exit 2 ;;
+            */*|.*)  echo "denied: persona '$1' must be a bare name, not a path" >&2; exit 2 ;;
+        esac
+    fi
+
+    cd "$target" || { echo "cannot cd to $target" >&2; exit 3; }
+    # --parent is what makes ownership host-set: it stamps the spawn, scopes the roster
+    # and gates the reap. `logs` has no such option (a read needs no authority), so
+    # appending it there would just make cld reject the argv.
+    case "$op" in
+        start|status|shutdown) exec cld task-agent "$op" "$@" --parent "$session" ;;
+        *)                     exec cld task-agent "$op" "$@" ;;
+    esac
 }
 
 # Template for a second action -- copy, rename, point at its image, enable by

@@ -5,7 +5,15 @@ Layout under a mailbox root (``~/.cld/mailboxes`` by default, see ``cld.config``
     <root>/<container_name>/tmp/       -- write-here-first staging
     <root>/<container_name>/inbox/     -- unread messages, one <id>.json per message
     <root>/<container_name>/archive/   -- dealt-with messages
-    <root>/<container_name>/outbox.log -- append-only audit trail of sent messages
+    <root>/<container_name>/outbox.log -- append-only trail of sent messages (full bodies)
+    <root>/<container_name>/meta.json  -- task-agent spawn facts, written once at boot
+    <root>/<container_name>/state.json -- supervisor liveness (written by agent_loop)
+    <root>/_archive/<container_name>/  -- whole mailbox, moved here on teardown
+    <root>/_edges/<a>--<b>.json        -- per-edge hop counter (peer-loop control)
+
+Entries under the root whose name starts with ``_`` are reserved and are not
+mailboxes. ``meta.json`` and ``state.json`` are split by lifetime: what an agent
+*is* versus what it is *doing*, so a stale copy of one can't shadow the other.
 
 All mutations are same-filesystem ``rename()`` calls, so no reader ever observes
 a partial write. Pure filesystem code -- no MCP/FastMCP imports here so it stays
@@ -27,12 +35,38 @@ _TMP = "tmp"
 _INBOX = "inbox"
 _ARCHIVE = "archive"
 _OUTBOX_LOG = "outbox.log"
+_META = "meta.json"
+_STATE = "state.json"
+
+# Reserved entries directly under the mailbox root: not mailboxes. Anything
+# whose name starts with "_" is skipped by mailbox enumeration (list_fleet).
+_ARCHIVE_ROOT = "_archive"
+_EDGES = "_edges"
+
+
+# Microsecond precision (still valid RFC3339) so list_inbox's sort-by-ts stays
+# correctly ordered even when two messages land in the same second.
+_ISO_FMT = "%Y-%m-%dT%H:%M:%S.%fZ"
 
 
 def _now_iso() -> str:
-    # Microsecond precision (still valid RFC3339) so list_inbox's sort-by-ts
-    # stays correctly ordered even when two messages land in the same second.
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return datetime.now(timezone.utc).strftime(_ISO_FMT)
+
+
+def _read_json(path: Path) -> dict | None:
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        log.warning("could not read %s: %s", path, e)
+        return None
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.rename(path)
 
 
 def mailbox_dir(root: Path, name: str) -> Path:
@@ -47,12 +81,73 @@ def ensure_mailbox(root: Path, name: str) -> None:
         (base / sub).mkdir(parents=True, exist_ok=True)
 
 
-def write_message(root: Path, frm: str, to: str, subject: str, body: str) -> dict:
+def mailbox_reaped(root: Path, name: str) -> bool:
+    """True when only an archived mailbox is left for *name* -- it was torn down."""
+    return not mailbox_dir(root, name).is_dir() and (root / _ARCHIVE_ROOT / name).is_dir()
+
+
+def resolve_mailbox_dir(root: Path, name: str) -> Path | None:
+    """Return *name*'s live mailbox dir, else its archived one, else None.
+
+    Teardown moves the whole dir under ``_archive/``, so readers that must keep
+    working after an agent is reaped (transcript) go through here.
+    """
+    live = mailbox_dir(root, name)
+    if live.is_dir():
+        return live
+    archived = root / _ARCHIVE_ROOT / name
+    return archived if archived.is_dir() else None
+
+
+def write_message(
+    root: Path, frm: str, to: str, subject: str, body: str, *, peer_limit: int | None = None
+) -> dict | None:
     """Atomically deliver a message into *to*'s inbox; record it in *frm*'s outbox log.
 
     Writes ``<to>/tmp/<id>.json`` then ``rename()``s into ``<to>/inbox/<id>.json``.
-    Returns the full message dict (including the generated ``id`` and ``ts``).
+    Returns the full message dict (including the generated ``id`` and ``ts``), or
+    ``None`` when the delivery was refused.
+
+    **A spent edge is silent** (docs/design-task-agents.md D29). On an agent<->agent
+    edge that has already delivered its whole hop budget, nothing more goes over it --
+    not a retry, not a supervisor-authored reply, not a notice about the budget itself.
+    Every sender in the codebase passes through here, which is what makes that rule
+    hold for all of them and bounds an edge at ``limit`` messages for its whole life.
+    Exempting anything would reopen the loop the budget exists to close: an exempt
+    message still obliges a reply, and the reply is refused, which produces another
+    message...
+
+    A **reaped** recipient is refused for the same reason: this function creates a
+    missing mailbox (that is how a first message reaches a fresh container), so
+    delivering to a torn-down agent would resurrect its directory, shadow the archived
+    ``meta.json`` behind an empty live one, and quietly un-budget the edge. §10 already
+    says messages to a reaped peer "go nowhere" -- this makes that a refusal instead of
+    a silent write into a void.
+
+    *peer_limit* seeds a brand-new edge when the sender's own ``meta["peers"]`` has no
+    entry for the recipient; only a caller with a config view supplies it.
     """
+    if mailbox_reaped(root, to):
+        log.warning("refusing to deliver %s -> %s (%s): recipient was reaped", frm, to, subject)
+        return None
+
+    # Budgeted iff *both* endpoints are task-agents -- exactly the agent<->agent edge.
+    # Keying on both sides rather than on the sender's `peers` mapping is what makes the
+    # reply direction count too: edges are asymmetric, so the named peer has no entry of
+    # its own. Masters and the standing repo agent write no meta.json, so the whole
+    # control plane is exempt for free. The recipient side reads through the archive so a
+    # peer reaped mid-exchange cannot un-budget the edge; the sender is live by definition.
+    sender_meta = read_meta(root, frm)
+    peer_edge = sender_meta is not None and read_meta_resolved(root, to) is not None
+
+    if peer_edge and edge_spent(root, frm, to):
+        edge = read_edge(root, frm, to)
+        log.warning(
+            "refusing to deliver %s -> %s (%s): edge budget spent, %d/%d messages used",
+            frm, to, subject, edge["count"], edge["limit"],
+        )
+        return None
+
     ensure_mailbox(root, to)
     ensure_mailbox(root, frm)
 
@@ -64,6 +159,11 @@ def write_message(root: Path, frm: str, to: str, subject: str, body: str) -> dic
         "body": body,
         "ts": _now_iso(),
     }
+    if peer_edge:
+        # Counted before the write because the count *is* the envelope's audit stamp
+        # (D17). A crash between the two loses a hop, which only tightens the ceiling.
+        limit = (sender_meta.get("peers") or {}).get(to, peer_limit)
+        msg["hops"] = bump_edge(root, frm, to, limit)
 
     to_dir = mailbox_dir(root, to)
     tmp_path = to_dir / _TMP / f"{msg['id']}.json"
@@ -72,9 +172,14 @@ def write_message(root: Path, frm: str, to: str, subject: str, body: str) -> dic
     tmp_path.rename(inbox_path)
     log.info("delivered message %s: %s -> %s (%s)", msg["id"], frm, to, subject)
 
+    # subject+body are duplicated here so a transcript is a single-mailbox read:
+    # the recipient's copy may be archived or GC'd independently of ours.
+    line = {k: msg[k] for k in ("id", "to", "subject", "body", "ts")}
+    if "hops" in msg:
+        line["hops"] = msg["hops"]
     outbox_path = mailbox_dir(root, frm) / _OUTBOX_LOG
     with outbox_path.open("a") as f:
-        f.write(json.dumps({"id": msg["id"], "to": to, "ts": msg["ts"]}) + "\n")
+        f.write(json.dumps(line) + "\n")
 
     return msg
 
@@ -152,9 +257,309 @@ def outbox_snapshot(root: Path, name: str) -> int:
         return sum(1 for _ in f)
 
 
-def outbox_changed_since(root: Path, name: str, snapshot: int) -> bool:
-    """True if *name* has sent at least one message since *snapshot* was taken."""
-    return outbox_snapshot(root, name) > snapshot
+def _read_outbox(path: Path, skip: int = 0) -> list[dict]:
+    if not path.is_file():
+        return []
+    lines = []
+    for raw in path.read_text().splitlines()[skip:]:
+        if not raw.strip():
+            continue
+        try:
+            lines.append(json.loads(raw))
+        except json.JSONDecodeError as e:
+            log.warning("skipping unreadable outbox line in %s: %s", path, e)
+    return lines
+
+
+def replied_since(root: Path, name: str, snapshot: int, recipient: str) -> bool:
+    """True if *name* has sent to *recipient* since *snapshot* was taken.
+
+    Recipient-scoped on purpose: a plain "did the outbox grow" check is satisfied
+    by an unrelated send (answering a peer, escalating to the master) and would
+    suppress the supervisor's fallback for the message actually being answered.
+    """
+    lines = _read_outbox(mailbox_dir(root, name) / _OUTBOX_LOG, skip=snapshot)
+    return any(line.get("to") == recipient for line in lines)
+
+
+def ensure_meta(
+    root: Path,
+    name: str,
+    *,
+    parent: str,
+    task: str,
+    persona: str,
+    deliverable_branch: str,
+    anchor: str,
+    peers: dict[str, int],
+) -> dict:
+    """Write *name*'s immutable spawn facts once; return them (existing ones win).
+
+    ``peers`` maps each allowed peer's full container name to that edge's hop
+    budget. Never overwrites: a warm container restart re-runs the entrypoint,
+    and these facts -- ``created_at`` included -- must keep describing the
+    original spawn. Liveness deliberately lives in ``state.json`` instead, so
+    the two files can't drift.
+    """
+    existing = read_meta(root, name)
+    if existing is not None:
+        return existing
+    ensure_mailbox(root, name)
+    meta = {
+        "parent": parent,
+        "task": task,
+        "persona": persona,
+        "deliverable_branch": deliverable_branch,
+        "anchor": anchor,
+        "peers": dict(peers),
+        "created_at": _now_iso(),
+    }
+    _write_json_atomic(mailbox_dir(root, name) / _META, meta)
+    log.info("wrote spawn facts for %s (parent=%s, peers=%s)", name, parent, sorted(peers))
+    return meta
+
+
+def read_meta(root: Path, name: str) -> dict | None:
+    """Read *name*'s spawn facts, or None if it has none (not a task-agent)."""
+    return _read_json(mailbox_dir(root, name) / _META)
+
+
+def read_meta_resolved(root: Path, name: str) -> dict | None:
+    """Spawn facts from *name*'s live mailbox, else its archived one.
+
+    Separate from ``read_meta`` on purpose: ``ensure_meta``'s write-once guard must only
+    ever see the *live* dir, or a re-used task slug would inherit the reaped agent's
+    facts instead of writing its own.
+    """
+    base = resolve_mailbox_dir(root, name)
+    return _read_json(base / _META) if base else None
+
+
+def list_fleet(root: Path, parent: str | None = None) -> list[dict]:
+    """List task-agent mailboxes under *root*, optionally only those spawned by *parent*.
+
+    A mailbox belongs to a task-agent iff it holds a ``meta.json`` -- masters and
+    repo agents never write one -- so no kind field is needed here. Each entry is
+    the spawn facts plus ``name``. Reserved root entries (``_archive/``,
+    ``_edges/``) are skipped.
+    """
+    if not root.is_dir():
+        return []
+    fleet = []
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("_"):
+            continue
+        meta = read_meta(root, entry.name)
+        if meta is None or (parent is not None and meta.get("parent") != parent):
+            continue
+        fleet.append({"name": entry.name, **meta})
+    return fleet
+
+
+def state_path(root: Path, name: str) -> Path:
+    """Path of *name*'s supervisor liveness file (phase, msg_count, cost, current)."""
+    return mailbox_dir(root, name) / _STATE
+
+
+def read_state(root: Path, name: str) -> dict | None:
+    """Read *name*'s supervisor state, or None if it hasn't written one yet."""
+    return _read_json(state_path(root, name))
+
+
+def task_summary(text: str, width: int = 160) -> str:
+    """First line of *text*, truncated -- ``meta.json``'s ``task`` holds the whole task."""
+    lines = (text or "").strip().splitlines()
+    if not lines:
+        return ""
+    return lines[0] if len(lines[0]) <= width else lines[0][: width - 1] + "…"
+
+
+def _last_activity(base: Path) -> str:
+    """Newest mtime among a mailbox's moving parts, as an ISO timestamp ("" if none)."""
+    mtimes = [
+        p.stat().st_mtime
+        for p in (base / _STATE, base / _OUTBOX_LOG, base / _INBOX, base / _ARCHIVE)
+        if p.exists()
+    ]
+    if not mtimes:
+        return ""
+    return datetime.fromtimestamp(max(mtimes), timezone.utc).strftime(_ISO_FMT)
+
+
+def fleet_digest(root: Path, parent: str) -> list[dict]:
+    """One cheap row per fleet member of *parent* -- no message bodies (§7, D23).
+
+    What the master calls every turn: it compares ``msg_count`` / ``last_activity``
+    against what it saw last turn and only then reads a mailbox in full. Sweeping
+    inboxes instead would find nothing, since an agent archives each message within
+    about a second of processing it -- and pulling N full inboxes every turn would
+    flood the master's context on turns where the human asked about something else.
+    """
+    rows = []
+    for meta in list_fleet(root, parent):
+        name = meta["name"]
+        state = read_state(root, name) or {}
+        base = mailbox_dir(root, name)
+        rows.append({
+            "name": name,
+            "task": task_summary(meta.get("task", "")),
+            "phase": state.get("phase", "unknown"),
+            "msg_count": state.get("msg_count", 0),
+            "cost_usd_total": state.get("cost_usd_total", 0.0),
+            "unread": len(list((base / _INBOX).glob("*.json"))),
+            "last_activity": _last_activity(base),
+        })
+    return rows
+
+
+def archive_mailbox(root: Path, name: str) -> Path | None:
+    """Move *name*'s whole mailbox under ``_archive/``; return its new location.
+
+    Idempotent, because teardown may run it twice: already archived returns the
+    existing path, no mailbox at all returns None. A name collision -- a re-used
+    task slug -- suffixes the newcomer rather than merging two agents'
+    conversations into one transcript.
+    """
+    live = mailbox_dir(root, name)
+    dest = root / _ARCHIVE_ROOT / name
+    if not live.is_dir():
+        return dest if dest.is_dir() else None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        suffix = 2
+        while (root / _ARCHIVE_ROOT / f"{name}-{suffix}").exists():
+            suffix += 1
+        dest = root / _ARCHIVE_ROOT / f"{name}-{suffix}"
+        log.warning("archive for %s already exists -- archiving this one as %s", name, dest.name)
+    live.rename(dest)
+    log.info("archived mailbox %s -> %s", name, dest)
+    return dest
+
+
+def transcript(root: Path, name: str) -> list[dict]:
+    """Timestamp-ordered join of what *name* received and what it sent.
+
+    Received side is ``inbox/`` + ``archive/``; sent side is ``outbox.log``,
+    which carries subject+body precisely so this needs no cross-mailbox reads
+    (a recipient's copy may be archived or gone). Works on an archived mailbox.
+    Entries are message dicts plus ``direction`` ("in" / "out").
+    """
+    base = resolve_mailbox_dir(root, name)
+    if base is None:
+        return []
+    entries = [
+        {"direction": "in", **msg}
+        for msg in _read_dir_messages(base / _INBOX) + _read_dir_messages(base / _ARCHIVE)
+    ]
+    entries += [
+        {
+            "direction": "out",
+            "id": line.get("id", ""),
+            "from": name,
+            "to": line.get("to", ""),
+            "subject": line.get("subject", ""),
+            "body": line.get("body", ""),
+            "ts": line.get("ts", ""),
+            # Received messages carry the hop stamp inside the envelope; sent ones are a
+            # fixed projection, so it has to be forwarded explicitly or a transcript
+            # would show hops in one direction only.
+            **({"hops": line["hops"]} if "hops" in line else {}),
+        }
+        for line in _read_outbox(base / _OUTBOX_LOG)
+    ]
+    entries.sort(key=lambda e: e.get("ts", ""))
+    return entries
+
+
+def edge_path(root: Path, a: str, b: str) -> Path:
+    """Hop-counter file for the *a*<->*b* edge; endpoints sorted so both sides agree."""
+    x, y = sorted((a, b))
+    return root / _EDGES / f"{x}--{y}.json"
+
+
+def read_edge(root: Path, a: str, b: str) -> dict:
+    """Hop state for an edge: ``{count, limit, updated}``; never-used edge -> count 0.
+
+    Normalizes a partial file: resetting an edge in this POC means editing it by hand
+    (§10), so a hand-written ``{"count": 0}`` must not KeyError downstream.
+    """
+    data = _read_json(edge_path(root, a, b)) or {}
+    return {
+        "count": data.get("count", 0),
+        "limit": data.get("limit"),
+        "updated": data.get("updated"),
+    }
+
+
+def edge_spent(root: Path, a: str, b: str) -> bool:
+    """True once the *a*<->*b* edge has delivered its whole budget.
+
+    Asked *before* a delivery, never after: the limit-th message is the last one that
+    lands, not the first one refused. An edge with no limit stored yet is never spent.
+    """
+    edge = read_edge(root, a, b)
+    return edge["limit"] is not None and edge["count"] >= edge["limit"]
+
+
+def bump_edge(root: Path, a: str, b: str, limit: int | None = None) -> int:
+    """Count one delivered message over the *a*<->*b* edge; return the new count.
+
+    Pure accounting -- whether a message may pass is ``edge_spent``'s question, asked
+    before the delivery. *limit* only seeds an edge that has none stored yet: the
+    stored value wins from then on, so the side that declared the edge governs both
+    directions (edges are asymmetric -- only an already-spawned agent can be named as
+    a peer).
+    """
+    edge = read_edge(root, a, b)
+    count = edge["count"] + 1
+    path = edge_path(root, a, b)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json_atomic(path, {
+        "count": count,
+        "limit": edge["limit"] if edge["limit"] is not None else limit,
+        "updated": _now_iso(),
+    })
+    return count
+
+
+def gated_send(
+    root: Path, frm: str, to: str, subject: str, body: str, *, default_limit: int
+) -> dict:
+    """Resolve *to*, deliver under the edge budget, and report the outcome as one dict.
+
+    The gate every *instructed* send path goes through -- the messenger MCP tool and
+    ``python -m cld.messenger.send`` alike, because a skill baked into the image tells
+    agents to use the latter. The closure rule itself lives one level down in
+    ``write_message``, so a supervisor-authored reply obeys it too.
+
+    One dict shape for every outcome, so both entry points handle one thing:
+    ``{"error": …}`` for an unresolvable recipient or a spent edge, else ``{"id", "to"}``
+    plus ``{"hops", "limit"}`` when the edge is budgeted.
+    """
+    try:
+        resolved = resolve_recipient(to, root=root)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    msg = write_message(root, frm, resolved, subject, body, peer_limit=default_limit)
+    if msg is None:
+        master = (read_meta(root, frm) or {}).get("parent") or "your master"
+        if not edge_spent(root, frm, resolved):
+            return {"error": (
+                f"{resolved} has been torn down -- its mailbox is archived, so nothing can "
+                f"reach it any more. Tell {master} if that work still needs doing."
+            )}
+        edge = read_edge(root, frm, resolved)
+        return {"error": (
+            f"hop budget spent for the edge to {resolved}: {edge['count']}/{edge['limit']} "
+            f"messages used, and a spent edge delivers nothing further. Do not retry and do "
+            f"not work around it -- tell {master} instead; that channel is never budgeted."
+        )}
+    sent = {"id": msg["id"], "to": resolved}
+    if "hops" in msg:
+        sent["hops"] = msg["hops"]
+        sent["limit"] = read_edge(root, frm, resolved)["limit"]
+    return sent
 
 
 def list_containers(kind: str | None = None) -> list[dict]:
@@ -203,4 +608,13 @@ def resolve_recipient(to: str, containers: list[dict] | None = None, root: Path 
     for c in matches:
         if c["kind"] == "agent":
             return c["name"]
+    if len(matches) > 1:
+        # Task-agents are many per repo, so a repo basename no longer identifies one.
+        # Picking the first would be a silent misdelivery to whichever container docker
+        # happened to list first.
+        raise ValueError(
+            f"Ambiguous shortname '{to}': {len(matches)} task-agents share that repo "
+            f"({', '.join(sorted(c['name'] for c in matches))}). Address a task-agent by "
+            "its full container name."
+        )
     return matches[0]["name"]

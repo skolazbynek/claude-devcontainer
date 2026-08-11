@@ -97,6 +97,26 @@ fi
 
 cd /workspace/current
 
+# Task-agent only: the deliverable branch is a *second*, durable bookmark that
+# survives teardown (the session bookmark does not). Created at the anchor so it
+# has a base to exist at; from then on only the agent moves it, by squashing its
+# work into it on wrap-up. Create-if-absent, so a restart or reattach never
+# rewinds a branch that already advanced.
+if [ -n "${TASK_AGENT_MODE:-}" ] && [ -n "${AGENT_DELIVERABLE_BRANCH:-}" ]; then
+    if [ -z "${AGENT_ANCHOR_HASH:-}" ]; then
+        echo "[WARN] no anchor recovered -- skipping deliverable bookmark '$AGENT_DELIVERABLE_BRANCH'" >&2
+    elif jj bookmark list -T 'name ++ "\n"' | grep -qx "$AGENT_DELIVERABLE_BRANCH"; then
+        echo "[cld] deliverable bookmark '$AGENT_DELIVERABLE_BRANCH' already exists -- leaving it alone"
+    elif jj bookmark create "$AGENT_DELIVERABLE_BRANCH" -r "$AGENT_ANCHOR_HASH"; then
+        echo "[cld] deliverable bookmark '$AGENT_DELIVERABLE_BRANCH' created at ${AGENT_ANCHOR_HASH:0:12}"
+    else
+        echo "[WARN] could not create deliverable bookmark '$AGENT_DELIVERABLE_BRANCH'" >&2
+    fi
+    # Wrap-up may push this branch to the remote; agent containers ship no
+    # known_hosts, so a first push would fail host-key verification.
+    seed_known_hosts
+fi
+
 build_claude_config
 
 link_workspace_files
@@ -160,7 +180,10 @@ if [ -n "${MASTER_MODE:-}" ]; then
     touch /tmp/cld-master-ready
 fi
 
-if [ -n "$COMPOSED_PROMPT" ]; then
+# A task-agent's task belongs to the supervisor's composed kickoff prompt (see
+# docs/design-task-agents.md §11), so it must NOT be consumed by a one-shot
+# pre-run here -- the supervisor reads the same inputs itself.
+if [ -n "$COMPOSED_PROMPT" ] && [ -z "${TASK_AGENT_MODE:-}" ]; then
     [ -n "${MASTER_MODE:-}" ] && \
         echo "[INFO] Running first-launch prompt; attach anytime with 'cld devcontainer --master'."
     claude -- "$COMPOSED_PROMPT" || true

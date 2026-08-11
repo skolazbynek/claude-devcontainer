@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from cld.messenger import mailbox
-from cld.messenger.agent_loop import AgentSupervisor, _extract_cost
+from cld.messenger.agent_loop import AgentSupervisor, TaskMode, _extract_cost, compose_kickoff
 
 _STUB_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "stub-messenger-agent" / "claude"
 
@@ -42,7 +42,9 @@ def supervisor(tmp_path, persona_path, monkeypatch):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     argv_log = tmp_path / "argv.log"
+    prompt_log = tmp_path / "prompt.log"
     monkeypatch.setenv("STUB_ARGV_LOG", str(argv_log))
+    monkeypatch.setenv("STUB_PROMPT_LOG", str(prompt_log))
     monkeypatch.setenv("STUB_MAILBOX_ROOT", str(mailbox_root))
     monkeypatch.setenv("STUB_SESSION_NAME", "cld_agent_repoA")
     sup = AgentSupervisor(
@@ -54,10 +56,16 @@ def supervisor(tmp_path, persona_path, monkeypatch):
         max_turns=7,
     )
     sup._argv_log = argv_log
+    sup._prompt_log = prompt_log
     return sup
 
 
 def _read_argv_log(path: Path) -> list[list[str]]:
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def _read_prompt_log(path: Path) -> list[str]:
+    """Prompts the stub received on stdin -- the real claude takes them there, not in argv."""
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
@@ -82,17 +90,82 @@ class TestKickoff:
         assert "--resume" not in argv[0]
 
     def test_persona_substituted_into_prompt(self, supervisor):
+        # The prompt goes over stdin (a persona's leading `---` frontmatter used to
+        # be parsed as an unknown option when it was an argv token), so assert
+        # against what the stub read from stdin.
         supervisor.kickoff()
-        argv = _read_argv_log(supervisor._argv_log)[0]
-        prompt = argv[argv.index("-p") + 1]
+        prompt = _read_prompt_log(supervisor._prompt_log)[0]
         assert "repo" in prompt  # REPO_BASENAME
         assert "turns=7" in prompt
         assert "container=cld_agent_repoA" in prompt
+
+    def test_frontmatter_stripped_from_persona(self, supervisor, persona_path):
+        persona_path.write_text("---\ndescription: meta\n---\n\n# Role\n\nbody\n")
+        supervisor.kickoff()
+        assert _read_prompt_log(supervisor._prompt_log)[0].startswith("# Role")
 
     def test_max_turns_flag_passed(self, supervisor):
         supervisor.kickoff()
         argv = _read_argv_log(supervisor._argv_log)[0]
         assert argv[argv.index("--max-turns") + 1] == "7"
+
+
+class TestSpentEdgeStopsTheFallback:
+    """The reply guarantee is bounded by the edge budget (D29) -- with no code here.
+
+    Both of the supervisor's own writes go through `mailbox.write_message`, so a spent
+    edge refuses them like anything else. Without that, the guarantee is a loop engine:
+    two agents would trade supervisor-authored fallbacks forever, one Claude turn each.
+    """
+
+    _SPAWN = {
+        "parent": "cld_master_repoA_abcd1234",
+        "task": "t",
+        "persona": "implementer",
+        "deliverable_branch": "b",
+        "anchor": "abc",
+        "peers": {},
+    }
+
+    _PEER = "cld_agent_repoA_peer"
+
+    def _exchange(self, supervisor, limit):
+        """Run the real flow up to an inbound peer message: we open the edge, the peer replies.
+
+        Both hops go through `gated_send`, which is what seeds the edge's limit -- the
+        same reason a supervisor write never has to supply one.
+        """
+        root = supervisor.mailbox_root
+        mailbox.ensure_meta(root, supervisor.session_name, **{**self._SPAWN, "peers": {self._PEER: limit}})
+        mailbox.ensure_meta(root, self._PEER, **self._SPAWN)
+        mailbox.gated_send(root, supervisor.session_name, self._PEER, "over to you", "b", default_limit=99)
+        inbound = mailbox.gated_send(root, self._PEER, supervisor.session_name, "back to you", "b", default_limit=99)
+        return inbound["id"]
+
+    def test_fallback_refused_once_the_edge_is_spent(self, supervisor, monkeypatch):
+        monkeypatch.setenv("STUB_SEND_REPLY", "0")          # claude replies to nobody
+        msg_id = self._exchange(supervisor, limit=2)        # two hops spend it
+        root = supervisor.mailbox_root
+        assert mailbox.edge_spent(root, supervisor.session_name, self._PEER)
+        supervisor.kickoff()
+        supervisor.process_one(msg_id)
+        # Nothing new: the peer still holds only our opening message, and our outbox
+        # still holds only the line for it. This is the loop that used to be infinite.
+        assert [m["subject"] for m in mailbox.list_inbox(root, self._PEER)] == ["over to you"]
+        assert mailbox.outbox_snapshot(root, supervisor.session_name) == 1
+        assert json.loads(supervisor.state_path.read_text())["phase"] == "idle"
+
+    def test_fallback_still_lands_while_the_edge_is_open(self, supervisor, monkeypatch):
+        monkeypatch.setenv("STUB_SEND_REPLY", "0")
+        msg_id = self._exchange(supervisor, limit=5)
+        root = supervisor.mailbox_root
+        supervisor.kickoff()
+        supervisor.process_one(msg_id)
+        assert [m["subject"] for m in mailbox.list_inbox(root, self._PEER)] == [
+            "over to you", "Re: back to you",
+        ]
+        # A fallback is a real delivery, so it consumed a hop like any other message.
+        assert mailbox.read_edge(root, supervisor.session_name, self._PEER)["count"] == 3
 
 
 class TestProcessOne:
@@ -131,6 +204,22 @@ class TestProcessOne:
         full = mailbox.read_message(supervisor.mailbox_root, "sender", sender_inbox[0]["id"])
         assert "no reply produced" in full["body"]
         assert "I looked into it but did nothing" in full["body"]
+
+    def test_send_to_peer_still_synthesizes_reply_to_sender(self, supervisor, monkeypatch):
+        # The reply guarantee is recipient-scoped: answering a peer mid-turn must
+        # not discharge the reply owed to whoever sent the message being processed.
+        supervisor.kickoff()
+        msg = mailbox.write_message(supervisor.mailbox_root, "sender", supervisor.session_name, "hi", "body")
+
+        monkeypatch.setenv("STUB_SEND_REPLY", "1")
+        monkeypatch.setenv("STUB_REPLY_TO", "peer")
+        supervisor.process_one(msg["id"])
+
+        assert len(mailbox.list_inbox(supervisor.mailbox_root, "peer")) == 1
+        sender_inbox = mailbox.list_inbox(supervisor.mailbox_root, "sender")
+        assert len(sender_inbox) == 1
+        full = mailbox.read_message(supervisor.mailbox_root, "sender", sender_inbox[0]["id"])
+        assert "no reply produced" in full["body"]
 
     def test_claude_failure_synthesizes_failure_reply(self, supervisor, monkeypatch):
         supervisor.kickoff()
@@ -207,3 +296,270 @@ class TestRun:
         supervisor.run()
 
         assert supervisor.msg_count == 1
+
+
+# --- task mode ---------------------------------------------------------------
+
+_CLD_PROMPTS = Path(__file__).resolve().parent.parent / "prompts" / "personas"
+
+
+@pytest.fixture
+def task_files(tmp_path):
+    """A preamble + role persona pair on disk, both templated."""
+    preamble = tmp_path / "task-agent.md"
+    preamble.write_text(
+        "---\ndescription: meta\n---\n\n# Preamble\n\n"
+        "container=${CONTAINER_NAME} slug=${TASK_SLUG} branch=${DELIVERABLE_BRANCH}\n"
+        "master=${PARENT_MASTER} persona=${PERSONA} anchor=${AGENT_ANCHOR_HASH}\n"
+        "turns=${MAX_TURNS} repo=${REPO_BASENAME} path=${REPO_ABS_PATH}\n\npeers:\n${PEERS}\n"
+    )
+    persona = tmp_path / "implementer.md"
+    persona.write_text("---\ndescription: role\n---\n\n# Implementer\n\nbranch is ${DELIVERABLE_BRANCH}\n")
+    return preamble, persona
+
+
+def _task_mode(task_files, **overrides):
+    preamble, persona = task_files
+    kwargs = {
+        "slug": "add-oauth",
+        "parent_master": "cld_master_repoA_ab12",
+        "deliverable_branch": "add-oauth-login",
+        "peers": {"cld_agent_repoA_contract": 15},
+        "persona_name": "implementer",
+        "persona_path": persona,
+        "preamble_path": preamble,
+        "task_text": "Wire up OAuth login.",
+        "anchor": "abc123def456",
+    }
+    return TaskMode(**{**kwargs, **overrides})
+
+
+class TestComposeKickoff:
+    def _compose(self, task, tmp_path):
+        return compose_kickoff(
+            task, session_name="cld_agent_repoA_add-oauth",
+            repo_root=tmp_path / "repo", max_turns=7,
+        )
+
+    def test_layer_order(self, task_files, tmp_path):
+        prompt = self._compose(_task_mode(task_files), tmp_path)
+        assert prompt.index("# Preamble") < prompt.index("# Implementer") < prompt.index("# Your task")
+
+    def test_substitutes_in_both_layers(self, task_files, tmp_path):
+        prompt = self._compose(_task_mode(task_files), tmp_path)
+        assert "container=cld_agent_repoA_add-oauth" in prompt
+        assert "slug=add-oauth" in prompt
+        assert "branch=add-oauth-login" in prompt
+        assert "master=cld_master_repoA_ab12" in prompt
+        assert "persona=implementer" in prompt
+        assert "anchor=abc123def456" in prompt
+        assert "turns=7" in prompt
+        assert "repo=repo" in prompt
+        # ...including the role persona, not just the preamble
+        assert "branch is add-oauth-login" in prompt
+        assert "${" not in prompt
+
+    def test_task_appended_verbatim(self, task_files, tmp_path):
+        # A task description is user content, not a template: $VAR must survive.
+        task = _task_mode(task_files, task_text="Set $DELIVERABLE_BRANCH and ${CONTAINER_NAME} literally")
+        prompt = self._compose(task, tmp_path)
+        assert "Set $DELIVERABLE_BRANCH and ${CONTAINER_NAME} literally" in prompt
+
+    def test_frontmatter_stripped_from_both_layers(self, task_files, tmp_path):
+        prompt = self._compose(_task_mode(task_files), tmp_path)
+        assert prompt.startswith("# Preamble")
+        assert "description: meta" not in prompt
+        assert "description: role" not in prompt
+
+    def test_peers_rendered(self, task_files, tmp_path):
+        prompt = self._compose(_task_mode(task_files), tmp_path)
+        assert "- `cld_agent_repoA_contract` (hop budget: 15)" in prompt
+
+    def test_two_peers_both_listed(self, task_files, tmp_path):
+        task = _task_mode(task_files, peers={"cld_agent_r_a": 3, "cld_agent_r_b": 9})
+        prompt = self._compose(task, tmp_path)
+        assert "- `cld_agent_r_a` (hop budget: 3)" in prompt
+        assert "- `cld_agent_r_b` (hop budget: 9)" in prompt
+
+    def test_no_peers_says_master_only(self, task_files, tmp_path):
+        prompt = self._compose(_task_mode(task_files, peers={}), tmp_path)
+        assert "the master is your only correspondent" in prompt
+
+    def test_host_launched_master_placeholder(self, task_files, tmp_path):
+        prompt = self._compose(_task_mode(task_files, parent_master=""), tmp_path)
+        assert "master=(none -- launched directly on the host)" in prompt
+
+
+class TestShippedPreamble:
+    """The real prompts/personas/task-agent.md, as baked into the image."""
+
+    def test_exists_where_the_image_bakes_it(self):
+        assert (_CLD_PROMPTS / "task-agent.md").is_file()
+
+    def test_no_placeholder_survives_composition(self, task_files, tmp_path):
+        _, persona = task_files
+        task = _task_mode(task_files, preamble_path=_CLD_PROMPTS / "task-agent.md")
+        prompt = compose_kickoff(
+            task, session_name="cld_agent_repoA_add-oauth",
+            repo_root=tmp_path / "repo", max_turns=7,
+        )
+        # A mistyped ${VAR} in the shipped preamble would otherwise reach the agent
+        # verbatim and only be noticed by reading a live transcript.
+        assert "${" not in prompt
+
+
+class TestTaskModeFromEnv:
+    @pytest.fixture(autouse=True)
+    def _env(self, task_files, monkeypatch, tmp_path):
+        preamble, persona = task_files
+        monkeypatch.setattr("cld.messenger.agent_loop._CLD_ROOT", tmp_path / "cld_root")
+        baked = tmp_path / "cld_root" / "prompts" / "personas"
+        baked.mkdir(parents=True)
+        (baked / "task-agent.md").write_text(preamble.read_text())
+        monkeypatch.setattr("cld.messenger.agent_loop._TASK_FILE_MOUNT", tmp_path / "task.md")
+        monkeypatch.setenv("AGENT_TASK_SLUG", "add-oauth")
+        monkeypatch.setenv("AGENT_DELIVERABLE_BRANCH", "add-oauth-login")
+        monkeypatch.setenv("AGENT_PERSONA", "implementer")
+        monkeypatch.setenv("AGENT_PERSONA_FILE", str(persona))
+        monkeypatch.setenv("AGENT_PARENT_MASTER", "cld_master_repoA_ab12")
+        monkeypatch.setenv("AGENT_PEERS", "cld_agent_repoA_contract:15")
+        monkeypatch.setenv("AGENT_ANCHOR_HASH", "abc123")
+        monkeypatch.setenv("AGENT_INLINE_PROMPT", "Wire up OAuth login.")
+
+    def test_reads_all_fields(self, task_files):
+        task = TaskMode.from_env()
+        _, persona = task_files
+        assert task.slug == "add-oauth"
+        assert task.parent_master == "cld_master_repoA_ab12"
+        assert task.deliverable_branch == "add-oauth-login"
+        assert task.peers == {"cld_agent_repoA_contract": 15}
+        assert task.persona_name == "implementer"
+        assert task.persona_path == persona
+        assert task.anchor == "abc123"
+        assert task.task_text == "Wire up OAuth login."
+
+    def test_task_from_file_only(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("AGENT_INLINE_PROMPT")
+        (tmp_path / "task.md").write_text("From the task file.\n")
+        assert TaskMode.from_env().task_text == "From the task file."
+
+    def test_task_from_file_and_inline(self, tmp_path):
+        (tmp_path / "task.md").write_text("From the task file.\n")
+        assert TaskMode.from_env().task_text == (
+            "From the task file.\n\n## Additional Instructions\n\nWire up OAuth login."
+        )
+
+    def test_persona_name_defaults_to_file_stem(self, monkeypatch):
+        monkeypatch.delenv("AGENT_PERSONA")
+        assert TaskMode.from_env().persona_name == "implementer"
+
+    def test_empty_peers(self, monkeypatch):
+        monkeypatch.setenv("AGENT_PEERS", "")
+        assert TaskMode.from_env().peers == {}
+
+    def test_missing_slug_raises(self, monkeypatch):
+        monkeypatch.delenv("AGENT_TASK_SLUG")
+        with pytest.raises(RuntimeError, match="AGENT_TASK_SLUG"):
+            TaskMode.from_env()
+
+    def test_missing_branch_raises(self, monkeypatch):
+        monkeypatch.delenv("AGENT_DELIVERABLE_BRANCH")
+        with pytest.raises(RuntimeError, match="wrap-up has no target"):
+            TaskMode.from_env()
+
+    def test_missing_persona_env_raises(self, monkeypatch):
+        monkeypatch.delenv("AGENT_PERSONA_FILE")
+        with pytest.raises(RuntimeError, match="AGENT_PERSONA_FILE"):
+            TaskMode.from_env()
+
+    def test_unreadable_persona_raises(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("AGENT_PERSONA_FILE", str(tmp_path / "nope.md"))
+        with pytest.raises(RuntimeError, match="persona file not found"):
+            TaskMode.from_env()
+
+    def test_missing_preamble_raises(self, monkeypatch, tmp_path):
+        (tmp_path / "cld_root" / "prompts" / "personas" / "task-agent.md").unlink()
+        with pytest.raises(RuntimeError, match="preamble not found"):
+            TaskMode.from_env()
+
+    def test_no_task_raises(self, monkeypatch):
+        monkeypatch.delenv("AGENT_INLINE_PROMPT")
+        with pytest.raises(RuntimeError, match="no task given"):
+            TaskMode.from_env()
+
+    def test_repo_name_prefers_host_repo_over_workspace_dir(self, monkeypatch, tmp_path):
+        # /workspace/current's basename would tell the agent its repo is "current".
+        monkeypatch.setenv("CLD_HOST_PROJECT_DIR", "/home/u/projects/lide-api")
+        task = TaskMode.from_env()
+        prompt = compose_kickoff(
+            task, session_name="s", repo_root=Path("/workspace/current"), max_turns=7,
+        )
+        assert "repo=lide-api" in prompt
+
+    def test_repo_name_falls_back_to_workspace_dir(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("CLD_HOST_PROJECT_DIR", raising=False)
+        prompt = compose_kickoff(
+            TaskMode.from_env(), session_name="s", repo_root=tmp_path / "repo", max_turns=7,
+        )
+        assert "repo=repo" in prompt
+
+
+class TestSupervisorTaskMode:
+    @pytest.fixture
+    def task_supervisor(self, tmp_path, task_files, monkeypatch):
+        mailbox_root = tmp_path / "mailboxes"
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        prompt_log = tmp_path / "prompt.log"
+        monkeypatch.setenv("STUB_PROMPT_LOG", str(prompt_log))
+        monkeypatch.setenv("STUB_MAILBOX_ROOT", str(mailbox_root))
+        monkeypatch.setenv("STUB_SESSION_NAME", "cld_agent_repoA_add-oauth")
+        task = _task_mode(task_files)
+        sup = AgentSupervisor(
+            session_name="cld_agent_repoA_add-oauth",
+            repo_root=repo_root,
+            mailbox_root=mailbox_root,
+            persona_path=task.persona_path,
+            claude_bin=str(_STUB_CLAUDE),
+            max_turns=7,
+            task=task,
+        )
+        sup._prompt_log = prompt_log
+        return sup
+
+    def test_meta_written_at_construction(self, task_supervisor):
+        meta = mailbox.read_meta(task_supervisor.mailbox_root, task_supervisor.session_name)
+        assert meta["parent"] == "cld_master_repoA_ab12"
+        assert meta["task"] == "Wire up OAuth login."
+        assert meta["persona"] == "implementer"
+        assert meta["deliverable_branch"] == "add-oauth-login"
+        assert meta["anchor"] == "abc123def456"
+        assert meta["peers"] == {"cld_agent_repoA_contract": 15}
+        assert "created_at" in meta
+
+    def test_meta_is_write_once_across_restart(self, task_supervisor, task_files, tmp_path):
+        first = mailbox.read_meta(task_supervisor.mailbox_root, task_supervisor.session_name)
+        AgentSupervisor(
+            session_name=task_supervisor.session_name,
+            repo_root=task_supervisor.repo_root,
+            mailbox_root=task_supervisor.mailbox_root,
+            persona_path=task_supervisor.persona_path,
+            claude_bin=str(_STUB_CLAUDE),
+            task=_task_mode(task_files, task_text="a different task"),
+        )
+        assert mailbox.read_meta(task_supervisor.mailbox_root, task_supervisor.session_name) == first
+
+    def test_kickoff_uses_composed_prompt(self, task_supervisor):
+        task_supervisor.kickoff()
+        prompt = _read_prompt_log(task_supervisor._prompt_log)[0]
+        assert prompt.index("# Preamble") < prompt.index("# Implementer") < prompt.index("# Your task")
+        assert "Wire up OAuth login." in prompt
+
+    def test_phases_unchanged(self, task_supervisor):
+        task_supervisor.kickoff()
+        state = json.loads(task_supervisor.state_path.read_text())
+        assert state["phase"] == "idle"
+        assert state["session_id"] == "kickoff-session-id"
+
+    def test_repo_agent_mode_writes_no_meta(self, supervisor):
+        assert mailbox.read_meta(supervisor.mailbox_root, supervisor.session_name) is None

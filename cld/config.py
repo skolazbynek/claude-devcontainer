@@ -62,6 +62,8 @@ _TOML_KEYS = {
     "mailbox_root",
     "agent_max_turns",
     "agent_kickoff_persona",
+    "max_task_agents",
+    "peer_absolute_limit",
     "host_broker_key",
     "host_broker_endpoint",
     "host_broker_known_hosts",
@@ -229,6 +231,12 @@ class Config:
     agent_max_turns: int = 30
     agent_kickoff_persona: str = "agent"
 
+    # Task-scoped agents (see docs/design-task-agents.md). max_task_agents caps
+    # running task-agents per master; peer_absolute_limit is the hop budget a
+    # peer edge gets when its `--peer <name>[:<hops>]` spec omits one.
+    max_task_agents: int = 4
+    peer_absolute_limit: int = 10
+
     # Host test broker (master only): if host_broker_key is set, master mounts
     # the restricted private key and gets a `host-run` wrapper that ships pytest
     # args to a host-side SSH broker running the `runtests` container. Empty =
@@ -286,6 +294,8 @@ class Config:
             mailbox_root=_env_str("CLD_MAILBOX_ROOT", layered.get("mailbox_root", _default_mailbox_root())),
             agent_max_turns=_env_int("CLD_AGENT_MAX_TURNS", int(layered.get("agent_max_turns", 30))),
             agent_kickoff_persona=_env_str("CLD_AGENT_KICKOFF_PERSONA", layered.get("agent_kickoff_persona", "agent")),
+            max_task_agents=_env_int("CLD_MAX_TASK_AGENTS", int(layered.get("max_task_agents", 4))),
+            peer_absolute_limit=_env_int("CLD_PEER_ABSOLUTE_LIMIT", int(layered.get("peer_absolute_limit", 10))),
             host_broker_key=_env_str("CLD_HOST_BROKER_KEY", layered.get("host_broker_key", "")),
             host_broker_endpoint=_env_str("CLD_HOST_BROKER_ENDPOINT", layered.get("host_broker_endpoint", "host.docker.internal:2222")),
             host_broker_known_hosts=_env_str("CLD_HOST_BROKER_KNOWN_HOSTS", layered.get("host_broker_known_hosts", "")),

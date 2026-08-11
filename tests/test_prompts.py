@@ -3,7 +3,13 @@
 import pytest
 from pathlib import Path
 
-from cld.prompts import find_prompt_matches, resolve_prompt_ref, stage_persona_without_frontmatter
+from cld.prompts import (
+    find_prompt_matches,
+    persona_resolve,
+    resolve_prompt_ref,
+    stage_persona_without_frontmatter,
+    strip_frontmatter,
+)
 
 
 def _make(path: Path, content: str = "# Hello\n") -> Path:
@@ -131,3 +137,71 @@ class TestStagePersonaWithoutFrontmatter:
         result = stage_persona_without_frontmatter(src, dst_dir)
         assert result.name == "my-persona.md"
         assert result.parent == dst_dir
+
+
+class TestStripFrontmatter:
+    def test_strips_leading_block(self):
+        text = "---\nname: x\ndescription: y\n---\n\n# Role\n\nbody\n"
+        assert strip_frontmatter(text) == "# Role\n\nbody\n"
+
+    def test_no_frontmatter_unchanged(self):
+        text = "# Role\n\nbody\n"
+        assert strip_frontmatter(text) == text
+
+    def test_horizontal_rule_in_body_preserved(self):
+        text = "---\nname: x\n---\n\n# Role\n\nfirst\n\n---\n\nsecond\n"
+        assert strip_frontmatter(text) == "# Role\n\nfirst\n\n---\n\nsecond\n"
+
+    def test_unterminated_block_unchanged(self):
+        text = "---\nname: x\nno closing marker\n"
+        assert strip_frontmatter(text) == text
+
+
+class TestPersonaResolve:
+    """A persona is a file name under prompts/personas/, never a path."""
+
+    def _tree(self, tmp_path):
+        d = tmp_path / "repo" / "prompts" / "personas"
+        d.mkdir(parents=True)
+        (d / "implementer.md").write_text("# impl\n")
+        return tmp_path / "repo", tmp_path / "cld"
+
+    def test_resolves_bare_name(self, tmp_path):
+        repo, cld = self._tree(tmp_path)
+        assert persona_resolve("implementer", repo, cld).name == "implementer.md"
+
+    def test_resolves_name_with_extension(self, tmp_path):
+        repo, cld = self._tree(tmp_path)
+        assert persona_resolve("implementer.md", repo, cld).name == "implementer.md"
+
+    def test_repo_wins_over_cld_root(self, tmp_path):
+        repo, cld = self._tree(tmp_path)
+        (cld / "prompts" / "personas").mkdir(parents=True)
+        (cld / "prompts" / "personas" / "implementer.md").write_text("# other\n")
+        assert persona_resolve("implementer", repo, cld).parent.parent.parent == repo
+
+    def test_unknown_name_raises_file_not_found(self, tmp_path):
+        repo, cld = self._tree(tmp_path)
+        with pytest.raises(FileNotFoundError):
+            persona_resolve("nope", repo, cld)
+
+    @pytest.mark.parametrize("name", [
+        "../../../../etc/hostname",
+        "/etc/hostname",
+        "sub/dir",
+        "..",
+        "",
+    ])
+    def test_path_like_names_rejected(self, tmp_path, name):
+        """`cld task-agent start` mounts the resolved file into a container, and that
+        command is reachable from inside a master through the broker."""
+        repo, cld = self._tree(tmp_path)
+        with pytest.raises(ValueError, match="invalid persona name"):
+            persona_resolve(name, repo, cld)
+
+    def test_traversal_to_a_real_file_still_rejected(self, tmp_path):
+        repo, cld = self._tree(tmp_path)
+        secret = tmp_path / "secret.txt"
+        secret.write_text("token\n")
+        with pytest.raises(ValueError):
+            persona_resolve("../../../secret.txt", repo, cld)

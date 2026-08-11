@@ -2,20 +2,35 @@
 
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from cld.config import Config, _load_dotenv
 from cld.docker import (
+    _INSPECT_FORMAT,
+    MAILBOX_MOUNT,
+    TaskAgentSpec,
     agent_container_name,
+    allocate_task_agent_name,
+    assert_task_agent_capacity,
+    build_container_args,
     build_session_name,
+    docker_task_agent_list,
     find_repo_root,
     in_master_container,
+    parse_peers_env,
     resolve_master_target,
+    resolve_task_agent_anchor,
     stage_home_ro,
     stage_host_broker,
+    task_agent_container_name,
     to_host_path,
 )
+
+
+def _ps(names: str, rc: int = 0):
+    return type("R", (), {"returncode": rc, "stdout": names, "stderr": ""})()
 
 
 class TestBuildSessionName:
@@ -263,3 +278,302 @@ class TestStageHostBroker:
         cfg = Config(host_broker_key=str(key), host_broker_endpoint="me@1.2.3.4:2200")
         args = stage_host_broker(cfg)
         assert "CLD_HOST_BROKER=me@1.2.3.4:2200" in args
+
+
+class TestDockerKindList:
+    """Enumeration is label-driven; `docker inspect` reads .Config.Labels."""
+
+    def test_inspect_format_uses_config_labels(self):
+        # Regression: a top-level .Labels field does not exist on a container and
+        # fails the whole template, which would silently drop every container.
+        assert ".Config.Labels" in _INSPECT_FORMAT
+        assert "index .Labels" not in _INSPECT_FORMAT
+
+    def test_records_carry_kind_parent_task(self):
+        inspect = _ps("/home/u/repoA|cld_agent_repoA_add-oauth|task-agent|cld_master_repoA_ab12|add-oauth\n")
+        with patch("cld.docker.subprocess.run", side_effect=[_ps("cld_agent_repoA_add-oauth\n"), inspect]):
+            assert docker_task_agent_list() == [{
+                "name": "cld_agent_repoA_add-oauth",
+                "repo_root": "/home/u/repoA",
+                "session": "cld_agent_repoA_add-oauth",
+                "kind": "task-agent",
+                "parent": "cld_master_repoA_ab12",
+                "task": "add-oauth",
+            }]
+
+    def test_missing_labels_become_empty(self):
+        with patch("cld.docker.subprocess.run", side_effect=[_ps("c1\n"), _ps("/repo|c1|agent||\n")]):
+            rec = docker_task_agent_list()[0]
+        assert (rec["parent"], rec["task"]) == ("", "")
+
+    def test_running_only_filters_docker_side(self):
+        calls = []
+
+        def spy(cmd, **_kwargs):
+            calls.append(cmd)
+            return _ps("")
+
+        with patch("cld.docker.subprocess.run", side_effect=spy):
+            docker_task_agent_list(running_only=True)
+        assert "status=running" in calls[0]
+        assert "label=org.cld.kind=task-agent" in calls[0]
+
+    def test_no_status_filter_by_default(self):
+        calls = []
+
+        def spy(cmd, **_kwargs):
+            calls.append(cmd)
+            return _ps("")
+
+        with patch("cld.docker.subprocess.run", side_effect=spy):
+            docker_task_agent_list()
+        assert "status=running" not in calls[0]
+
+    def test_ps_failure_returns_empty(self):
+        with patch("cld.docker.subprocess.run", return_value=_ps("", rc=1)):
+            assert docker_task_agent_list() == []
+
+    def test_inspect_failure_skips_container(self):
+        with patch("cld.docker.subprocess.run", side_effect=[_ps("c1\nc2\n"), _ps("", rc=1), _ps("/r|c2|agent||\n")]):
+            assert [c["name"] for c in docker_task_agent_list()] == ["c2"]
+
+
+class TestTaskAgentContainerName:
+    def test_repo_and_slug(self, tmp_path):
+        assert task_agent_container_name(tmp_path / "myrepo", "add-oauth") == "cld_agent_myrepo_add-oauth"
+
+    def test_suffix_appended_from_two(self, tmp_path):
+        repo = tmp_path / "myrepo"
+        assert task_agent_container_name(repo, "x", 1) == "cld_agent_myrepo_x"
+        assert task_agent_container_name(repo, "x", 2) == "cld_agent_myrepo_x-2"
+
+    @pytest.mark.parametrize("slug", ["Add-OAuth", "add oauth", "-lead", "add_oauth", "", "add/oauth"])
+    def test_invalid_slug_rejected(self, tmp_path, slug):
+        with pytest.raises(ValueError, match="invalid task slug"):
+            task_agent_container_name(tmp_path / "r", slug)
+
+
+class TestAllocateTaskAgentName:
+    def test_returns_base_when_free(self, tmp_path):
+        with patch("cld.docker._docker_status", return_value="absent"):
+            assert allocate_task_agent_name(tmp_path / "r", "task") == "cld_agent_r_task"
+
+    def test_skips_taken_names(self, tmp_path):
+        with patch("cld.docker._docker_status", side_effect=["running", "stopped", "absent"]):
+            assert allocate_task_agent_name(tmp_path / "r", "task") == "cld_agent_r_task-3"
+
+
+class TestTaskAgentSpec:
+    def test_peers_env_encoding(self):
+        spec = TaskAgentSpec(slug="t", peers={"cld_agent_r_b": 5, "cld_agent_r_a": 15})
+        assert spec.peers_env() == "cld_agent_r_a:15,cld_agent_r_b:5"
+
+    def test_peers_env_empty(self):
+        assert TaskAgentSpec(slug="t").peers_env() == ""
+
+
+class TestBuildContainerArgsTaskAgent:
+    """Task-agent role wiring. No daemon needed -- build_container_args only
+    inspects the filesystem and cfg."""
+
+    def _args(self, tmp_path, **kwargs):
+        spec = TaskAgentSpec(
+            slug="add-oauth",
+            parent_master="cld_master_repoA_ab12",
+            deliverable_branch="add-oauth-login",
+            peers={"cld_agent_repoA_contract": 15},
+            **kwargs,
+        )
+        return build_container_args(
+            tmp_path, "cld_agent_repoA_add-oauth", Config(mailbox_root=str(tmp_path / "mb")),
+            task_agent=spec,
+        )
+
+    def test_labels_and_name(self, tmp_path):
+        args = self._args(tmp_path)
+        assert "--name" in args and "cld_agent_repoA_add-oauth" in args
+        assert "org.cld.kind=task-agent" in args
+        assert "org.cld.task=add-oauth" in args
+        assert "org.cld.parent-master=cld_master_repoA_ab12" in args
+        assert f"org.cld.session=cld_agent_repoA_add-oauth" in args
+
+    def test_agent_mode_plus_task_modifier(self, tmp_path):
+        args = self._args(tmp_path)
+        assert "AGENT_MODE=1" in args
+        assert "TASK_AGENT_MODE=1" in args
+        assert "MASTER_MODE=1" not in args
+
+    def test_spawn_facts_in_env(self, tmp_path):
+        args = self._args(tmp_path)
+        assert "AGENT_DELIVERABLE_BRANCH=add-oauth-login" in args
+        assert "AGENT_PEERS=cld_agent_repoA_contract:15" in args
+        assert "AGENT_PARENT_MASTER=cld_master_repoA_ab12" in args
+        assert "AGENT_TASK_SLUG=add-oauth" in args
+
+    def test_peer_limit_fallback_propagated(self, tmp_path):
+        spec = TaskAgentSpec(slug="t")
+        args = build_container_args(
+            tmp_path, "cld_agent_r_t",
+            Config(mailbox_root=str(tmp_path / "mb"), peer_absolute_limit=3),
+            task_agent=spec,
+        )
+        assert "CLD_PEER_ABSOLUTE_LIMIT=3" in args
+
+    def test_persistent_not_ephemeral(self, tmp_path):
+        assert "--rm" not in self._args(tmp_path)
+
+    def test_mailbox_mounted(self, tmp_path):
+        args = self._args(tmp_path)
+        assert any(a.endswith(f":{MAILBOX_MOUNT}:rw") for a in args)
+
+    def test_no_host_broker_key(self, tmp_path):
+        key = tmp_path / "broker_key"
+        key.write_text("k")
+        args = build_container_args(
+            tmp_path, "cld_agent_r_t",
+            Config(mailbox_root=str(tmp_path / "mb"), host_broker_key=str(key)),
+            task_agent=TaskAgentSpec(slug="t"),
+        )
+        assert not any("host-broker-key" in a for a in args)
+
+    @pytest.mark.parametrize("kwargs", [
+        {"master": True, "agent": True},
+        {"master": True, "task_agent": TaskAgentSpec(slug="t")},
+        {"agent": True, "task_agent": TaskAgentSpec(slug="t")},
+    ])
+    def test_roles_mutually_exclusive(self, tmp_path, kwargs):
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            build_container_args(tmp_path, "s", Config(), **kwargs)
+
+
+def _tasks(*specs):
+    """Fake docker_task_agent_list records: (name, parent, repo_root, task)."""
+    return [
+        {"name": n, "parent": p, "repo_root": r, "task": t, "session": n, "kind": "task-agent"}
+        for n, p, r, t in specs
+    ]
+
+
+class TestAssertTaskAgentCapacity:
+    def test_under_cap_passes(self):
+        with patch("cld.docker.docker_task_agent_list", return_value=_tasks(("a", "m1", "/r", "t"))):
+            assert_task_agent_capacity(Config(max_task_agents=2), "m1")
+
+    def test_at_cap_raises_naming_agents(self):
+        running = _tasks(("a", "m1", "/r", "task-a"), ("b", "m1", "/r", "task-b"))
+        with patch("cld.docker.docker_task_agent_list", return_value=running):
+            with pytest.raises(RuntimeError, match="task-agent cap reached") as e:
+                assert_task_agent_capacity(Config(max_task_agents=2), "m1")
+        assert "task-a" in str(e.value) and "b (task-b)" in str(e.value)
+
+    def test_other_masters_do_not_count(self):
+        running = _tasks(("a", "m2", "/r", "t"), ("b", "m2", "/r", "t"))
+        with patch("cld.docker.docker_task_agent_list", return_value=running):
+            assert_task_agent_capacity(Config(max_task_agents=2), "m1")
+
+    def test_host_launched_group_counted_on_its_own(self):
+        running = _tasks(("a", "", "/r", "t"), ("b", "", "/r", "t"))
+        with patch("cld.docker.docker_task_agent_list", return_value=running) as m:
+            with pytest.raises(RuntimeError, match="host-launched agents"):
+                assert_task_agent_capacity(Config(max_task_agents=2), "")
+        assert m.call_args.kwargs == {"running_only": True}
+
+
+class TestResolveTaskAgentAnchor:
+    """Live-stack refusal against a real jj repo; the container list is faked."""
+
+    def _commits(self, jj_repo):
+        base = jj_repo.resolve_revision("@-")
+        jj_repo.run(["new", base])
+        (jj_repo.repo_root / "live.txt").write_text("live\n")
+        jj_repo.run(["commit", "-m", "live agent anchor"])
+        live_anchor = jj_repo.resolve_revision("@-")
+        (jj_repo.repo_root / "more.txt").write_text("more\n")
+        jj_repo.run(["commit", "-m", "live agent work"])
+        inside = jj_repo.resolve_revision("@-")
+        return base, live_anchor, inside
+
+    def _fleet(self, tmp_path, jj_repo, anchor, name="cld_agent_r_live"):
+        from cld.messenger import mailbox
+        mailbox_root = tmp_path / "mb"
+        mailbox.ensure_meta(
+            mailbox_root, name, parent="m1", task="t", persona="implementer",
+            deliverable_branch="d", anchor=anchor, peers={},
+        )
+        cfg = Config(mailbox_root=str(mailbox_root))
+        records = _tasks((name, "m1", str(jj_repo.repo_root), "t"))
+        return cfg, records
+
+    def test_shared_base_passes_with_live_sibling(self, tmp_path, jj_repo):
+        base, live_anchor, _ = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, live_anchor)
+        with patch("cld.docker.docker_task_agent_list", return_value=records):
+            assert resolve_task_agent_anchor(cfg, jj_repo.repo_root, base) == base
+
+    def test_inside_live_stack_refused_naming_owner(self, tmp_path, jj_repo):
+        _, live_anchor, inside = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, live_anchor)
+        with patch("cld.docker.docker_task_agent_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live stack") as e:
+                resolve_task_agent_anchor(cfg, jj_repo.repo_root, inside)
+        assert "cld_agent_r_live" in str(e.value)
+
+    def test_equal_to_live_anchor_refused(self, tmp_path, jj_repo):
+        _, live_anchor, _ = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, live_anchor)
+        with patch("cld.docker.docker_task_agent_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live stack"):
+                resolve_task_agent_anchor(cfg, jj_repo.repo_root, live_anchor)
+
+    def test_other_repo_agents_ignored(self, tmp_path, jj_repo):
+        _, live_anchor, inside = self._commits(jj_repo)
+        cfg, _records = self._fleet(tmp_path, jj_repo, live_anchor)
+        elsewhere = _tasks(("cld_agent_r_live", "m1", "/some/other/repo", "t"))
+        with patch("cld.docker.docker_task_agent_list", return_value=elsewhere):
+            assert resolve_task_agent_anchor(cfg, jj_repo.repo_root, inside) == inside
+
+    def test_missing_meta_anchor_ignored(self, tmp_path, jj_repo):
+        _, _, inside = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, "")
+        with patch("cld.docker.docker_task_agent_list", return_value=records):
+            assert resolve_task_agent_anchor(cfg, jj_repo.repo_root, inside) == inside
+
+    def test_no_live_agents_passes(self, tmp_path, jj_repo):
+        _, _, inside = self._commits(jj_repo)
+        with patch("cld.docker.docker_task_agent_list", return_value=[]):
+            cfg = Config(mailbox_root=str(tmp_path / "mb"))
+            assert resolve_task_agent_anchor(cfg, jj_repo.repo_root, inside) == inside
+
+    def test_stale_meta_anchor_warns_and_allows(self, tmp_path, jj_repo, caplog):
+        # A meta.json anchor no longer resolvable in the store is our own
+        # bookkeeping failing, not a real hazard -- warn, don't block.
+        # ("0" * 40 would be jj's root commit, an ancestor of everything.)
+        _, _, inside = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, "dead" * 10)
+        with caplog.at_level("WARNING"), patch("cld.docker.docker_task_agent_list", return_value=records):
+            assert resolve_task_agent_anchor(cfg, jj_repo.repo_root, inside) == inside
+        assert "live-stack anchor check" in caplog.text
+
+    def test_git_backend_skips_check(self, tmp_path, git_repo):
+        head = git_repo.resolve_revision("HEAD")
+        cfg = Config(mailbox_root=str(tmp_path / "mb"))
+        with patch("cld.docker.docker_task_agent_list") as m:
+            assert resolve_task_agent_anchor(cfg, git_repo.repo_root, head) == head
+        m.assert_not_called()
+
+
+class TestParsePeersEnv:
+    def test_round_trip(self):
+        peers = {"cld_agent_r_a": 15, "cld_agent_r_b": 5}
+        assert parse_peers_env(TaskAgentSpec(slug="t", peers=peers).peers_env()) == peers
+
+    def test_empty_is_empty_dict(self):
+        assert parse_peers_env("") == {}
+
+    def test_ignores_blank_segments(self):
+        assert parse_peers_env("a:1,,b:2,") == {"a": 1, "b": 2}
+
+    @pytest.mark.parametrize("value", ["nocolon", "a:", ":5", "a:x", "a:1.5"])
+    def test_malformed_raises(self, value):
+        with pytest.raises(ValueError, match="malformed peer spec"):
+            parse_peers_env(value)

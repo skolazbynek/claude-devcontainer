@@ -5,7 +5,10 @@ Controlled entirely via env vars (no dependency on the cld package, so it
 stays a pure filesystem/stdout double):
 
   STUB_ARGV_LOG      -- if set, append this invocation's argv (minus argv[0])
-                        as a JSON line, for prompt/flag assertions.
+                        as a JSON line, for flag assertions.
+  STUB_PROMPT_LOG    -- if set, append this invocation's stdin (the prompt) as a
+                        JSON line. The real claude takes the prompt on stdin, not
+                        in argv, so this is the only way to assert on it.
   STUB_FAIL          -- if "1", print to stderr and exit 1.
   STUB_SEND_REPLY    -- if "1", write a message into STUB_REPLY_TO's inbox
                         and append to STUB_SESSION_NAME's outbox.log, so the
@@ -24,6 +27,10 @@ from datetime import datetime, timezone
 if os.environ.get("STUB_ARGV_LOG"):
     with open(os.environ["STUB_ARGV_LOG"], "a") as f:
         f.write(json.dumps(sys.argv[1:]) + "\n")
+
+if os.environ.get("STUB_PROMPT_LOG"):
+    with open(os.environ["STUB_PROMPT_LOG"], "a") as f:
+        f.write(json.dumps(sys.stdin.read()) + "\n")
 
 if os.environ.get("STUB_FAIL") == "1":
     print("stub failure", file=sys.stderr)

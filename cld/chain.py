@@ -16,7 +16,7 @@ from cld.agent_runtime import wait_for_agent, read_agent_cost, format_duration
 from cld.config import Config
 from cld.docker import find_repo_root
 from cld.log import get_logger
-from cld.prompts import stage_persona_without_frontmatter
+from cld.prompts import persona_resolve, stage_persona_without_frontmatter
 from cld.vcs import get_backend
 from cld.vcs.anchor import assert_descendant, resolve_anchor
 
@@ -133,20 +133,6 @@ def _build_step(raw, path) -> ChainStep:
         inputs=tuple(inputs),
         timeout=int(raw.get("timeout", 0) or 0),
     )
-
-
-def persona_resolve(name: str, repo_root: Path, cld_root: Path) -> Path:
-    candidates = [name, f"{name}.md"] if not name.endswith(".md") else [name]
-    for candidate in candidates:
-        for base in (repo_root, cld_root):
-            path = base / "prompts" / "personas" / candidate
-            if path.is_file():
-                return path
-    raise FileNotFoundError(
-        f"Persona '{name}' not found in {repo_root}/prompts/personas/ "
-        f"or {cld_root}/prompts/personas/"
-    )
-
 
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")

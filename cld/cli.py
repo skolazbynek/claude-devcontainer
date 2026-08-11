@@ -17,8 +17,11 @@ from cld.chain import ParallelGroup, apply_name_override, chain_state_dir, load_
 from cld.chain_state import ChainState, StateWriter, write_state, _utcnow_iso
 from cld.config import Config
 from cld.docker import (
+    TaskAgentSpec,
     agent_container_name,
+    allocate_task_agent_name,
     anchor_env_args,
+    assert_task_agent_capacity,
     base_extra_paths,
     build_container_args,
     build_session_name,
@@ -27,21 +30,26 @@ from cld.docker import (
     docker_agent_status,
     docker_master_list,
     docker_master_status,
+    docker_task_agent_list,
+    docker_task_agent_status,
     ensure_image,
     find_repo_root,
     find_target_repo,
     in_master_container,
     master_container_name,
     require_docker,
+    resolve_task_agent_anchor,
     run_extra_paths,
     stage_home_ro,
     stage_ssh_agent,
+    task_agent_container_name,
     to_host_path,
 )
-from cld.host_docker import broker_agent_op, broker_available
+from cld.host_docker import broker_agent_op, broker_available, broker_task_agent_op
+from cld.messenger import mailbox
 from cld.run import launch_run
 from cld.log import get_logger, setup_logging
-from cld.prompts import resolve_prompt_ref
+from cld.prompts import persona_resolve, resolve_prompt_ref
 from cld.vcs import get_backend
 from cld.vcs.anchor import resolve_anchor
 
@@ -57,6 +65,12 @@ def _handle_errors(func):
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
+        except typer.Exit:
+            # click's Exit subclasses RuntimeError, so without this it lands in the
+            # handler below and every deliberate exit code becomes 1 -- including the 0
+            # an in-master broker dispatch raises on success, and including the clean
+            # `Error: ...` paths, which also gained a redundant "Command failed: 1" line.
+            raise
         except (RuntimeError, ValueError, subprocess.CalledProcessError, FileNotFoundError) as e:
             log.error("Command failed: %s", e)
             log.debug("traceback:", exc_info=True)
@@ -100,22 +114,8 @@ def run(
     prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (appended to task file if both given)"),
 ):
     """Launch a one-shot autonomous Claude agent (headless, --rm, commits to a branch)."""
-    task_path: Path | None = None
-
-    if task_file and task_file.startswith("@"):
-        cld_root = Path(__file__).resolve().parent.parent
-        repo_root = find_repo_root()
-        try:
-            task_path = resolve_prompt_ref(task_file[1:], repo_root, cld_root)
-        except (FileNotFoundError, ValueError) as e:
-            typer.echo(f"Error: {e}", err=True)
-            raise typer.Exit(1)
-        log.info("resolved @%s -> %s", task_file[1:], task_path)
-    elif task_file:
-        task_path = Path(task_file)
-        if not task_path.is_file():
-            typer.echo(f"Error: Task file not found: {task_file}", err=True)
-            raise typer.Exit(1)
+    cld_root = Path(__file__).resolve().parent.parent
+    task_path = _resolve_task_file(task_file, find_repo_root(), cld_root)
 
     if not task_path and not prompt:
         typer.echo("Error: Provide a task file, --prompt, or both", err=True)
@@ -141,6 +141,25 @@ def run(
         revision=revision,
     )
 
+
+
+def _resolve_task_file(task_file: str | None, repo_root: Path, cld_root: Path) -> Path | None:
+    """Resolve a task-file argument: a path, or ``@<name>`` from the prompts/ trees."""
+    if not task_file:
+        return None
+    if task_file.startswith("@"):
+        try:
+            task_path = resolve_prompt_ref(task_file[1:], repo_root, cld_root)
+        except (FileNotFoundError, ValueError) as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+        log.info("resolved @%s -> %s", task_file[1:], task_path)
+        return task_path
+    task_path = Path(task_file)
+    if not task_path.is_file():
+        typer.echo(f"Error: Task file not found: {task_file}", err=True)
+        raise typer.Exit(1)
+    return task_path
 
 
 def _run_devcontainer(
@@ -470,8 +489,13 @@ def _do_logs(role: str, tail: int) -> None:
     if _persistent_container_status(role, container_name) == "absent":
         typer.echo(f"No {role} container found for this repo.", err=True)
         raise typer.Exit(1)
+    _docker_logs(container_name, tail)
+
+
+def _docker_logs(name: str, tail: int) -> None:
+    """Print the tail of a container's log. Supervisor output arrives on stderr."""
     result = subprocess.run(
-        ["docker", "logs", "--tail", str(tail), container_name],
+        ["docker", "logs", "--tail", str(tail), name],
         capture_output=True, text=True,
     )
     if result.stdout:
@@ -718,6 +742,654 @@ def _forget_session_state(repo_root_str: str, session: str) -> None:
                 " ".join(cmd), result.returncode, result.stderr.strip(),
                 repo_root, " ".join(cmd),
             )
+
+
+# --- Task-scoped agents (headless, many per repo, master-owned lifecycle) -----
+task_agent_app = typer.Typer(
+    help="Task-scoped headless agents: one per task, bounded lifespan (see docs/design-task-agents.md).",
+)
+app.add_typer(task_agent_app, name="task-agent")
+
+# Reap-readiness check 1 waits this long for an in-flight turn to finish before
+# refusing (docs/design-task-agents.md §7 "waits briefly"). Matches `docker stop`'s
+# grace period: enough for a turn that is about to end, not enough to block on one
+# that just started.
+_REAP_WAIT_SECONDS = 10
+
+
+def _mailbox_root(cfg: Config) -> Path:
+    return Path(cfg.mailbox_root).expanduser()
+
+
+def _parse_peer_specs(specs: list[str], default_limit: int) -> dict[str, int]:
+    """Parse repeatable ``--peer <name>[:<hops>]`` into a name -> hop-budget mapping.
+
+    A spec without ``:<hops>`` gets the configured absolute limit (§10). Container
+    names cannot contain ':', so the delimiter is unambiguous.
+    """
+    peers: dict[str, int] = {}
+    for spec in specs:
+        name, sep, hops = spec.partition(":")
+        if not name:
+            raise ValueError(f"--peer {spec!r}: missing peer name (expected <name>[:<hops>])")
+        if name in peers:
+            raise ValueError(f"--peer {name}: named twice")
+        if sep and not (hops.isdigit() and int(hops) > 0):
+            raise ValueError(f"--peer {spec!r}: hop budget must be a positive integer")
+        peers[name] = int(hops) if sep else default_limit
+    return peers
+
+
+def _format_peers(peers: dict[str, int]) -> str:
+    """Peer edges as `<name> (<n> hops)`, for the launch banner and the detail view."""
+    return ", ".join(f"{p} ({h} hops)" for p, h in sorted(peers.items())) or "none"
+
+
+def _known_task_agent_names(cfg: Config) -> set[str]:
+    """Names of task-agents this host knows: live containers plus mailboxes with spawn facts.
+
+    Inside master there is no docker socket, so the mailbox tree (which *is* bind-mounted)
+    is the whole view -- asking docker would only log a failed `docker ps` per call.
+    """
+    names = set() if in_master_container() else {c["name"] for c in docker_task_agent_list()}
+    return names | {m["name"] for m in mailbox.list_fleet(_mailbox_root(cfg))}
+
+
+def _dispatch_task_agent_to_broker(cfg: Config, op: str, extra_args: list[str]) -> None:
+    """From inside master, delegate a `cld task-agent <op>` to the host broker.
+
+    Master has no docker daemon, so spawning and reaping happen host-side for the
+    cwd-selected target repo. The broker stamps `--parent <this master>` on the way
+    through and refuses `--force`, so a master reaps only its own fleet and can never
+    override a reap-readiness refusal (docs/design-task-agents.md §7).
+    """
+    if not broker_available():
+        typer.echo(
+            "Error: the host broker is not configured for this master, so `cld task-agent` "
+            "cannot reach the host. Set `host_broker_key` (and `host_broker_known_hosts`) "
+            "in cld config and restart master. Reading the fleet still works without it: "
+            "the messenger's fleet_digest()/read_mailbox() tools and `cld task-agent "
+            "transcript` all read the mounted mailbox.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    target = str(find_target_repo(cfg))
+    log.info("Delegating `cld task-agent %s` for %s to host broker", op, target)
+    raise typer.Exit(broker_task_agent_op(target, op, extra_args))
+
+
+def _task_agent_start_argv(
+    persona: str, task_file: str | None, name: str, prompt: str,
+    branch: str, model: str, revision: str, peer: list[str],
+) -> list[str]:
+    """Rebuild `start`'s argv for the broker, which re-parses it host-side.
+
+    The task *file* is the one argument that cannot cross: `/workspace/current` is
+    container-ephemeral and a sibling target is an empty placeholder, so a path that
+    resolves here resolves to nothing (or to the wrong file) there. An `@ref` is
+    forwarded verbatim precisely so the host resolves it against the *target* repo;
+    a real path is read here and folded into the inline prompt, which reproduces
+    exactly what the container would have composed from the two anyway.
+    """
+    argv = [persona]
+    inline = prompt
+    if task_file and task_file.startswith("@"):
+        argv.append(task_file)
+    elif task_file:
+        body = Path(task_file).read_text().strip()
+        if not body:
+            raise ValueError(f"task file is empty: {task_file}")
+        inline = f"{body}\n\n## Additional Instructions\n\n{prompt}" if prompt else body
+    if name:
+        argv += ["-n", name]
+    if inline:
+        argv += ["-p", inline]
+    if branch:
+        argv += ["--branch", branch]
+    if model:
+        argv += ["-m", model]
+    if revision:
+        argv += ["-r", revision]
+    for spec in peer:
+        argv += ["--peer", spec]
+    return argv
+
+
+@task_agent_app.command("start")
+@_handle_errors
+def task_agent_start(
+    persona: str = typer.Argument(..., help="Persona ref, e.g. @implementer (resolved like chain personas)"),
+    task_file: Optional[str] = typer.Argument(None, help="Task markdown file, or @<name> to resolve from prompts/"),
+    name: str = typer.Option("", "-n", "--name", help="Task slug, kebab-case (default: --branch)"),
+    prompt: str = typer.Option("", "-p", "--prompt", help="Inline task text (appended to the task file if both given)"),
+    branch: str = typer.Option("", "--branch", help="Deliverable branch name (default: the task slug)"),
+    model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
+    revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change)"),
+    peer: list[str] = typer.Option([], "--peer", help="A peer this agent may message: <container-name>[:<hops>]. Repeatable."),
+    parent: str = typer.Option("", "--parent", hidden=True, help="Owning master session (set by the host broker)"),
+):
+    """Spawn a task-scoped agent. Every start creates a new container (no start-or-attach)."""
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    if in_master_container():
+        _dispatch_task_agent_to_broker(cfg, "start", _task_agent_start_argv(
+            persona, task_file, name, prompt, branch, model, revision, peer,
+        ))
+    require_docker()
+
+    cld_root = Path(__file__).resolve().parent.parent
+    repo_root = find_target_repo(cfg)
+    task_path = _resolve_task_file(task_file, repo_root, cld_root)
+    if not task_path and not prompt:
+        typer.echo("Error: Provide a task file, --prompt, or both", err=True)
+        raise typer.Exit(1)
+
+    persona_path = persona_resolve(persona.lstrip("@"), repo_root, cld_root)
+    slug = name or branch
+    if not slug:
+        typer.echo(
+            "Error: a task slug is required -- pass -n/--name <slug> (short, kebab-case, "
+            "naming the task) or --branch, which it falls back to",
+            err=True,
+        )
+        raise typer.Exit(1)
+    branch = branch or slug
+    peers = _parse_peer_specs(peer, cfg.peer_absolute_limit)
+
+    # Validates the slug shape, and settles the name before the refusals so every
+    # input error surfaces ahead of them. Allocation reserves nothing -- it only
+    # probes docker for a free name.
+    session = allocate_task_agent_name(repo_root, slug)
+    if session in peers:
+        raise ValueError(f"--peer {session} names this agent itself")
+    unknown = sorted(set(peers) - _known_task_agent_names(cfg))
+    if unknown:
+        # Not a refusal: the master owns the graph, and only an already-spawned
+        # agent can be named, so a name this host hasn't seen is usually a typo
+        # -- which its first send() would surface anyway (§7).
+        log.warning(
+            "peer(s) not known to this host: %s. Peers are addressed by full container "
+            "name; check `cld task-agent status`.", ", ".join(unknown),
+        )
+
+    # Both refusals are host-side, before anything is built or spawned: the cap
+    # counts running siblings, the anchor check reads the origin store (§9).
+    assert_task_agent_capacity(cfg, parent)
+    anchor = resolve_task_agent_anchor(cfg, repo_root, revision)
+
+    ensure_image(
+        cfg.devcontainer_image,
+        cld_root / "imgs/claude-devcontainer/Dockerfile.claude-devcontainer",
+        cld_root,
+        extra_paths=devcontainer_extra_paths(cld_root),
+        parent_image=(
+            cfg.base_image,
+            cld_root / "imgs/claude-base/Dockerfile.claude-base",
+            cld_root,
+            base_extra_paths(cld_root),
+        ),
+    )
+
+    log.info(
+        "task-agent: name=%s, task=%s, persona=%s, branch=%s, anchor=%s, peers=%s, parent=%s",
+        session, slug, persona_path.stem, branch, anchor[:12],
+        ",".join(f"{p}:{h}" for p, h in sorted(peers.items())) or "none",
+        parent or "<none>",
+    )
+
+    args = build_container_args(
+        repo_root, session, cfg,
+        task_agent=TaskAgentSpec(
+            slug=slug, parent_master=parent, deliverable_branch=branch, peers=peers,
+        ),
+    )
+    # The already-resolved anchor, not `revision`: the launch must pin exactly the
+    # commit the live-stack refusal inspected.
+    args += anchor_env_args(cfg, session, anchor)
+    host_persona = to_host_path(str(persona_path.resolve()), cfg)
+    args += [
+        "-v", f"{host_persona}:/config/persona.md:ro",
+        "-e", "AGENT_PERSONA_FILE=/config/persona.md",
+        "-e", f"AGENT_PERSONA={persona_path.stem}",
+    ]
+    if task_path:
+        host_task = to_host_path(str(task_path.resolve()), cfg)
+        args += ["-v", f"{host_task}:/config/task.md:ro"]
+    if prompt:
+        args += ["-e", f"AGENT_INLINE_PROMPT={prompt}"]
+    if model:
+        args += ["-e", f"AGENT_MODEL={model}"]
+
+    skipped = []
+    for rel in cfg.home_mounts_devcontainer:
+        mnt = stage_home_ro(rel, cfg)
+        if mnt:
+            args += mnt
+        else:
+            skipped.append(rel)
+    if skipped:
+        log.warning("Optional host paths not found (skipped): %s", ", ".join(skipped))
+
+    args += stage_ssh_agent(cfg)
+    args += [cfg.devcontainer_image]
+
+    log.info("Starting task-agent (detached)...")
+    subprocess.run(["docker", "run", "-d"] + args, check=True)
+
+    # The handle every read verb takes, which is not always the slug: a live-name
+    # collision appends a suffix, and the hints have to point at *this* agent.
+    handle = session.rsplit("_", 1)[-1]
+
+    if not _wait_for_container_ready(session, _READY_SENTINEL["agent"]):
+        typer.echo(
+            f"Error: task-agent '{session}' did not become ready within 60 s. "
+            f"It is still running -- check: cld task-agent logs {handle}",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    typer.echo(f"Task-agent '{session}' started for {repo_root}.")
+    typer.echo(f"  Task:       {slug}")
+    typer.echo(f"  Persona:    {persona_path.stem}")
+    typer.echo(f"  Branch:     {branch}")
+    typer.echo(f"  Anchor:     {anchor[:12]}")
+    typer.echo(f"  Peers:      {_format_peers(peers)}")
+    typer.echo(f"  Status:     cld task-agent status {handle}")
+    typer.echo(f"  Logs:       cld task-agent logs {handle}")
+    typer.echo(f"  Transcript: cld task-agent transcript {handle}")
+    typer.echo(f"  Send:       messenger MCP send(to=\"{session}\", ...)")
+
+
+def _cwd_repo_task_agent_name(cfg: Config, slug: str) -> str:
+    """The name a task-agent for *slug* would have in the cwd's repo, or "" if that can't be known."""
+    try:
+        return task_agent_container_name(find_target_repo(cfg), slug)
+    except (RuntimeError, ValueError):
+        return ""
+
+
+def _resolve_task_agent(cfg: Config, name: str) -> str:
+    """Resolve a bare task slug -- or a full container name -- to a full container name.
+
+    A CLI affordance only (D26): mailbox addressing is always by full name, so a
+    human never has to type `cld_agent_myrepo_add-oauth`. The slug can't contain
+    '_' (see task_agent_container_name), so it is always the segment after the last
+    one, whatever the repo is called. Archived mailboxes resolve too, so
+    `transcript` keeps working after a reap.
+    """
+    live = _known_task_agent_names(cfg)
+    if name in live:
+        return name
+
+    matches = sorted(c for c in live if c.rsplit("_", 1)[-1] == name)
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        expected = _cwd_repo_task_agent_name(cfg, name)
+        if expected in matches:
+            return expected
+        raise RuntimeError(
+            f"'{name}' is ambiguous -- it matches {', '.join(matches)}. Use the full "
+            "container name, or run this from the repo you mean."
+        )
+
+    root = _mailbox_root(cfg)
+    for candidate in (name, _cwd_repo_task_agent_name(cfg, name)):
+        if candidate and mailbox.resolve_mailbox_dir(root, candidate) is not None:
+            return candidate
+    raise RuntimeError(
+        f"no task-agent named '{name}' (neither live nor archived). "
+        "See `cld task-agent status`."
+    )
+
+
+def _task_agent_rows(cfg: Config, parent: str = "") -> list[dict]:
+    """Roster rows: every task-agent container, plus mailboxes whose container is gone.
+
+    A mailbox means the agent was started; a container means it is alive. The pair
+    that doesn't line up -- mailbox, no container -- is §10's manual-cleanup signal,
+    so it gets its own `gone` state rather than being dropped.
+
+    *parent* scopes the roster to one master's fleet. Empty (a human on the host) shows
+    everything, which is what makes this the surface for hunting orphans; the broker
+    passes a value so a master sees its own fleet rather than every master's.
+    """
+    root = _mailbox_root(cfg)
+    rows: dict[str, dict] = {}
+    for c in docker_task_agent_list():
+        if parent and c["parent"] != parent:
+            continue
+        status = docker_task_agent_status(c["name"])
+        rows[c["name"]] = {
+            "name": c["name"],
+            "container": "gone" if status == "absent" else status,
+        }
+    for m in mailbox.list_fleet(root, parent or None):
+        row = rows.setdefault(m["name"], {"name": m["name"], "container": "gone"})
+        row["created"] = m.get("created_at", "")
+    for name, row in rows.items():
+        state = mailbox.read_state(root, name) or {}
+        row["phase"] = state.get("phase", "-")
+        row["msgs"] = state.get("msg_count", 0)
+        row["cost"] = state.get("cost_usd_total", 0.0)
+        row.setdefault("created", "")
+    return [rows[key] for key in sorted(rows)]
+
+
+def _print_task_agent_roster(rows: list[dict]) -> None:
+    if not rows:
+        typer.echo("No task-agents found.")
+        return
+    name_w = max(len("NAME"), *(len(r["name"]) for r in rows))
+    cont_w = max(len("CONTAINER"), *(len(r["container"]) for r in rows))
+    phase_w = max(len("PHASE"), *(len(str(r["phase"])) for r in rows))
+    typer.echo(
+        f"{'NAME':<{name_w}}  {'CONTAINER':<{cont_w}}  {'PHASE':<{phase_w}}  MSGS  COST      AGE"
+    )
+    for r in rows:
+        typer.echo(
+            f"{r['name']:<{name_w}}  {r['container']:<{cont_w}}  {str(r['phase']):<{phase_w}}  "
+            f"{r['msgs']:>4}  ${r['cost']:<8.4f} {_format_age(r['created']) if r['created'] else '-'}"
+        )
+    gone = [r["name"] for r in rows if r["container"] == "gone"]
+    if gone:
+        typer.echo(f"\n{len(gone)} mailbox(es) with no container: {', '.join(gone)}")
+        typer.echo("  Clear each with: cld task-agent shutdown <name>")
+
+
+def _print_task_agent_detail(cfg: Config, name: str) -> None:
+    root = _mailbox_root(cfg)
+    status = docker_task_agent_status(name)
+    typer.echo(f"Task-agent: {name}")
+    typer.echo(f"  Container:  {'gone' if status == 'absent' else status}")
+
+    if not mailbox.mailbox_dir(root, name).is_dir():
+        # Reaped: teardown moved the whole mailbox under the archive root. Detail
+        # is a live-agent view by design (§7 pairs the archive with `transcript`).
+        typer.echo("  Mailbox:    reaped (archived)")
+        typer.echo(f"  Read the conversation with: cld task-agent transcript {name}")
+        return
+
+    meta = mailbox.read_meta(root, name)
+    if meta is None:
+        typer.echo("  Spawn facts: none yet (meta.json is written when the supervisor boots)")
+    else:
+        peers = meta.get("peers") or {}
+        typer.echo(f"  Task:       {mailbox.task_summary(meta.get('task', ''), 72)}")
+        typer.echo(f"  Persona:    {meta.get('persona', '')}")
+        typer.echo(f"  Branch:     {meta.get('deliverable_branch', '')}")
+        typer.echo(f"  Anchor:     {(meta.get('anchor') or '')[:12] or '-'}")
+        typer.echo(f"  Parent:     {meta.get('parent') or '<none -- launched on the host>'}")
+        typer.echo(f"  Peers:      {_format_peers(peers)}")
+        typer.echo(f"  Created:    {meta.get('created_at', '')}")
+
+    state = mailbox.read_state(root, name)
+    if state is None:
+        typer.echo("  Supervisor state: unavailable (not started yet)")
+        return
+    typer.echo(f"  Phase:      {state.get('phase')}")
+    typer.echo(f"  Messages:   {state.get('msg_count')}")
+    typer.echo(f"  Cost:       ${state.get('cost_usd_total', 0.0):.4f}")
+    current = state.get("current")
+    if current:
+        typer.echo(
+            f"  Processing: {current.get('subject')} (from {current.get('from')}, "
+            f"since {current.get('started_at')})"
+        )
+
+
+@task_agent_app.command("status")
+@_handle_errors
+def task_agent_status(
+    name: Optional[str] = typer.Argument(None, help="Task slug or container name; omit for the roster"),
+    parent: str = typer.Option("", "--parent", hidden=True, help="Scope the roster to this master's fleet (set by the host broker)"),
+):
+    """Roster of every task-agent on this host, or one agent in detail."""
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    if in_master_container():
+        _dispatch_task_agent_to_broker(cfg, "status", [name] if name else [])
+    if name:
+        _print_task_agent_detail(cfg, _resolve_task_agent(cfg, name))
+        return
+    _print_task_agent_roster(_task_agent_rows(cfg, parent))
+
+
+@task_agent_app.command("logs")
+@_handle_errors
+def task_agent_logs(
+    name: str = typer.Argument(..., help="Task slug or container name"),
+    tail: int = typer.Option(80, "-n", "--tail", help="Number of lines to show"),
+):
+    """Tail a task-agent's supervisor log (state + cost), NOT its conversation."""
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    if in_master_container():
+        _dispatch_task_agent_to_broker(cfg, "logs", [name, "-n", str(tail)])
+    require_docker()
+    resolved = _resolve_task_agent(cfg, name)
+    if docker_task_agent_status(resolved) == "absent":
+        typer.echo(
+            f"Error: container {resolved} is gone, so its log is gone with it. "
+            f"The conversation survives: cld task-agent transcript {name}",
+            err=True,
+        )
+        raise typer.Exit(1)
+    _docker_logs(resolved, tail)
+
+
+@task_agent_app.command("transcript")
+@_handle_errors
+def task_agent_transcript(
+    name: str = typer.Argument(..., help="Task slug or container name"),
+):
+    """Print the mailbox conversation: what the agent received and what it sent.
+
+    Works inside master with no host channel: the mailbox tree is bind-mounted, and the
+    name resolver falls back to the mailbox view where docker is unavailable.
+    """
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    resolved = _resolve_task_agent(cfg, name)
+    entries = mailbox.transcript(_mailbox_root(cfg), resolved)
+    if not entries:
+        typer.echo(f"No messages for {resolved}.")
+        return
+    for e in entries:
+        outgoing = e["direction"] == "out"
+        typer.echo(
+            f"{e['ts']}  {'->' if outgoing else '<-'} "
+            f"{e['to'] if outgoing else e['from']}  {e['subject']}"
+        )
+        for line in (e.get("body") or "").splitlines():
+            typer.echo(f"    {line}")
+        typer.echo("")
+
+
+def _task_agent_record(cfg: Config, name: str) -> dict:
+    """A task-agent's host-set label record, or {} once its container is gone."""
+    for c in docker_task_agent_list():
+        if c["name"] == name:
+            return c
+    return {}
+
+
+def _task_agent_parent(cfg: Config, name: str) -> str:
+    """The master owning *name*, from the container label if there still is one.
+
+    Labels are host-set, so a container cannot rewrite its own parent to slip out of
+    reap check 3. ``meta.json`` is the fallback once the container is gone -- by then
+    it is the only record left.
+    """
+    rec = _task_agent_record(cfg, name)
+    if rec:
+        return rec["parent"]
+    return (mailbox.read_meta(_mailbox_root(cfg), name) or {}).get("parent", "")
+
+
+def _assert_reap_ready(cfg: Config, name: str, *, parent: str) -> None:
+    """The three reap-readiness checks (§7). Raises RuntimeError naming the refusal.
+
+    Ordered so the one that *waits* runs last -- no point spending
+    ``_REAP_WAIT_SECONDS`` on an in-flight turn only to refuse for another reason.
+    All three are filesystem or label reads; there is deliberately **no** store-side
+    "did the squash happen" test, because that is §9's verification and the master
+    already did it before asking (D2b).
+    """
+    root = _mailbox_root(cfg)
+
+    # 3. Own fleet only. An empty *parent* is the human on the host, who has full
+    # authority; only a master-initiated reap (via the broker) passes a value.
+    if parent:
+        owner = _task_agent_parent(cfg, name)
+        if owner != parent:
+            raise RuntimeError(
+                f"refusing to reap {name}: its parent master is {owner or '<none>'}, "
+                f"not {parent}. A master reaps only its own fleet."
+            )
+
+    # 2. Not a live peer. Reaping mid-exchange silently breaks the dependent's
+    # exactly-one-reply guarantee, which the dead supervisor can no longer honor.
+    running = {c["name"] for c in docker_task_agent_list(running_only=True)}
+    dependents = sorted(
+        m["name"] for m in mailbox.list_fleet(root)
+        if m["name"] != name and m["name"] in running and name in (m.get("peers") or {})
+    )
+    if dependents:
+        raise RuntimeError(
+            f"refusing to reap {name}: it is a live peer of {', '.join(dependents)}. "
+            "Reap them first, or wait for the exchange to land."
+        )
+
+    # 1. Not mid-turn. The work itself survives (watchman snapshots), but the reply
+    # its sender is waiting for does not.
+    deadline = time.time() + _REAP_WAIT_SECONDS
+    while True:
+        state = mailbox.read_state(root, name) or {}
+        if state.get("phase") != "processing":
+            return
+        if time.time() >= deadline:
+            current = state.get("current") or {}
+            raise RuntimeError(
+                f"refusing to reap {name}: it is mid-turn on '{current.get('subject')}' "
+                f"from {current.get('from')} (since {current.get('started_at')}). "
+                "Wait for it to reply, or override with --force."
+            )
+        time.sleep(1)
+
+
+def _task_agent_repo_root(cfg: Config, name: str) -> str:
+    """Host path of the repo a task-agent runs against; "" when it can't be determined.
+
+    Normally the container's own label. Once the container is gone there is no label
+    left (``state.json``'s ``repo_root`` is the in-container path), so fall back to
+    the cwd's repo: forgetting a bookmark that isn't there is a no-op, so a wrong
+    guess is harmless, and the mailbox archive happens either way.
+    """
+    rec = _task_agent_record(cfg, name)
+    if rec:
+        return rec["repo_root"]
+    try:
+        return str(find_target_repo(cfg))
+    except RuntimeError:
+        return ""
+
+
+def _reap_task_agent(cfg: Config, name: str, *, parent: str, force: bool) -> None:
+    """Stop, remove, then the caller-side cleanup (D22). Every step idempotent."""
+    if not force:
+        _assert_reap_ready(cfg, name, parent=parent)
+    repo_root = _task_agent_repo_root(cfg, name)
+    _stop_and_remove_container(name)
+    # The session bookmark, never the deliverable branch: different strings with
+    # different lifetimes (D8). Caller-side because the supervisor is normally
+    # SIGKILLed mid-turn, so its own last act doesn't run (D22).
+    if repo_root:
+        _forget_session_state(repo_root, name)
+    else:
+        log.warning(
+            "could not determine the repo for %s, so its session bookmark stays in place. "
+            "Recover with: cd <repo> && jj bookmark forget %s && jj workspace forget %s",
+            name, name, name,
+        )
+    mailbox.archive_mailbox(_mailbox_root(cfg), name)
+    typer.echo(f"Reaped task-agent: {name}")
+
+
+def _reap_all_task_agents(cfg: Config, *, parent: str, force: bool) -> None:
+    """Reap every task-agent, repeating while any pass makes progress.
+
+    Check 2 is order-dependent: with an A->B peer edge, reaping B is refused while A
+    lives but allowed once A is gone, so one arbitrary-order pass would strand B. A
+    mutual A<->B pair still refuses both -- correctly; that is what --force is for.
+    Mailboxes whose container is already gone are swept too, since they are the
+    orphans this is meant to clear.
+    """
+    # Label first, meta.json for names whose container is already gone -- same
+    # precedence as _task_agent_parent, resolved once for the whole sweep.
+    owners = {c["name"]: c["parent"] for c in docker_task_agent_list()}
+    for m in mailbox.list_fleet(_mailbox_root(cfg)):
+        owners.setdefault(m["name"], m.get("parent", ""))
+    targets = [n for n, owner in owners.items() if not parent or owner == parent]
+    if not targets:
+        typer.echo("No task-agents found.")
+        return
+
+    remaining = sorted(targets)
+    refused: dict[str, str] = {}
+    while remaining:
+        stuck: list[str] = []
+        refused = {}
+        for name in remaining:
+            try:
+                _reap_task_agent(cfg, name, parent=parent, force=force)
+            except RuntimeError as e:
+                stuck.append(name)
+                refused[name] = str(e)
+        if len(stuck) == len(remaining):
+            break
+        remaining = stuck
+
+    for name in remaining:
+        log.error("%s", refused[name])
+    if remaining:
+        typer.echo(
+            f"{len(remaining)} task-agent(s) refused; add --force to override.", err=True
+        )
+        raise typer.Exit(1)
+
+
+@task_agent_app.command("shutdown")
+@_handle_errors
+def task_agent_shutdown(
+    name: Optional[str] = typer.Argument(None, help="Task slug or container name"),
+    all_: bool = typer.Option(False, "--all", help="Reap every task-agent on this host"),
+    force: bool = typer.Option(False, "--force", help="Override a reap-readiness refusal (host-only)"),
+    parent: str = typer.Option("", "--parent", hidden=True, help="Restrict to this master's fleet (set by the host broker)"),
+):
+    """Stop and remove a task-agent, forget its session bookmark, archive its mailbox."""
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    if all_ == bool(name):
+        typer.echo("Error: pass a task slug/container name, or --all -- not both", err=True)
+        raise typer.Exit(1)
+    if in_master_container():
+        if force:
+            # The broker denies it too; refusing here gives the reason instead of an
+            # opaque exit code.
+            typer.echo(
+                "Error: --force is host-only. A master cannot override a reap-readiness "
+                "refusal -- a refusal means wrap-up has not finished (or a live peer still "
+                "depends on this agent), so drive that to completion instead.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        _dispatch_task_agent_to_broker(cfg, "shutdown", [name] if name else ["--all"])
+    require_docker()
+    if name:
+        _reap_task_agent(cfg, _resolve_task_agent(cfg, name), parent=parent, force=force)
+        return
+    _reap_all_task_agents(cfg, parent=parent, force=force)
 
 
 @app.command()
@@ -1200,7 +1872,9 @@ def _print_status_table(rows: list[dict]) -> None:
 
 def _format_age(iso_ts: str) -> str:
     try:
-        t = time.strptime(iso_ts, "%Y-%m-%dT%H:%M:%SZ")
+        # Mailbox timestamps carry microseconds; chain state's don't.
+        whole = iso_ts.split(".", 1)[0].rstrip("Z") + "Z"
+        t = time.strptime(whole, "%Y-%m-%dT%H:%M:%SZ")
         then = calendar.timegm(t)
         secs = int(time.time()) - then
     except Exception:

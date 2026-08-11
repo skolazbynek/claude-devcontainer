@@ -74,6 +74,35 @@ ensure_own_mailbox() {
     fi
 }
 
+# Seed ~/.ssh/known_hosts from the repo's SSH remote.
+# Containers get the ssh-agent forwarded but ship no known_hosts, so a first
+# `jj git push` / `git push` fails with "Host key verification failed" -- a trust
+# gap, not a reachability one. Best-effort: no remote, an https remote, or no
+# network all just skip (the push, if any, will report the real problem).
+seed_known_hosts() {
+    local url host
+    url=$(jj git remote list 2>/dev/null | awk '$1 == "origin" {print $2; exit}')
+    [ -n "$url" ] || url=$(git -C "$WORKSPACE_ORIGIN" remote get-url origin 2>/dev/null)
+    case "$url" in
+        *@*:*)      host="${url#*@}"; host="${host%%:*}" ;;
+        ssh://*)    host="${url#ssh://}"; host="${host#*@}"; host="${host%%[:/]*}" ;;
+        *)          return 0 ;;
+    esac
+    [ -n "$host" ] || return 0
+    mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    # -f pins the file: ssh-keygen otherwise resolves ~ from the passwd database
+    # rather than $HOME, so the already-seeded check would read the wrong file.
+    if [ -f ~/.ssh/known_hosts ] && ssh-keygen -F "$host" -f ~/.ssh/known_hosts >/dev/null 2>&1; then
+        return 0
+    fi
+    if ssh-keyscan -t rsa,ecdsa,ed25519 "$host" 2>/dev/null >> ~/.ssh/known_hosts; then
+        chmod 600 ~/.ssh/known_hosts
+        echo "[cld] seeded ~/.ssh/known_hosts for $host"
+    else
+        echo "[WARN] could not ssh-keyscan $host -- a push to it may fail host-key verification" >&2
+    fi
+}
+
 # Copy staged host config tree into $HOME.
 # Every RO $HOME mount is staged under /tmp/host-config/<rel> by the launcher;
 # we overlay that tree onto $HOME so the container has writable copies and
