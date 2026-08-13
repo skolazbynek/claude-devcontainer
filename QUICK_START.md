@@ -34,10 +34,14 @@ cld task-agent transcript add-oauth    # the conversation
 ```bash
 echo "Wrap up: squash your work into add-oauth and report what landed." > /tmp/msg.md
 python -m cld.messenger.send --to cld_agent_myrepo_add-oauth \
-    --subject "wrap up" --body-file /tmp/msg.md
+    --subject "wrap up" --body-file /tmp/msg.md --expects-reply
 
 python -m cld.messenger.inbox          # its reply lands here
 ```
+
+`--expects-reply` is what obliges an answer. Without it the agent does the work and
+stays quiet -- which is what you want for instructions you won't act on, and is why
+two agents no longer thank each other in a loop.
 
 ## 4. Take the work, then reap
 

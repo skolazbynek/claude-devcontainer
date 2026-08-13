@@ -149,7 +149,9 @@ def _format_peers(peers: dict[str, int]) -> str:
     return "\n".join(f"  - `{name}` (hop budget: {hops})" for name, hops in sorted(peers.items()))
 
 
-def compose_kickoff(task: TaskMode, *, session_name: str, repo_root: Path, max_turns: int) -> str:
+def compose_kickoff(
+    task: TaskMode, *, session_name: str, repo_root: Path, max_turns: int, root_ask_limit: int
+) -> str:
     """Layer the kickoff prompt: lifecycle preamble, chosen persona, then the task (§11).
 
     The two prompt layers are ours, so they get frontmatter stripped and their
@@ -167,6 +169,7 @@ def compose_kickoff(task: TaskMode, *, session_name: str, repo_root: Path, max_t
         "TASK_SLUG": task.slug,
         "PERSONA": task.persona_name,
         "PEERS": _format_peers(task.peers),
+        "ROOT_ASK_LIMIT": str(root_ask_limit),
     }
     layers = [
         Template(strip_frontmatter(path.read_text())).safe_substitute(values)
@@ -195,6 +198,7 @@ class AgentSupervisor:
         poll_interval: float = _DEFAULT_POLL_INTERVAL,
         task: TaskMode | None = None,
         anchor: str = "",
+        root_ask_limit: int = 3,
     ):
         self.session_name = session_name
         self.repo_root = repo_root
@@ -206,6 +210,7 @@ class AgentSupervisor:
         self.poll_interval = poll_interval
         self.task = task
         self.anchor = anchor
+        self.root_ask_limit = root_ask_limit
 
         self.session_id: str | None = None
         self.msg_count = 0
@@ -285,6 +290,7 @@ class AgentSupervisor:
                 session_name=self.session_name,
                 repo_root=self.repo_root,
                 max_turns=self.max_turns,
+                root_ask_limit=self.root_ask_limit,
             )
         else:
             prompt = Template(strip_frontmatter(self.persona_path.read_text())).safe_substitute(
@@ -315,28 +321,45 @@ class AgentSupervisor:
         })
         log.info("processing message %s from %s: %s", msg["id"], msg["from"], msg["subject"])
 
+        obligation = (
+            f'This message expects a reply: send() to {msg["from"]} with answers="{msg["id"]}".'
+            if msg.get("expects_reply")
+            else "This message expects no reply -- do not acknowledge it."
+        )
         prompt = (
             f"New message from {msg['from']} (id: {msg['id']}):\n"
-            f"Subject: {msg['subject']}\n\n{msg['body']}"
+            f"Subject: {msg['subject']}\n"
+            f"{obligation}\n\n{msg['body']}"
         )
 
         try:
             data = self._run_claude(prompt, resume=True)
         except RuntimeError as e:
             log.error("claude invocation failed for message %s: %s", msg_id, e)
+            # Unconditional, unlike the fallback below: a failure is information the
+            # sender has no other way to get (the supervisor log is not readable from
+            # another container), not an acknowledgment.
             mailbox.write_message(
                 self.mailbox_root, self.session_name, msg["from"],
-                f"Re: {msg['subject']}", f"failed: {e}",
+                f"Re: {msg['subject']}", f"failed: {e}", answers=msg["id"],
             )
         else:
             self.cost_usd_total += _extract_cost(data)
-            if not mailbox.replied_since(self.mailbox_root, self.session_name, snapshot, msg["from"]):
+            # Only a message that *asked* for a reply gets one guaranteed. Synthesizing
+            # one for every arrival is what made an acknowledgment oblige another
+            # acknowledgment, and it overrode Claude correctly deciding it had nothing
+            # to add. The guarantee still holds where it is load-bearing -- whoever
+            # sets expects_reply is waiting on an answer.
+            if msg.get("expects_reply") and not mailbox.replied_since(
+                self.mailbox_root, self.session_name, snapshot, msg["from"]
+            ):
                 last_text = data.get("result", "")
                 log.warning("message %s: no reply sent by Claude -- synthesizing fallback", msg_id)
                 mailbox.write_message(
                     self.mailbox_root, self.session_name, msg["from"],
                     f"Re: {msg['subject']}",
                     f"(no reply produced; last text: {last_text})",
+                    answers=msg["id"],
                 )
 
         mailbox.archive_message(self.mailbox_root, self.session_name, msg_id)
@@ -428,6 +451,7 @@ def main() -> None:
         max_turns=cfg.agent_max_turns,
         task=task,
         anchor=os.environ.get("AGENT_ANCHOR_HASH", ""),
+        root_ask_limit=cfg.root_ask_limit,
     )
     supervisor.run()
 

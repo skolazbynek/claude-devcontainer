@@ -86,9 +86,12 @@ earlier agent may only reply, regardless of its own `peers` map.
    full container name (from the start output).
 2. Start a second agent that declares a peer edge with a small budget for easy
    testing: `cld task-agent start <persona> -n peer-b -p "..." --peer <peer-a-container>:3`
-3. Instruct `peer-b` (via `messenger MCP send()` or `python -m cld.messenger.send`) to
-   message `peer-a` repeatedly (more than 3 times) as part of its task, to exhaust the
-   budget.
+3. Instruct `peer-b` (via `messenger MCP send()` or `python -m cld.messenger.send`, with
+   `--expects-reply` so it gets answers back) to message `peer-a` repeatedly (more than
+   3 times) as part of its task, to exhaust the budget. Note that the ask budget
+   (`root_ask_limit`, default 3) fires first if `peer-b` keeps *asking* without either
+   side answering — that refusal names the ask limit, and unlike the hop refusal the
+   edge stays usable for answers.
 
 **Observe / confirm the edge is set correctly**
 

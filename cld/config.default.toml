@@ -58,6 +58,7 @@ home_mounts_devcontainer = [
 # Task-scoped agents (see docs/design-task-agents.md)
 # max_task_agents = 4       # max running task-agents per master
 # peer_absolute_limit = 10  # hop budget for a peer edge whose --peer spec omits one
+# root_ask_limit = 3        # asks allowed on a peer edge while one stays unanswered
 
 # Host test broker (master only). Set host_broker_key to enable a `host-run`
 # wrapper inside master that runs the repo's tests on the host via the standalone

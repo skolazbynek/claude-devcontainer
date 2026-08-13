@@ -38,27 +38,41 @@ def _mailbox_root() -> Path:
 
 
 @mcp.tool()
-def send(to: str, subject: str, body: str) -> dict:
+def send(to: str, subject: str, body: str, expects_reply: bool = False, answers: str = "") -> dict:
     """Send a message to another container's mailbox.
 
     to: a full container name, or a repo-basename shortname when exactly one agent or
     master owns that repo. Peers and task-agents must be addressed by full name -- with
     several task-agents per repo a basename identifies nothing.
 
+    expects_reply: set it only when you cannot proceed without an answer. It obliges the
+    recipient to reply, and the recipient is obliged by nothing else -- so a message you
+    send without it will not be acknowledged, which is the point. Prefer stating an
+    assumption over asking.
+
+    answers: the id of the message you are answering. Set it whenever you reply, so the
+    question it asked is recorded as settled. A reply may set expects_reply too (answering
+    one thing while asking another is normal); an acknowledgment should set neither.
+
     On an agent-to-agent edge the message counts against that edge's hop budget, and the
-    return carries {"hops": n, "limit": m} so you can see where you stand. Past the limit
-    the send is refused with {"error": ...} and nothing is delivered: escalate to your
-    master instead of retrying -- that channel is never budgeted. Messages to a master
-    are never counted.
+    return carries {"hops": n, "limit": m}, plus {"open_asks", "ask_limit"} while
+    anything on it is unanswered. Two refusals, both {"error": ...}: past the hop limit
+    nothing is delivered over the edge at all, and past the ask limit a message with
+    expects_reply is turned away while answers and plain informs still go through. Either
+    way, escalate to your master instead of retrying -- that channel is never budgeted.
     """
-    log.info("MCP tool: send (to=%s, subject=%s)", to, subject)
+    log.info("MCP tool: send (to=%s, subject=%s, expects_reply=%s)", to, subject, expects_reply)
     try:
         frm = _own_name()
     except RuntimeError as e:
         return {"error": str(e)}
+    cfg = Config.from_env()
     return mailbox.gated_send(
         _mailbox_root(), frm, to, subject, body,
-        default_limit=Config.from_env().peer_absolute_limit,
+        default_limit=cfg.peer_absolute_limit,
+        ask_limit=cfg.root_ask_limit,
+        answers=answers,
+        expects_reply=expects_reply,
     )
 
 
@@ -107,7 +121,11 @@ def fleet_digest() -> list[dict]:
     Call this at the start of a turn to reconcile your fleet, then read_mailbox() only
     for the members whose msg_count or last_activity changed since you last looked.
     Rows are {name, task, phase, msg_count, cost_usd_total, unread, last_activity} --
-    no message bodies, so it stays cheap enough to call every turn.
+    no message bodies, so it stays cheap enough to call every turn -- plus
+    {open_asks, open_with, oldest_open}: questions this agent's peer edges are still
+    waiting on. A rising open_asks with an old oldest_open is a stalling exchange,
+    usually because the task you gave one of them was under-specified; step in and rule
+    on it rather than waiting for the ask budget to refuse them.
 
     Scoped to agents whose recorded parent is you; empty if you have no fleet.
     """

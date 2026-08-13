@@ -172,16 +172,38 @@ There is no `WRAP-UP` phase: wrap-up is an ordinary message processed in
    auto-committed via Watchman/jj (durability is free; nothing is lost on
    teardown).
 
-   **The exactly-one-reply guarantee must be made recipient-scoped.** Today it
-   is a line-count comparison on the agent's whole `outbox.log`
-   (`outbox_changed_since`), and `write_message` appends a line for *every* send.
-   That is sound only while the master is an agent's sole correspondent. With
-   peer edges (§7) an agent that answers a peer — or escalates to the master on
-   that unbudgeted channel — while processing a message from the master satisfies the check,
-   so the master gets **no reply and no synthesized fallback**. The check becomes:
-   *did a line appear after the snapshot whose `to` equals this message's
-   `from`?* The `to` field is already on every outbox line, so this is a scan of
-   the tail, not a schema change.
+   **Reply obligation is declared by the sender, not implied by arrival.** The
+   envelope carries two fields: `expects_reply` (this message opens an obligation on
+   the recipient) and `answers` (the message id this one discharges). Both default to
+   "no", and there is **no hardcoded exception for the master channel** — a master
+   that wants an answer asks for one like anybody else.
+
+   An unconditional "every message you receive gets exactly one reply" was the
+   original rule, and it is a loop engine: a reply is a message, so it obliges a
+   reply, so an acknowledgment obliges an acknowledgment, forever. Observed in
+   testing — two agents traded courtesies until the hop budget ran out, which means
+   every exchange terminated by exhaustion rather than by agreement. The prior art is
+   unanimous that the fix is a type distinction, not a better prompt: FIPA-ACL's
+   `inform` vs `request`, JSON-RPC's notification (no `id` ⇒ the receiver MUST NOT
+   respond — the protocol the messenger MCP already runs on), A2A's terminal task
+   states, CAMEL's `<CAMEL_TASK_DONE>` after documenting this exact "infinite loop of
+   mutual thanks", AutoGen's `is_termination_msg` alongside its blunt counter.
+
+   **A reply may itself oblige a reply**, and must be able to: A asks, B needs a
+   clarification first, A answers the clarification, B finally answers A. B's
+   clarification does not discharge A's question — the root obligation persists
+   through the sub-dialogue and is settled separately. So the rule is not "a reply
+   cannot ask"; it is that *asking is an explicit act* and arrival is not.
+
+   **The exactly-one-reply guarantee survives, scoped twice over.** It fires only for
+   a message that set `expects_reply`, and only checks for a line addressed to *that
+   message's sender*. The recipient-scoping matters independently: a plain "did the
+   outbox grow" check (`outbox_changed_since`) is satisfied by an unrelated send, so
+   an agent that answers a peer while the master waits would suppress the master's
+   fallback. The `to` field is already on every outbox line, so that half is a scan of
+   the tail, not a schema change. A claude *failure* is still reported to the sender
+   unconditionally — it is information no other channel gives them, not an
+   acknowledgment.
 
    **The guarantee is bounded by the edge budget.** A reply cannot be promised on a
    channel the transport has closed: once the edge to the sender is spent (§10),
@@ -700,6 +722,64 @@ exists, can read their position from every `send()` return, and are instructed t
 converge as it nears the limit and to notify the master rather than retry a blocked
 send. Awareness improves the *quality* of the landing; the gate *guarantees* it.
 
+### Clarification-regress control (per-edge ask budget)
+
+The hop budget bounds *how much* two agents say; it does not bound the shape of what
+they say. With obligation declared by the sender (§5 step 3), two distinct pathologies
+remain, and one bound does not cover both:
+
+- **Polite ping-pong** — each message discharges and re-opens, so nothing accumulates.
+  Left to the persona (say nothing when nothing was asked) with the absolute hop
+  budget as the backstop. Deliberately not mechanized further.
+- **Clarification regress** — the agents keep asking each other and never answer the
+  question the exchange started from. This one *is* mechanized, because it burns a
+  Claude turn per hop and always ends by exhaustion.
+
+**Depth is the wrong metric.** `|open obligations|` misses the common shape: B asks, A
+answers, B asks again, A answers again sits at depth 1 forever while the root question
+goes unanswered. Count instead:
+
+> **`asks`** — obligation-opening sends on this edge while a **root** obligation (one
+> opened when nothing was open) has stayed unanswered. Cleared only when `open`
+> empties.
+
+Legitimate clarification reaches 2. A regress grows without bound. Long answers, plain
+informs and re-opened *new* roots don't touch it. The limit is `cfg.root_ask_limit`
+(default **3**, env `CLD_ROOT_ASK_LIMIT`), global rather than per-edge — one number is
+enough until a real fleet says otherwise.
+
+**The gate refuses the ask, never the speech.** This is the whole difference from the
+hop budget, and it is why the ask gate needs no D29 argument: past the limit an
+`expects_reply` send is refused, while `answers`-bearing sends and plain informs still
+deliver, and the master channel is untouched. Nothing becomes both hop-exempt and
+reply-obliging, and the graceful landing is available *by construction* rather than
+having to fit inside a ceiling. The refusal names the two legal moves, in order:
+
+1. **Commit with a stated assumption** — answer the open question with your best
+   interpretation and say what you assumed. The right default; blocking questions are
+   for cases where proceeding under any assumption would be unsafe.
+2. **Escalate to the master**, then answer once it rules.
+
+**Escalation is the correct routing, not a fallback.** A regress between two peers is
+nearly always evidence that the *master* under-specified one of the two tasks: neither
+peer can resolve it because the missing information is in neither context. Which makes
+`asks` a diagnostic about the master's own fan-out, so it is surfaced and not merely
+bounded — `fleet_digest` carries `open_asks` / `open_with` / `oldest_open`, and a
+rising count against a static `oldest_open` is a stall the master should rule on before
+the gate fires. That also closes a gap §10 otherwise leaves: a peer exchange that
+silently stops is invisible to the one party who can explain it.
+
+**State lives beside the hop counter**, in `_edges/<sorted>.json` (`open`, `asks`,
+`root_since`), for the same reasons: the gate runs in the MCP server — a grandchild of
+the supervisor — must cover both send paths, and must survive a restart. Same
+tmp-write + `rename()`, same no-lock decision; a lost increment makes the ceiling
+slightly generous, which is the benign direction.
+
+Not solved, and accepted: an agent that stamps `answers` dishonestly resets its own
+counter. Same principle as the hop gate — a guardrail against runaway, not a defence
+against an adversary — and a bogus discharge is visible to the master anyway, as a
+root that "closed" with no content behind it.
+
 ## 11. Persona and prompt composition
 
 The kickoff prompt is layered so task-scoping is uniform regardless of the
@@ -714,12 +794,17 @@ chosen role:
 The **lifecycle preamble** is a new base persona that frames the task-scoped
 contract: you are bounded to this task; the master drives you and will tell you
 when to wrap up; on wrap-up squash your work into the deliverable branch
-`<branch>` and report it; a reply is a `send()`, and it must go to the sender of
-the message you are answering (a send to a peer does not discharge a reply owed to
-the master); you may message only the master and the peers named here, no one
+`<branch>` and report it; a reply is a `send()` carrying `answers=<that message's
+id>`, and it must go to the sender of the message you are answering (a send to a
+peer does not discharge a reply owed to the master); **a message that did not ask
+for a reply gets none — no acknowledgments**; set `expects_reply` only for a
+question you cannot proceed without, and prefer stating an assumption over asking;
+you may message only the master and the peers named here, no one
 else; peer edges carry an absolute hop budget (§10) — every `send()` return tells
 you your position, so converge as it nears the limit, and if a send is blocked
-notify the master instead of retrying; the master channel is never budgeted; you
+notify the master instead of retrying; a peer edge also bounds how many questions
+may be open on it at once, and a refused ask means answer-with-an-assumption or
+escalate, never re-ask; the master channel is never budgeted; you
 have persistent memory across messages; the anchor invariant holds (only
 descendants of `AGENT_ANCHOR_HASH` are yours). It replaces `agent.md`'s "immortal,
 for as long as this container runs" framing with "bounded, until the task is
@@ -789,6 +874,15 @@ launch, and cleanup deltas so `cld agent` can later be deleted cleanly.
   whole dir. This is why the outbox line gains subject+body: otherwise the sent
   side is `{id, to, ts}` only and its bodies would have to be recovered from each
   recipient's archive, which may be GC'd or archived independently.
+- Obligation fields (§5 step 3) — `write_message` gains `answers` / `expects_reply` on
+  the envelope *and* the outbox line (so a transcript shows both sides of an
+  obligation); `bump_edge` maintains the ledger; `process_one`'s fallback is gated on
+  the incoming message's `expects_reply` and stamps `answers`; the inbound prompt states
+  which case it is, since the model cannot see the envelope.
+- Ask gate (§10) — `ask_spent` checked in `gated_send` **only** (unlike the closure rule,
+  which has to sit in `write_message`): the supervisor's fallback never asks, so no
+  sender that bypasses `gated_send` can reach the gate's subject. `edge_obligations`
+  feeds `fleet_digest`.
 - Peer-loop control (§10) — the messenger `send()` gate: one counter per edge vs
   that edge's limit (`meta.json`'s `peers[<peer>]`, else `peer_absolute_limit`;
   whatever the first send stored wins), persisted at
@@ -804,7 +898,10 @@ launch, and cleanup deltas so `cld agent` can later be deleted cleanly.
   which a baked-in skill documents — must pass the gate.
 - `cld/config.py` — `max_task_agents: int = 4` + `CLD_MAX_TASK_AGENTS`;
   `peer_absolute_limit: int = 10` + `CLD_PEER_ABSOLUTE_LIMIT` (the fallback when a
-  `--peer` spec omits its own `:<hops>`).
+  `--peer` spec omits its own `:<hops>`); `root_ask_limit: int = 3` +
+  `CLD_ROOT_ASK_LIMIT` (§10's ask budget). Both budget knobs are propagated into the
+  container by `build_container_args`, since an in-container `Config.from_env()` sees
+  no host user TOML.
 - `prompts/personas/task-agent.md` — the lifecycle preamble (§11).
 - Master persona / instructions — the control-tower behavior: each turn call
   `fleet_digest()` and `read_mailbox` only for members that moved (**not** a sweep
@@ -853,6 +950,8 @@ launch, and cleanup deltas so `cld agent` can later be deleted cleanly.
 | D20 | The master↔agent channel is unbudgeted; there are **no** hop-exempt messages on a peer edge | Escalation must stay possible from a spent edge — and it is, because it travels a *different* edge. An exemption *on* the spent edge would loop instead (D29) |
 | D29 | **A spent edge is silent**: the transport delivers nothing more over it, supervisor-synthesized replies included, and no cap-notice is sent | One rule with a one-sentence invariant (≤ `limit` messages per edge, whoever sends them) replaces an exempt class plus ad-hoc brakes. Exempting the messages that *announce the end* is what loops: hop-exempt + reply-obliging = runaway. Cost: the graceful landing must fit inside the budget (§5, §10) |
 | D21 | Reply guarantee is **recipient-scoped**, not outbox-growth | With peer edges, a send to a peer would otherwise satisfy a reply owed to the master, suppressing the fallback (§5) |
+| D30 | Reply obligation is **declared by the sender** (`expects_reply`) and discharged by `answers`; arrival obliges nothing, and the master channel gets no hardcoded exception. A reply may itself ask | "Every message gets a reply" makes an acknowledgment oblige an acknowledgment — observed looping two agents until the hop budget ran out. Every comparable protocol separates request from notification (FIPA-ACL, JSON-RPC, A2A, CAMEL, AutoGen). Letting a reply ask is what makes a clarification sub-dialogue work, since the root obligation must survive it (§5) |
+| D31 | **Per-edge ask budget** (`root_ask_limit`, default 3) bounds the clarification regress, counting obligation-opening sends while a root stays unanswered — and refuses **the ask, not the edge** | Depth misses discharge-and-reopen; the hop budget only catches it after exhaustion. Refusing asks while answers still deliver keeps the graceful landing available by construction, so unlike D29 no exemption argument is needed. Surfaced in `fleet_digest` because a regress usually means the *master* under-specified a task (§10) |
 | D22 | Teardown cleanup (bookmark forget + mailbox archive) is **caller-side** | SIGTERM is only checked between messages and `docker stop` grants 10 s, so a supervisor "last act" is normally SIGKILLed away (§5, §9) |
 | D23 | Fleet observability via `fleet_digest()` + `read_mailbox()`, reading `archive/`+`outbox.log` | Inboxes drain within ~1 s and `list_inbox` cannot read another mailbox; the digest also keeps the per-turn crank from flooding master's context (§7) |
 | D24 | `meta.json` = immutable spawn facts (incl. `peers` as a name → hop-budget mapping); liveness stays in `state.json` | Two files with a status field drift, and the stale one is the one master reads (§6) |

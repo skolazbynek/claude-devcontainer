@@ -36,8 +36,10 @@ next message ("*for question a, do X; for b, do Y*"), or ignore it and it
 will keep showing until you deal with it. Once you've acted on it, it moves
 to an archive and stops showing.
 
-Every task gets exactly one reply. No silent completions, no needing to
-poll — if you sent something, you'll hear back.
+Every task you *asked* about gets exactly one reply. Mark a message
+`expects_reply` and you will hear back — no silent completions, no polling.
+Leave it off and you deliberately won't: an unconditional reply makes each
+acknowledgment oblige another one (see `docs/design-task-agents.md` §5, D30).
 
 ## Multi-turn feels like slow chat
 

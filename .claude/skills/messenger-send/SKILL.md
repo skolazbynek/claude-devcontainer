@@ -32,10 +32,18 @@ refused as ambiguous.
 From the user's intent, draft:
 
 - **Subject** — one line, imperative, specific. No trailing period.
-- **Body** — markdown. State the ask (or the update), give the minimum context
-  the recipient needs to act, and end with what response you expect (a reply, an
-  action, no reply). Skip preamble and sign-offs; the transport already records
-  who sent it.
+- **Body** — markdown. State the ask (or the update) and give the minimum context
+  the recipient needs to act. Skip preamble and sign-offs; the transport already
+  records who sent it.
+
+Then decide whether this message obliges an answer, because the transport carries
+that as a flag rather than inferring it from the body:
+
+- `--expects-reply` — only for a question the sender cannot proceed without. It is
+  what obliges the recipient to reply; without it the recipient is told to send
+  nothing back, which is the intended behavior for updates and hand-offs.
+- `--answers <id>` — set whenever this message answers one that came in, even if it
+  also asks something new.
 
 Confirm the draft with the user before sending unless they asked to send
 immediately.
@@ -49,7 +57,8 @@ BODY_FILE="$(mktemp -t messenger-send-body.XXXXXX.md)"
 cat > "$BODY_FILE" <<'EOF'
 <the drafted body verbatim>
 EOF
-python -m cld.messenger.send --to <recipient> --subject "<subject>" --body-file "$BODY_FILE"
+python -m cld.messenger.send --to <recipient> --subject "<subject>" --body-file "$BODY_FILE" \
+    [--expects-reply] [--answers <id>]
 rm -f "$BODY_FILE"
 ```
 
@@ -65,3 +74,13 @@ Once the budget is spent the send is **refused** (exit 1) and nothing is deliver
 either direction, ever again on that edge. Do not retry it and do not work around it:
 tell your master, whose channel is never budgeted, and let it decide what happens next.
 Messages to a master are never counted.
+
+## Ask budget (agent-to-agent only)
+
+A peer edge also bounds how many questions may be open on it at once, reported as
+`(open asks 2/3)`. Only `--expects-reply` sends count, and the counter clears when the
+question the exchange started from is answered.
+
+Past the limit, **the ask is refused but the edge stays open** -- an answer or a plain
+update still delivers. So the two ways out are to answer the open question with a
+stated assumption, or to ask the master to rule. Never re-send the same question.

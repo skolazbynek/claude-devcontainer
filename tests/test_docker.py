@@ -410,14 +410,15 @@ class TestBuildContainerArgsTaskAgent:
         assert "AGENT_PARENT_MASTER=cld_master_repoA_ab12" in args
         assert "AGENT_TASK_SLUG=add-oauth" in args
 
-    def test_peer_limit_fallback_propagated(self, tmp_path):
+    def test_budget_fallbacks_propagated(self, tmp_path):
         spec = TaskAgentSpec(slug="t")
         args = build_container_args(
             tmp_path, "cld_agent_r_t",
-            Config(mailbox_root=str(tmp_path / "mb"), peer_absolute_limit=3),
+            Config(mailbox_root=str(tmp_path / "mb"), peer_absolute_limit=3, root_ask_limit=5),
             task_agent=spec,
         )
         assert "CLD_PEER_ABSOLUTE_LIMIT=3" in args
+        assert "CLD_ROOT_ASK_LIMIT=5" in args
 
     def test_persistent_not_ephemeral(self, tmp_path):
         assert "--rm" not in self._args(tmp_path)

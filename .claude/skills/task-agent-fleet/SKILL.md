@@ -21,7 +21,8 @@ fleet_digest()      # messenger MCP tool
 ```
 
 One row per agent you spawned: `{name, task, phase, msg_count, cost_usd_total, unread,
-last_activity}`. No message bodies, so it is cheap enough to call every turn.
+last_activity}` plus `{open_asks, open_with, oldest_open}`. No message bodies, so it is
+cheap enough to call every turn.
 
 **Do not sweep inboxes instead.** An agent archives each message within about a second
 of processing it, so `inbox/` is empty almost always — a sweep shows nothing *and* fills
@@ -50,11 +51,21 @@ Read the phases too:
 - `kickoff` — still booting its first turn.
 - `stopped` — its supervisor exited cleanly. Its mailbox is still there.
 
+And read `open_asks`: it is the questions a peer edge is still waiting on. Rising, with
+an `oldest_open` that is not moving, means two of your agents are asking each other
+instead of resolving — nearly always because the task *you* gave one of them left
+something unspecified. Rule on it yourself; do not wait for the ask budget to refuse
+them, which costs an extra round-trip and leaves one side guessing.
+
 ## Step 3: Route and answer
 
-Every message an agent sends you expects exactly one reply from you; that is how it
-learns anything. `send(to="<full container name>", …)` — your channel to an agent is
-never hop-budgeted, so use it freely.
+A message obliges a reply only when its sender set `expects_reply`, and the same is true
+of yours. So when you need an answer back — a question, a decision to confirm, a wrap-up
+you will act on — send with `expects_reply=true`; that is what guarantees you get one.
+For an instruction you do not need acknowledged, leave it off and the agent will work
+instead of writing back. Set `answers=<id>` whenever you are replying to something.
+`send(to="<full container name>", …)` — your channel to an agent is never budgeted, by
+hops or by asks, so use it freely.
 
 When two agents need to talk to each other repeatedly, prefer drawing a peer edge at
 spawn (`task-agent-start`) over relaying: a peer hop lands in about a second, while a
@@ -64,6 +75,11 @@ If an agent reports a **spent hop budget**, it is telling you an exchange was cu
 mid-conversation — the transport now delivers nothing more on that edge, in either
 direction, and its peer was told nothing. Decide: relay the remaining question yourself,
 or reap and re-spawn with a bigger budget. Never tell the agent to retry; it cannot.
+
+A **spent ask budget** is different and much less severe: only new questions on that edge
+are refused, so the agents can still answer each other and land the exchange. What they
+need from you is the ruling they were circling. Give it, and the counter clears on the
+next answer.
 
 ## Step 4: Report what changed
 

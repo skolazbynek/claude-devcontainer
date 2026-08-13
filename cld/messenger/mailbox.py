@@ -9,7 +9,7 @@ Layout under a mailbox root (``~/.cld/mailboxes`` by default, see ``cld.config``
     <root>/<container_name>/meta.json  -- task-agent spawn facts, written once at boot
     <root>/<container_name>/state.json -- supervisor liveness (written by agent_loop)
     <root>/_archive/<container_name>/  -- whole mailbox, moved here on teardown
-    <root>/_edges/<a>--<b>.json        -- per-edge hop counter (peer-loop control)
+    <root>/_edges/<a>--<b>.json        -- per-edge hop counter + obligation ledger
 
 Entries under the root whose name starts with ``_`` are reserved and are not
 mailboxes. ``meta.json`` and ``state.json`` are split by lifetime: what an agent
@@ -100,13 +100,21 @@ def resolve_mailbox_dir(root: Path, name: str) -> Path | None:
 
 
 def write_message(
-    root: Path, frm: str, to: str, subject: str, body: str, *, peer_limit: int | None = None
+    root: Path, frm: str, to: str, subject: str, body: str, *,
+    peer_limit: int | None = None, answers: str = "", expects_reply: bool = False,
 ) -> dict | None:
     """Atomically deliver a message into *to*'s inbox; record it in *frm*'s outbox log.
 
     Writes ``<to>/tmp/<id>.json`` then ``rename()``s into ``<to>/inbox/<id>.json``.
     Returns the full message dict (including the generated ``id`` and ``ts``), or
     ``None`` when the delivery was refused.
+
+    **Reply obligation is declared, not implied.** *expects_reply* opens an obligation
+    on the recipient; *answers* names the message id this one discharges. Arrival alone
+    obliges nothing -- an unconditional "every message gets a reply" makes every
+    acknowledgment oblige another one, which is the polite ping-pong that used to burn
+    a whole edge budget. Both fields ride the envelope and the outbox line, and on a
+    peer edge they also maintain that edge's obligation ledger (``bump_edge``).
 
     **A spent edge is silent** (docs/design-task-agents.md D29). On an agent<->agent
     edge that has already delivered its whole hop budget, nothing more goes over it --
@@ -157,13 +165,18 @@ def write_message(
         "to": to,
         "subject": subject,
         "body": body,
+        "answers": answers,
+        "expects_reply": expects_reply,
         "ts": _now_iso(),
     }
     if peer_edge:
         # Counted before the write because the count *is* the envelope's audit stamp
         # (D17). A crash between the two loses a hop, which only tightens the ceiling.
         limit = (sender_meta.get("peers") or {}).get(to, peer_limit)
-        msg["hops"] = bump_edge(root, frm, to, limit)
+        msg["hops"] = bump_edge(
+            root, frm, to, limit,
+            msg_id=msg["id"], answers=answers, expects_reply=expects_reply,
+        )
 
     to_dir = mailbox_dir(root, to)
     tmp_path = to_dir / _TMP / f"{msg['id']}.json"
@@ -174,7 +187,7 @@ def write_message(
 
     # subject+body are duplicated here so a transcript is a single-mailbox read:
     # the recipient's copy may be archived or GC'd independently of ours.
-    line = {k: msg[k] for k in ("id", "to", "subject", "body", "ts")}
+    line = {k: msg[k] for k in ("id", "to", "subject", "body", "answers", "expects_reply", "ts")}
     if "hops" in msg:
         line["hops"] = msg["hops"]
     outbox_path = mailbox_dir(root, frm) / _OUTBOX_LOG
@@ -394,9 +407,15 @@ def fleet_digest(root: Path, parent: str) -> list[dict]:
     inboxes instead would find nothing, since an agent archives each message within
     about a second of processing it -- and pulling N full inboxes every turn would
     flood the master's context on turns where the human asked about something else.
+
+    ``open_asks`` / ``open_with`` / ``oldest_open`` make a stalling peer exchange
+    legible from this one call, so the master can intervene while the ask budget still
+    has room rather than learning about it from a refusal.
     """
+    fleet = list_fleet(root, parent)
+    names = [m["name"] for m in fleet]
     rows = []
-    for meta in list_fleet(root, parent):
+    for meta in fleet:
         name = meta["name"]
         state = read_state(root, name) or {}
         base = mailbox_dir(root, name)
@@ -408,6 +427,7 @@ def fleet_digest(root: Path, parent: str) -> list[dict]:
             "cost_usd_total": state.get("cost_usd_total", 0.0),
             "unread": len(list((base / _INBOX).glob("*.json"))),
             "last_activity": _last_activity(base),
+            **edge_obligations(root, name, [n for n in names if n != name]),
         })
     return rows
 
@@ -459,6 +479,8 @@ def transcript(root: Path, name: str) -> list[dict]:
             "to": line.get("to", ""),
             "subject": line.get("subject", ""),
             "body": line.get("body", ""),
+            "answers": line.get("answers", ""),
+            "expects_reply": line.get("expects_reply", False),
             "ts": line.get("ts", ""),
             # Received messages carry the hop stamp inside the envelope; sent ones are a
             # fixed projection, so it has to be forwarded explicitly or a transcript
@@ -478,7 +500,11 @@ def edge_path(root: Path, a: str, b: str) -> Path:
 
 
 def read_edge(root: Path, a: str, b: str) -> dict:
-    """Hop state for an edge: ``{count, limit, updated}``; never-used edge -> count 0.
+    """Hop + obligation state for an edge; never-used edge -> count 0, nothing open.
+
+    ``{count, limit, open, asks, root_since, updated}``. ``open`` holds the ids of
+    questions asked over this edge that nobody has answered yet, oldest first, and
+    ``root_since`` is when the oldest of them was asked.
 
     Normalizes a partial file: resetting an edge in this POC means editing it by hand
     (§10), so a hand-written ``{"count": 0}`` must not KeyError downstream.
@@ -487,6 +513,9 @@ def read_edge(root: Path, a: str, b: str) -> dict:
     return {
         "count": data.get("count", 0),
         "limit": data.get("limit"),
+        "open": data.get("open", []),
+        "asks": data.get("asks", 0),
+        "root_since": data.get("root_since"),
         "updated": data.get("updated"),
     }
 
@@ -501,29 +530,94 @@ def edge_spent(root: Path, a: str, b: str) -> bool:
     return edge["limit"] is not None and edge["count"] >= edge["limit"]
 
 
-def bump_edge(root: Path, a: str, b: str, limit: int | None = None) -> int:
+def bump_edge(
+    root: Path, a: str, b: str, limit: int | None = None, *,
+    msg_id: str = "", answers: str = "", expects_reply: bool = False,
+) -> int:
     """Count one delivered message over the *a*<->*b* edge; return the new count.
 
-    Pure accounting -- whether a message may pass is ``edge_spent``'s question, asked
-    before the delivery. *limit* only seeds an edge that has none stored yet: the
-    stored value wins from then on, so the side that declared the edge governs both
-    directions (edges are asymmetric -- only an already-spawned agent can be named as
-    a peer).
+    Also keeps the edge's **obligation ledger**: *answers* discharges that id,
+    *expects_reply* opens *msg_id* and counts an ask. ``asks`` is cleared only when
+    ``open`` empties, so an exchange that keeps re-opening questions without ever
+    answering the one it started from cannot reset its own budget -- that regress is
+    what ``ask_spent`` bounds.
+
+    Pure accounting -- whether a message may pass is ``edge_spent`` / ``ask_spent``'s
+    question, asked before the delivery. *limit* only seeds an edge that has none
+    stored yet: the stored value wins from then on, so the side that declared the edge
+    governs both directions (edges are asymmetric -- only an already-spawned agent can
+    be named as a peer).
     """
     edge = read_edge(root, a, b)
     count = edge["count"] + 1
+    open_ids = [i for i in edge["open"] if i != answers]
+    asks = edge["asks"]
+    if expects_reply:
+        open_ids.append(msg_id)
+        asks += 1
+    root_since = edge["root_since"] if open_ids else None
+    if open_ids and not root_since:
+        root_since = _now_iso()
     path = edge_path(root, a, b)
     path.parent.mkdir(parents=True, exist_ok=True)
     _write_json_atomic(path, {
         "count": count,
         "limit": edge["limit"] if edge["limit"] is not None else limit,
+        "open": open_ids,
+        "asks": asks if open_ids else 0,
+        "root_since": root_since,
         "updated": _now_iso(),
     })
     return count
 
 
+def ask_spent(root: Path, a: str, b: str, limit: int) -> bool:
+    """True once *limit* asks are outstanding under one unanswered question on this edge.
+
+    Asked before a delivery, like ``edge_spent``: the limit-th ask is the last one that
+    lands. It only counts while something is still open, so answering the root resets
+    the budget and a productive exchange is never penalized. What it bounds is the
+    clarification regress -- two agents that keep asking each other for clarification
+    and never answer the question they started from. That shape defeats a depth cap
+    (discharging and re-opening keeps the depth at one) and is only caught by the
+    absolute hop budget after the edge is already exhausted.
+    """
+    edge = read_edge(root, a, b)
+    return bool(edge["open"]) and edge["asks"] >= limit
+
+
+def edge_obligations(root: Path, name: str, peers: list[str]) -> dict:
+    """*name*'s unanswered-question state across its edges to *peers*.
+
+    ``{open_asks, open_with, oldest_open}`` -- what the master needs to see a stall
+    forming *before* the ask budget refuses anything; otherwise a regress is invisible
+    to the only party that can resolve it (it usually means the master under-specified
+    one of the two tasks). Counters are edge properties, so both endpoints report the
+    same number for the edge they share.
+    """
+    open_with, open_asks, since = [], 0, []
+    for peer in peers:
+        edge = read_edge(root, name, peer)
+        if not edge["open"]:
+            continue
+        open_with.append(peer)
+        open_asks += edge["asks"]
+        if edge["root_since"]:
+            since.append(edge["root_since"])
+    return {
+        "open_asks": open_asks,
+        "open_with": sorted(open_with),
+        "oldest_open": min(since) if since else "",
+    }
+
+
+def _master_of(root: Path, name: str) -> str:
+    return (read_meta(root, name) or {}).get("parent") or "your master"
+
+
 def gated_send(
-    root: Path, frm: str, to: str, subject: str, body: str, *, default_limit: int
+    root: Path, frm: str, to: str, subject: str, body: str, *,
+    default_limit: int, ask_limit: int, answers: str = "", expects_reply: bool = False,
 ) -> dict:
     """Resolve *to*, deliver under the edge budget, and report the outcome as one dict.
 
@@ -532,18 +626,38 @@ def gated_send(
     agents to use the latter. The closure rule itself lives one level down in
     ``write_message``, so a supervisor-authored reply obeys it too.
 
+    Two gates, and they refuse different things. The hop budget closes the whole edge:
+    past it nothing is delivered at all. The **ask** budget refuses only the *asking* --
+    ``expects_reply`` past ``ask_limit`` is turned away while answers, informs and the
+    master channel keep flowing, so the graceful landing an exchange needs is always
+    available instead of having to fit inside a budget.
+
     One dict shape for every outcome, so both entry points handle one thing:
-    ``{"error": …}`` for an unresolvable recipient or a spent edge, else ``{"id", "to"}``
-    plus ``{"hops", "limit"}`` when the edge is budgeted.
+    ``{"error": …}`` for an unresolvable recipient, a spent edge or a spent ask budget,
+    else ``{"id", "to"}`` plus ``{"hops", "limit"}`` when the edge is budgeted and
+    ``{"open_asks", "ask_limit"}`` while anything is unanswered on it.
     """
     try:
         resolved = resolve_recipient(to, root=root)
     except ValueError as e:
         return {"error": str(e)}
 
-    msg = write_message(root, frm, resolved, subject, body, peer_limit=default_limit)
+    if expects_reply and ask_spent(root, frm, resolved, ask_limit):
+        edge = read_edge(root, frm, resolved)
+        return {"error": (
+            f"{edge['asks']} unanswered question(s) are already open on the edge to "
+            f"{resolved} (ask limit {ask_limit}), so no further question can be asked "
+            f"over it. Answer the open one with your best interpretation and state the "
+            f"assumption you made, or ask {_master_of(root, frm)} to rule -- that "
+            f"channel is never budgeted. Sending without expects_reply still works."
+        )}
+
+    msg = write_message(
+        root, frm, resolved, subject, body,
+        peer_limit=default_limit, answers=answers, expects_reply=expects_reply,
+    )
     if msg is None:
-        master = (read_meta(root, frm) or {}).get("parent") or "your master"
+        master = _master_of(root, frm)
         if not edge_spent(root, frm, resolved):
             return {"error": (
                 f"{resolved} has been torn down -- its mailbox is archived, so nothing can "
@@ -557,8 +671,12 @@ def gated_send(
         )}
     sent = {"id": msg["id"], "to": resolved}
     if "hops" in msg:
+        edge = read_edge(root, frm, resolved)
         sent["hops"] = msg["hops"]
-        sent["limit"] = read_edge(root, frm, resolved)["limit"]
+        sent["limit"] = edge["limit"]
+        if edge["open"]:
+            sent["open_asks"] = edge["asks"]
+            sent["ask_limit"] = ask_limit
     return sent
 
 

@@ -138,8 +138,13 @@ class TestSpentEdgeStopsTheFallback:
         root = supervisor.mailbox_root
         mailbox.ensure_meta(root, supervisor.session_name, **{**self._SPAWN, "peers": {self._PEER: limit}})
         mailbox.ensure_meta(root, self._PEER, **self._SPAWN)
-        mailbox.gated_send(root, supervisor.session_name, self._PEER, "over to you", "b", default_limit=99)
-        inbound = mailbox.gated_send(root, self._PEER, supervisor.session_name, "back to you", "b", default_limit=99)
+        mailbox.gated_send(root, supervisor.session_name, self._PEER, "over to you", "b", default_limit=99, ask_limit=3)
+        # expects_reply is what puts a reply on the hook at all, so the peer's inbound
+        # message has to ask for one for there to be a fallback to refuse.
+        inbound = mailbox.gated_send(
+            root, self._PEER, supervisor.session_name, "back to you", "b",
+            default_limit=99, ask_limit=3, expects_reply=True,
+        )
         return inbound["id"]
 
     def test_fallback_refused_once_the_edge_is_spent(self, supervisor, monkeypatch):
@@ -194,7 +199,10 @@ class TestProcessOne:
 
     def test_no_reply_synthesizes_fallback(self, supervisor, monkeypatch):
         supervisor.kickoff()
-        msg = mailbox.write_message(supervisor.mailbox_root, "sender", supervisor.session_name, "hi", "body")
+        msg = mailbox.write_message(
+            supervisor.mailbox_root, "sender", supervisor.session_name, "hi", "body",
+            expects_reply=True,
+        )
 
         monkeypatch.setenv("STUB_RESULT_TEXT", "I looked into it but did nothing")
         supervisor.process_one(msg["id"])
@@ -204,12 +212,45 @@ class TestProcessOne:
         full = mailbox.read_message(supervisor.mailbox_root, "sender", sender_inbox[0]["id"])
         assert "no reply produced" in full["body"]
         assert "I looked into it but did nothing" in full["body"]
+        assert full["answers"] == msg["id"]
+
+    def test_no_fallback_when_the_message_asked_for_nothing(self, supervisor, monkeypatch):
+        """The politeness loop's engine: a fallback for *every* arrival makes an
+        acknowledgment oblige another acknowledgment, and it overrides Claude
+        correctly deciding it had nothing to add."""
+        supervisor.kickoff()
+        msg = mailbox.write_message(
+            supervisor.mailbox_root, "sender", supervisor.session_name, "fyi", "body",
+        )
+
+        monkeypatch.setenv("STUB_SEND_REPLY", "0")
+        supervisor.process_one(msg["id"])
+
+        assert mailbox.list_inbox(supervisor.mailbox_root, "sender") == []
+        assert supervisor.msg_count == 1
+
+    def test_prompt_states_the_obligation(self, supervisor):
+        supervisor.kickoff()
+        asked = mailbox.write_message(
+            supervisor.mailbox_root, "sender", supervisor.session_name, "q", "?", expects_reply=True,
+        )
+        supervisor.process_one(asked["id"])
+        told = mailbox.write_message(
+            supervisor.mailbox_root, "sender", supervisor.session_name, "fyi", "x",
+        )
+        supervisor.process_one(told["id"])
+        prompts = _read_prompt_log(supervisor._prompt_log)
+        assert f'answers="{asked["id"]}"' in prompts[1]
+        assert "expects no reply" in prompts[2]
 
     def test_send_to_peer_still_synthesizes_reply_to_sender(self, supervisor, monkeypatch):
         # The reply guarantee is recipient-scoped: answering a peer mid-turn must
         # not discharge the reply owed to whoever sent the message being processed.
         supervisor.kickoff()
-        msg = mailbox.write_message(supervisor.mailbox_root, "sender", supervisor.session_name, "hi", "body")
+        msg = mailbox.write_message(
+            supervisor.mailbox_root, "sender", supervisor.session_name, "hi", "body",
+            expects_reply=True,
+        )
 
         monkeypatch.setenv("STUB_SEND_REPLY", "1")
         monkeypatch.setenv("STUB_REPLY_TO", "peer")
@@ -338,7 +379,7 @@ class TestComposeKickoff:
     def _compose(self, task, tmp_path):
         return compose_kickoff(
             task, session_name="cld_agent_repoA_add-oauth",
-            repo_root=tmp_path / "repo", max_turns=7,
+            repo_root=tmp_path / "repo", max_turns=7, root_ask_limit=3,
         )
 
     def test_layer_order(self, task_files, tmp_path):
@@ -401,7 +442,7 @@ class TestShippedPreamble:
         task = _task_mode(task_files, preamble_path=_CLD_PROMPTS / "task-agent.md")
         prompt = compose_kickoff(
             task, session_name="cld_agent_repoA_add-oauth",
-            repo_root=tmp_path / "repo", max_turns=7,
+            repo_root=tmp_path / "repo", max_turns=7, root_ask_limit=3,
         )
         # A mistyped ${VAR} in the shipped preamble would otherwise reach the agent
         # verbatim and only be noticed by reading a live transcript.
@@ -492,7 +533,7 @@ class TestTaskModeFromEnv:
         monkeypatch.setenv("CLD_HOST_PROJECT_DIR", "/home/u/projects/lide-api")
         task = TaskMode.from_env()
         prompt = compose_kickoff(
-            task, session_name="s", repo_root=Path("/workspace/current"), max_turns=7,
+            task, session_name="s", repo_root=Path("/workspace/current"), max_turns=7, root_ask_limit=3,
         )
         assert "repo=lide-api" in prompt
 
@@ -500,6 +541,7 @@ class TestTaskModeFromEnv:
         monkeypatch.delenv("CLD_HOST_PROJECT_DIR", raising=False)
         prompt = compose_kickoff(
             TaskMode.from_env(), session_name="s", repo_root=tmp_path / "repo", max_turns=7,
+            root_ask_limit=3,
         )
         assert "repo=repo" in prompt
 

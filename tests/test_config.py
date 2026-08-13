@@ -13,7 +13,7 @@ def _clear_env(monkeypatch):
         "CLD_BASE_IMAGE", "CLD_DEVCONTAINER_IMAGE", "CLD_AGENT_IMAGE",
         "CLD_MYSQL_CONFIG", "CLD_AGENT_TIMEOUT", "CLD_POLL_INTERVAL", "CLD_DEBUG",
         "CLD_MAILBOX_ROOT", "CLD_AGENT_MAX_TURNS", "CLD_AGENT_KICKOFF_PERSONA",
-        "CLD_MAX_TASK_AGENTS", "CLD_PEER_ABSOLUTE_LIMIT",
+        "CLD_MAX_TASK_AGENTS", "CLD_PEER_ABSOLUTE_LIMIT", "CLD_ROOT_ASK_LIMIT",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -111,21 +111,25 @@ class TestTaskAgentConfig:
         cfg = Config.from_env(user_config=tmp_path / "u", project_config=tmp_path / "p")
         assert cfg.max_task_agents == 4
         assert cfg.peer_absolute_limit == 10
+        assert cfg.root_ask_limit == 3
 
     def test_toml_overrides_without_warning(self, tmp_path, capsys):
-        proj = _write(tmp_path / ".cld/config.toml", "max_task_agents = 2\npeer_absolute_limit = 25\n")
+        proj = _write(tmp_path / ".cld/config.toml", "max_task_agents = 2\npeer_absolute_limit = 25\nroot_ask_limit = 5\n")
         cfg = Config.from_env(user_config=tmp_path / "u", project_config=proj)
         assert cfg.max_task_agents == 2
         assert cfg.peer_absolute_limit == 25
+        assert cfg.root_ask_limit == 5
         assert "unknown key" not in capsys.readouterr().err
 
     def test_env_overrides_toml(self, tmp_path, monkeypatch):
-        proj = _write(tmp_path / ".cld/config.toml", "max_task_agents = 2\npeer_absolute_limit = 25\n")
+        proj = _write(tmp_path / ".cld/config.toml", "max_task_agents = 2\npeer_absolute_limit = 25\nroot_ask_limit = 5\n")
         monkeypatch.setenv("CLD_MAX_TASK_AGENTS", "8")
         monkeypatch.setenv("CLD_PEER_ABSOLUTE_LIMIT", "3")
+        monkeypatch.setenv("CLD_ROOT_ASK_LIMIT", "2")
         cfg = Config.from_env(user_config=tmp_path / "u", project_config=proj)
         assert cfg.max_task_agents == 8
         assert cfg.peer_absolute_limit == 3
+        assert cfg.root_ask_limit == 2
 
 
 class TestFindProjectConfig:

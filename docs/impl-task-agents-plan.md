@@ -279,6 +279,19 @@ _(Record deviations, surprises, and decisions taken during implementation here.)
   reduces the loop argument to a one-line invariant. Appendix P5 §C.3. `docs/design-task-agents.md`
   `docs/design-task-agents.md` §5/§10/§12 + D16/D20/D29 and the summary doc were amended to
   match, on the user's go-ahead.
+- 2026-08-13: **post-P6 amendment, from testing:** the unconditional reply guarantee looped
+  two agents through mutual courtesies until the hop budget ran out. Reply obligation is now
+  **declared by the sender** — `expects_reply` / `answers` on the envelope and the outbox
+  line, no hardcoded exception for the master channel (the user's call), and the supervisor's
+  fallback gated on the incoming `expects_reply`. A reply is explicitly allowed to ask, which
+  is what makes a clarification sub-dialogue work; the regress that opens up instead is
+  bounded by a second per-edge budget (`root_ask_limit`, default 3) that refuses **the ask,
+  not the edge**, so a landing is always available. `fleet_digest` gained `open_asks` /
+  `open_with` / `oldest_open`. Spec amended: §5 step 3, §10 (new "Clarification-regress
+  control"), §11, §12, D30/D31; summary doc, CLAUDE.md, both personas and two skills follow.
+  Test state: 524 passed / 11 skipped, same 2 pre-existing `resolve_prompt_ref` failures
+  (30 new tests: obligation ledger, `ask_spent`, `edge_obligations`, the gated-send ask
+  refusal, the "no fallback when nothing was asked" regression, config + docker knobs).
 - 2026-08-12: P4 landed. `cld task-agent` is real; the open slug question is settled as
   `-n/--name` (Appendix P4 §C.2). Two host-side e2e checklists (P2 §F, P4 §F) are the only
   outstanding work from P1–P4, and both need a docker daemon. **P5 and P6 remain**; P5 needs

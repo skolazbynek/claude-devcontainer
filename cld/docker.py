@@ -445,8 +445,9 @@ def build_container_args(
                 "-e", f"AGENT_DELIVERABLE_BRANCH={task_agent.deliverable_branch}",
                 "-e", f"AGENT_PEERS={task_agent.peers_env()}",
                 # In-container Config.from_env() sees no host user TOML, so the
-                # operator's configured fallback budget has to be passed in.
+                # operator's configured budgets have to be passed in.
                 "-e", f"CLD_PEER_ABSOLUTE_LIMIT={cfg.peer_absolute_limit}",
+                "-e", f"CLD_ROOT_ASK_LIMIT={cfg.root_ask_limit}",
             ]
     else:
         args += ["--rm"]

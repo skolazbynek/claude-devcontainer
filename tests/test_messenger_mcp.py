@@ -1,5 +1,6 @@
 """Tests for cld.mcp.messenger MCP tools (identity + mailbox wiring)."""
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -141,6 +142,28 @@ class TestSendGate:
         ensure_meta(tmp_path, "agent-a", **{**_SPAWN, "peers": {"agent-b": 1}})
         ensure_meta(tmp_path, "agent-b", **_SPAWN)
         assert send(to="agent-b", subject="hi", body="b")["limit"] == 1
+
+    def test_obligation_flags_reach_the_transport(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SESSION_NAME", "agent-a")
+        ensure_meta(tmp_path, "agent-a", **_SPAWN)
+        ensure_mailbox(tmp_path, "cld_master_repoA_abcd1234")
+        sent = send(to="cld_master_repoA_abcd1234", subject="q", body="?",
+                    expects_reply=True, answers="m0")
+        delivered = json.loads(
+            (tmp_path / "cld_master_repoA_abcd1234" / "inbox" / f"{sent['id']}.json").read_text()
+        )
+        assert (delivered["expects_reply"], delivered["answers"]) == (True, "m0")
+
+    def test_ask_limit_refuses_a_further_question(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SESSION_NAME", "agent-a")
+        monkeypatch.setenv("CLD_PEER_ABSOLUTE_LIMIT", "50")
+        monkeypatch.setenv("CLD_ROOT_ASK_LIMIT", "1")
+        ensure_meta(tmp_path, "agent-a", **_SPAWN)
+        ensure_meta(tmp_path, "agent-b", **_SPAWN)
+        assert send(to="agent-b", subject="q1", body="?", expects_reply=True)["open_asks"] == 1
+        assert "ask limit 1" in send(to="agent-b", subject="q2", body="?", expects_reply=True)["error"]
+        # Only asking is refused -- the edge is still open for an answer or an update.
+        assert "error" not in send(to="agent-b", subject="fyi", body="x")
 
 
 class TestFleetDigest:

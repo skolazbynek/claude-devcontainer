@@ -59,8 +59,10 @@ spawn ─▶ KICKOFF ─▶ IDLE ⇄ PROCESSING ─▶ … ─▶ (master: done)
    the session id.
 3. **Converse.** Each inbound message resumes that session, one at a time,
    strict FIFO; a reply always goes to the sender of the message being
-   answered. Work is auto-committed via Watchman/jj, so nothing is lost
-   before teardown.
+   answered. Whether a reply is owed at all is **declared by the sender** —
+   messages carry `expects_reply` and `answers`, and arrival alone obliges
+   nothing, including on the master channel. Work is auto-committed via
+   Watchman/jj, so nothing is lost before teardown.
 4. **Done.** The master decides the task is finished and asks the agent to
    wrap up: squash/rebase work into the deliverable branch, optionally push
    it to the remote, and report it. The master verifies (local `jj
@@ -119,6 +121,16 @@ exempt reply-obliging message is exactly a runaway. The master↔agent channel
 stays available because it is a *different* edge, not an exemption on the spent
 one; a peer that goes quiet learns why from the master, which reads both
 mailboxes.
+
+A second, narrower budget on the same edge bounds the **clarification regress** —
+two agents that keep asking each other and never answer the question they started
+from. It counts questions left open (not conversation depth, which
+discharge-and-reopen defeats) and clears when the root question is answered. Past
+the limit it refuses **the ask, not the edge**: answers and plain updates still
+deliver, so an exchange can always be landed, and the two ways out are to commit
+with a stated assumption or to ask the master to rule. `fleet_digest` reports
+`open_asks` / `open_with` / `oldest_open`, because a regress usually means the
+master under-specified one of the two tasks and only the master can fix that.
 
 ## VCS model
 

@@ -178,7 +178,7 @@ claude mcp add -s user messenger -- /path/to/cld/scripts/mcp/run-messenger.sh
 cld agent
 
 # From any other container (master or another agent), message it by repo basename
-# (inside Claude): mcp__messenger__send(to="my-repo", subject="...", body="...")
+# (inside Claude): mcp__messenger__send(to="my-repo", subject="...", body="...", expects_reply=True)
 ```
 
 **Tools:** `send(to, subject, body)`, `list_inbox(unread_only)`, `read_message(id)`, `archive(id)`, `list_agents(kind)`.
@@ -192,7 +192,7 @@ cld agent status              # supervisor phase / session / cost
 cld agent logs [-n N]         # tail its log
 ```
 
-The repo agent has one persistent Claude session that survives across messages -- it remembers prior conversations with a given sender, so follow-ups like "for question a, RESTRICT" resolve without re-stating context. Every message gets exactly one reply; if the agent's turn doesn't call `send()`, the supervisor synthesizes a fallback so senders are never left hanging.
+The repo agent has one persistent Claude session that survives across messages -- it remembers prior conversations with a given sender, so follow-ups like "for question a, RESTRICT" resolve without re-stating context. A message sent with `expects_reply` gets exactly one reply; if the agent's turn doesn't call `send()`, the supervisor synthesizes a fallback so a question is never left hanging. Without that flag the agent stays quiet by design -- an unconditional reply makes each acknowledgment oblige another one.
 
 ## Architecture
 

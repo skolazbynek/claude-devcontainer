@@ -8,7 +8,9 @@ import pytest
 from cld.messenger.mailbox import (
     archive_mailbox,
     archive_message,
+    ask_spent,
     bump_edge,
+    edge_obligations,
     edge_path,
     edge_spent,
     ensure_mailbox,
@@ -87,7 +89,7 @@ class TestWriteMessage:
         line = json.loads((mailbox_dir(tmp_path, "sender") / "outbox.log").read_text().strip())
         assert line == {
             "id": msg["id"], "to": "recipient", "subject": "hi",
-            "body": "body text", "ts": msg["ts"],
+            "body": "body text", "answers": "", "expects_reply": False, "ts": msg["ts"],
         }
 
     def test_creates_recipient_mailbox_if_missing(self, tmp_path):
@@ -316,6 +318,7 @@ class TestFleetDigest:
         ensure_meta(tmp_path, "mine", **_SPAWN)
         assert set(fleet_digest(tmp_path, _SPAWN["parent"])[0]) == {
             "name", "task", "phase", "msg_count", "cost_usd_total", "unread", "last_activity",
+            "open_asks", "open_with", "oldest_open",
         }
 
     def test_task_is_truncated(self, tmp_path):
@@ -465,7 +468,10 @@ class TestEdges:
         path = edge_path(tmp_path, "a", "b")
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps({"count": 0}))
-        assert read_edge(tmp_path, "a", "b") == {"count": 0, "limit": None, "updated": None}
+        assert read_edge(tmp_path, "a", "b") == {
+            "count": 0, "limit": None, "open": [], "asks": 0,
+            "root_since": None, "updated": None,
+        }
 
     def test_bump_counts_both_directions_on_one_edge(self, tmp_path):
         assert bump_edge(tmp_path, "a", "b", 3) == 1
@@ -605,6 +611,128 @@ class TestEdgeSpent:
         assert edge_spent(tmp_path, "a", "b") is False
 
 
+class TestObligationLedger:
+    """Reply obligation is declared, not implied: expects_reply opens it, answers closes it."""
+
+    def _fleet(self, tmp_path, peers=None):
+        ensure_meta(tmp_path, "agent-a", **{**_SPAWN, "peers": peers or {"agent-b": 50}})
+        ensure_meta(tmp_path, "agent-b", **_SPAWN)
+        return "agent-a", "agent-b"
+
+    def test_envelope_and_outbox_carry_the_fields(self, tmp_path):
+        msg = write_message(tmp_path, "a", "b", "q", "?", answers="m0", expects_reply=True)
+        assert (msg["answers"], msg["expects_reply"]) == ("m0", True)
+        assert read_message(tmp_path, "b", msg["id"])["expects_reply"] is True
+        assert _outbox_lines(tmp_path, "a")[0]["answers"] == "m0"
+
+    def test_plain_message_opens_nothing(self, tmp_path):
+        a, b = self._fleet(tmp_path)
+        write_message(tmp_path, a, b, "fyi", "x")
+        edge = read_edge(tmp_path, a, b)
+        assert (edge["open"], edge["asks"], edge["root_since"]) == ([], 0, None)
+
+    def test_ask_opens_and_answer_closes(self, tmp_path):
+        a, b = self._fleet(tmp_path)
+        q = write_message(tmp_path, a, b, "q", "?", expects_reply=True)
+        opened = read_edge(tmp_path, a, b)
+        assert (opened["open"], opened["asks"]) == ([q["id"]], 1)
+        assert opened["root_since"]
+        write_message(tmp_path, b, a, "re", "answer", answers=q["id"])
+        closed = read_edge(tmp_path, a, b)
+        assert (closed["open"], closed["asks"], closed["root_since"]) == ([], 0, None)
+
+    def test_clarification_sub_dialogue_settles(self, tmp_path):
+        """The worked trace: ask, clarify, clarify-answer, answer -- ends fully discharged.
+
+        The root obligation survives the nested exchange (step 3 discharges only the
+        clarification), which is why a reply must be allowed to oblige a reply.
+        """
+        a, b = self._fleet(tmp_path)
+        m1 = write_message(tmp_path, a, b, "schema?", "?", expects_reply=True)
+        m2 = write_message(tmp_path, b, a, "which version?", "?", expects_reply=True)
+        assert read_edge(tmp_path, a, b)["open"] == [m1["id"], m2["id"]]
+        write_message(tmp_path, a, b, "v2", "x", answers=m2["id"])
+        assert read_edge(tmp_path, a, b)["open"] == [m1["id"]]
+        write_message(tmp_path, b, a, "here it is", "x", answers=m1["id"])
+        edge = read_edge(tmp_path, a, b)
+        assert (edge["open"], edge["asks"], edge["count"]) == ([], 0, 4)
+
+    def test_asks_do_not_reset_while_the_root_stays_open(self, tmp_path):
+        """Discharge-and-reopen keeps the *depth* at one, which is why depth is not the metric."""
+        a, b = self._fleet(tmp_path)
+        m1 = write_message(tmp_path, a, b, "q1", "?", expects_reply=True)
+        m2 = write_message(tmp_path, b, a, "q2", "?", expects_reply=True)
+        write_message(tmp_path, a, b, "a2+q3", "?", answers=m2["id"], expects_reply=True)
+        edge = read_edge(tmp_path, a, b)
+        assert len(edge["open"]) == 2 and edge["asks"] == 3
+        assert edge["open"][0] == m1["id"]
+
+    def test_root_since_survives_a_partial_discharge(self, tmp_path):
+        a, b = self._fleet(tmp_path)
+        write_message(tmp_path, a, b, "q1", "?", expects_reply=True)
+        opened = read_edge(tmp_path, a, b)["root_since"]
+        m2 = write_message(tmp_path, b, a, "q2", "?", expects_reply=True)
+        write_message(tmp_path, a, b, "a2", "x", answers=m2["id"])
+        assert read_edge(tmp_path, a, b)["root_since"] == opened
+
+    def test_answers_on_an_unknown_id_is_a_no_op(self, tmp_path):
+        a, b = self._fleet(tmp_path)
+        q = write_message(tmp_path, a, b, "q", "?", expects_reply=True)
+        write_message(tmp_path, b, a, "unrelated", "x", answers="not-an-id")
+        assert read_edge(tmp_path, a, b)["open"] == [q["id"]]
+
+    def test_master_edge_keeps_no_ledger(self, tmp_path):
+        ensure_meta(tmp_path, "agent-a", **_SPAWN)
+        ensure_mailbox(tmp_path, "cld_master_x")
+        write_message(tmp_path, "agent-a", "cld_master_x", "q", "?", expects_reply=True)
+        assert not (tmp_path / "_edges").exists()
+
+
+class TestAskSpent:
+    def test_nothing_open(self, tmp_path):
+        assert ask_spent(tmp_path, "a", "b", 3) is False
+
+    def test_below_the_limit(self, tmp_path):
+        bump_edge(tmp_path, "a", "b", msg_id="m1", expects_reply=True)
+        assert ask_spent(tmp_path, "a", "b", 3) is False
+
+    def test_at_the_limit(self, tmp_path):
+        for i in range(3):
+            bump_edge(tmp_path, "a", "b", msg_id=f"m{i}", expects_reply=True)
+        assert ask_spent(tmp_path, "a", "b", 3) is True
+
+    def test_symmetric(self, tmp_path):
+        bump_edge(tmp_path, "a", "b", msg_id="m1", expects_reply=True)
+        assert ask_spent(tmp_path, "b", "a", 1) is True
+
+    def test_discharging_the_last_open_question_clears_it(self, tmp_path):
+        for i in range(3):
+            bump_edge(tmp_path, "a", "b", msg_id=f"m{i}", expects_reply=True)
+        for i in range(3):
+            bump_edge(tmp_path, "a", "b", answers=f"m{i}")
+        assert ask_spent(tmp_path, "a", "b", 3) is False
+        assert read_edge(tmp_path, "a", "b")["asks"] == 0
+
+
+class TestEdgeObligations:
+    def test_quiet_edges_report_nothing(self, tmp_path):
+        assert edge_obligations(tmp_path, "a", ["b", "c"]) == {
+            "open_asks": 0, "open_with": [], "oldest_open": "",
+        }
+
+    def test_sums_across_peers_and_names_them(self, tmp_path):
+        bump_edge(tmp_path, "a", "b", msg_id="m1", expects_reply=True)
+        bump_edge(tmp_path, "a", "b", msg_id="m2", expects_reply=True)
+        bump_edge(tmp_path, "a", "c", msg_id="m3", expects_reply=True)
+        result = edge_obligations(tmp_path, "a", ["b", "c"])
+        assert (result["open_asks"], result["open_with"]) == (3, ["b", "c"])
+        assert result["oldest_open"]
+
+    def test_ignores_edges_to_agents_not_asked_about(self, tmp_path):
+        bump_edge(tmp_path, "a", "c", msg_id="m1", expects_reply=True)
+        assert edge_obligations(tmp_path, "a", ["b"])["open_asks"] == 0
+
+
 class TestGatedSend:
     """The gate both instructed send paths call (MCP tool + `python -m cld.messenger.send`)."""
 
@@ -616,28 +744,64 @@ class TestGatedSend:
     def test_exempt_send_to_master(self, tmp_path):
         ensure_meta(tmp_path, "agent-a", **_SPAWN)
         ensure_mailbox(tmp_path, "cld_master_x")
-        result = gated_send(tmp_path, "agent-a", "cld_master_x", "hi", "b", default_limit=10)
+        result = gated_send(tmp_path, "agent-a", "cld_master_x", "hi", "b", default_limit=10, ask_limit=3)
         assert set(result) == {"id", "to"}
         assert not (tmp_path / "_edges").exists()
 
     def test_budgeted_send_reports_position(self, tmp_path):
         a, b = self._fleet(tmp_path, peers={"agent-b": 3})
-        result = gated_send(tmp_path, a, b, "hi", "body", default_limit=10)
+        result = gated_send(tmp_path, a, b, "hi", "body", default_limit=10, ask_limit=3)
         assert (result["hops"], result["limit"], result["to"]) == (1, 3, b)
 
     def test_default_limit_when_peer_unlisted(self, tmp_path):
         a, b = self._fleet(tmp_path)
-        assert gated_send(tmp_path, a, b, "hi", "b", default_limit=7)["limit"] == 7
+        assert gated_send(tmp_path, a, b, "hi", "b", default_limit=7, ask_limit=3)["limit"] == 7
 
     def test_replier_inherits_the_declared_limit(self, tmp_path):
         a, b = self._fleet(tmp_path, peers={"agent-b": 2})
-        gated_send(tmp_path, a, b, "hi", "b", default_limit=10)
-        assert gated_send(tmp_path, b, a, "re", "b", default_limit=99)["limit"] == 2
+        gated_send(tmp_path, a, b, "hi", "b", default_limit=10, ask_limit=3)
+        assert gated_send(tmp_path, b, a, "re", "b", default_limit=99, ask_limit=3)["limit"] == 2
+
+    def test_ask_position_reported_while_something_is_open(self, tmp_path):
+        a, b = self._fleet(tmp_path, peers={"agent-b": 9})
+        plain = gated_send(tmp_path, a, b, "fyi", "b", default_limit=10, ask_limit=3)
+        assert "open_asks" not in plain
+        asked = gated_send(tmp_path, a, b, "q", "?", default_limit=10, ask_limit=3, expects_reply=True)
+        assert (asked["open_asks"], asked["ask_limit"]) == (1, 3)
+
+    def test_ask_refused_past_the_limit(self, tmp_path):
+        a, b = self._fleet(tmp_path, peers={"agent-b": 99})
+        for i in range(2):
+            gated_send(tmp_path, a, b, f"q{i}", "?", default_limit=10, ask_limit=2, expects_reply=True)
+        result = gated_send(tmp_path, a, b, "q2", "?", default_limit=10, ask_limit=2, expects_reply=True)
+        assert "ask limit 2" in result["error"]
+        assert "state the assumption" in result["error"]
+        assert _SPAWN["parent"] in result["error"]
+        assert len(list_inbox(tmp_path, b)) == 2
+
+    def test_spent_ask_budget_still_lets_the_exchange_land(self, tmp_path):
+        """The ask gate refuses *asking*, never speaking -- that is what keeps a landing free.
+
+        Contrast with the hop budget, which closes the edge outright. Here an answer and a
+        plain update both still deliver, so an agent that is told to commit can.
+        """
+        a, b = self._fleet(tmp_path, peers={"agent-b": 99})
+        q = gated_send(tmp_path, a, b, "q0", "?", default_limit=10, ask_limit=1, expects_reply=True)
+        assert "error" in gated_send(
+            tmp_path, b, a, "q1", "?", default_limit=10, ask_limit=1, expects_reply=True,
+        )
+        assert "error" not in gated_send(tmp_path, b, a, "fyi", "x", default_limit=10, ask_limit=1)
+        answer = gated_send(
+            tmp_path, b, a, "committing", "assumed v2", default_limit=10, ask_limit=1,
+            answers=q["id"],
+        )
+        assert "error" not in answer
+        assert ask_spent(tmp_path, a, b, 1) is False
 
     def test_refusal_names_the_master_and_the_position(self, tmp_path):
         a, b = self._fleet(tmp_path, peers={"agent-b": 1})
-        gated_send(tmp_path, a, b, "hi", "b", default_limit=10)
-        result = gated_send(tmp_path, a, b, "again", "b", default_limit=10)
+        gated_send(tmp_path, a, b, "hi", "b", default_limit=10, ask_limit=3)
+        result = gated_send(tmp_path, a, b, "again", "b", default_limit=10, ask_limit=3)
         assert "1/1" in result["error"]
         assert _SPAWN["parent"] in result["error"]
         assert "Do not retry" in result["error"]
@@ -646,8 +810,8 @@ class TestGatedSend:
     def test_refusal_falls_back_to_generic_master(self, tmp_path):
         ensure_meta(tmp_path, "agent-a", **{**_SPAWN, "parent": "", "peers": {"agent-b": 1}})
         ensure_meta(tmp_path, "agent-b", **_SPAWN)
-        gated_send(tmp_path, "agent-a", "agent-b", "hi", "b", default_limit=10)
-        result = gated_send(tmp_path, "agent-a", "agent-b", "again", "b", default_limit=10)
+        gated_send(tmp_path, "agent-a", "agent-b", "hi", "b", default_limit=10, ask_limit=3)
+        result = gated_send(tmp_path, "agent-a", "agent-b", "again", "b", default_limit=10, ask_limit=3)
         assert "your master" in result["error"]
 
     def test_reaped_recipient_gets_its_own_error(self, tmp_path):
@@ -658,12 +822,12 @@ class TestGatedSend:
         transport and must say why. A fully reaped agent fails earlier, at resolution.
         """
         a, b = self._fleet(tmp_path, peers={"agent-b": 5})
-        gated_send(tmp_path, a, b, "hi", "b", default_limit=10)
+        gated_send(tmp_path, a, b, "hi", "b", default_limit=10, ask_limit=3)
         archive_mailbox(tmp_path, b)
         with patch("cld.messenger.mailbox.list_containers", return_value=[
             {"name": b, "kind": "task-agent", "repo": "/x/repo", "status": "running"},
         ]):
-            result = gated_send(tmp_path, a, b, "again", "b", default_limit=10)
+            result = gated_send(tmp_path, a, b, "again", "b", default_limit=10, ask_limit=3)
         assert "torn down" in result["error"]
         assert "hop budget" not in result["error"]
 
@@ -671,12 +835,12 @@ class TestGatedSend:
         a, b = self._fleet(tmp_path, peers={"agent-b": 5})
         archive_mailbox(tmp_path, b)
         with patch("cld.messenger.mailbox.list_containers", return_value=[]):
-            result = gated_send(tmp_path, a, b, "hi", "b", default_limit=10)
+            result = gated_send(tmp_path, a, b, "hi", "b", default_limit=10, ask_limit=3)
         assert "No container found" in result["error"]
 
     def test_unresolvable_recipient_is_an_error_not_an_exception(self, tmp_path):
         with patch("cld.messenger.mailbox.list_containers", return_value=[]):
-            result = gated_send(tmp_path, "agent-a", "nobody", "hi", "b", default_limit=10)
+            result = gated_send(tmp_path, "agent-a", "nobody", "hi", "b", default_limit=10, ask_limit=3)
         assert "error" in result
 
 
