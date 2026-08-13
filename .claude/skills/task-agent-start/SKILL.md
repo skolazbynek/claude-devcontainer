@@ -28,7 +28,7 @@ fails you can still observe and message agents, just not create them.
 ## Step 1: Resolve the target repo
 
 ```bash
-cld master repos          # <path> own | <path> target
+cld repos          # <path> own | <path> target
 ```
 
 `cd` to the target before the rest. An agent for your own repo and an agent for a

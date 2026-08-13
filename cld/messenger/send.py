@@ -14,6 +14,26 @@ from cld.messenger import mailbox
 from cld.messenger.identity import resolve_self
 
 
+def deliver(to: str, subject: str, body: str, expects_reply: bool = False, answers: str = "") -> None:
+    """Send *body* and report the delivery; exits 1 on a refused or failed send."""
+    frm, root = resolve_self()
+    cfg = Config.from_env()
+    result = mailbox.gated_send(
+        root, frm, to, subject, body,
+        default_limit=cfg.peer_absolute_limit,
+        ask_limit=cfg.root_ask_limit,
+        answers=answers,
+        expects_reply=expects_reply,
+    )
+    if "error" in result:
+        print(f"error: {result['error']}", file=sys.stderr)
+        sys.exit(1)
+
+    hops = f"  (hop {result['hops']}/{result['limit']})" if "hops" in result else ""
+    asks = f"  (open asks {result['open_asks']}/{result['ask_limit']})" if "open_asks" in result else ""
+    print(f"sent: {result['id']}  {frm} -> {result['to']}{hops}{asks}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="python -m cld.messenger.send")
     ap.add_argument("--to", required=True, help="Recipient shortname or full container name")
@@ -24,24 +44,8 @@ def main() -> None:
     ap.add_argument("--answers", default="", help="Id of the message this one answers")
     args = ap.parse_args()
 
-    body = Path(args.body_file).read_text()
-
-    frm, root = resolve_self()
-    cfg = Config.from_env()
-    result = mailbox.gated_send(
-        root, frm, args.to, args.subject, body,
-        default_limit=cfg.peer_absolute_limit,
-        ask_limit=cfg.root_ask_limit,
-        answers=args.answers,
-        expects_reply=args.expects_reply,
-    )
-    if "error" in result:
-        print(f"error: {result['error']}", file=sys.stderr)
-        sys.exit(1)
-
-    hops = f"  (hop {result['hops']}/{result['limit']})" if "hops" in result else ""
-    asks = f"  (open asks {result['open_asks']}/{result['ask_limit']})" if "open_asks" in result else ""
-    print(f"sent: {result['id']}  {frm} -> {result['to']}{hops}{asks}")
+    deliver(args.to, args.subject, Path(args.body_file).read_text(),
+            expects_reply=args.expects_reply, answers=args.answers)
 
 
 if __name__ == "__main__":

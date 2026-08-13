@@ -12,7 +12,7 @@ user-invocable: true
 Run:
 
 ```bash
-python -m cld.messenger.agents
+cld msg agents
 ```
 
 Restrict to one kind with `--kind master`, `--kind agent` (the standing per-repo

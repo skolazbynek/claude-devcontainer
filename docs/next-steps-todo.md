@@ -14,6 +14,12 @@ The host-side brokerctl, script, ssh daemon and the whole design feature should 
 ## Different CLD clis for host and for container
 Within the CLD application, there are commands usable only from host or usable only from container. Design a split: a CLI application used on host and different one shipped into containers. The goal is to make the usage cleaner and more straighforward. It's possible to design a different way to ship the application into the master container if it helps usability.
 
+**Done.** Design + implementation: `docs/design-cli-split.md`. `cld.cli` stays the host
+app; `cld.cli_container` is the container app, shipped as `cld` by a shim in the
+devcontainer image (there was no `cld` executable in any image before this, so every
+skill that said `cld task-agent …` was broken). Shared task-agent helpers moved to
+`cld/task_agent.py`; the messenger got first-class verbs (`cld msg …`).
+
 ## Chaining prompts
 All commands accepting personas / task-files should change and unify their interface. They should accept an arbitrary (maybe limited) number of task-files/personas and a single positional argument (task description). The task-files are interchangeable with personas. The task-files can be specified either by a file path or by the @<taskfile> notation that works the same way as now: get's the respective file from the `cld/prompts` directory. The task-files are appended one after another in the order they were specified.
 Example of my vision: `cld run @personas/architect @personas/agent ./tasks/task_description.md -p "When finished, reply to the master"`.

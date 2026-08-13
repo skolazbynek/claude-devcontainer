@@ -11,7 +11,7 @@ user-invocable: true
 The user must provide a message id. Run:
 
 ```bash
-python -m cld.messenger.archive <id>
+cld msg archive <id>
 ```
 
 Show the output verbatim.

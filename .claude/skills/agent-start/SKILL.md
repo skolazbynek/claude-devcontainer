@@ -46,7 +46,7 @@ inside master as empty placeholder directories (no bind mount; master has no
 filesystem view of the sibling content). List the reachable targets:
 
 ```bash
-cld master repos
+cld repos
 # /host/side/cld     own
 # /host/side/foo     target
 # /host/side/bar     target

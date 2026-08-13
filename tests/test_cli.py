@@ -12,14 +12,13 @@ from typer.testing import CliRunner
 from cld.cli import (
     _assert_reap_ready,
     _forget_session_state,
-    _parse_peer_specs,
     _persistent_container_name,
     _persistent_container_status,
     _reap_task_agent,
-    _resolve_task_agent,
     _shutdown_persistent_container,
     app,
 )
+from cld.task_agent import parse_peer_specs, resolve_task_agent
 from cld.config import Config
 from cld.docker import agent_container_name, master_container_name, task_agent_container_name
 
@@ -387,29 +386,6 @@ class TestRestartPreservesBookmark:
         launch_mock.assert_called_once()
 
 
-class TestMasterReposCommand:
-    def test_errors_when_not_in_master(self):
-        result = runner.invoke(app, ["master", "repos"])
-        assert result.exit_code == 1
-        assert "master" in result.output.lower()
-
-    def test_lists_own_and_targets(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("MASTER_MODE", "1")
-        monkeypatch.setenv("CLD_HOST_PROJECT_DIR", "/host/side/cld")
-        proj = tmp_path / ".cld/config.toml"
-        proj.parent.mkdir(parents=True, exist_ok=True)
-        proj.write_text('master_targets = ["/host/side/foo", "/host/side/bar"]\n')
-        with patch("cld.cli.Config.from_env", return_value=__import__(
-            "cld.config", fromlist=["Config"],
-        ).Config(host_project_dir="/host/side/cld",
-                 master_targets=("/host/side/foo", "/host/side/bar"))):
-            result = runner.invoke(app, ["master", "repos"])
-        assert result.exit_code == 0, result.output
-        assert "/host/side/cld\town" in result.output
-        assert "/host/side/foo\ttarget" in result.output
-        assert "/host/side/bar\ttarget" in result.output
-
-
 class TestChainBlockedInMaster:
     def test_run_chain_blocked_inside_master(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MASTER_MODE", "1")
@@ -475,6 +451,12 @@ def start_env(tmp_path, monkeypatch):
         def p(target, **kw):
             return stack.enter_context(patch(f"cld.cli.{target}", **kw))
 
+        # One mock behind both bindings: the roster enumerates in cld.task_agent,
+        # the reap path in cld.cli, and a test that seeds peers means both.
+        ta_list = MagicMock(return_value=[])
+        for mod in ("cld.cli", "cld.task_agent"):
+            stack.enter_context(patch(f"{mod}.docker_task_agent_list", ta_list))
+
         yield SimpleNamespace(
             repo_root=repo_root,
             mailbox_root=mailbox_root,
@@ -492,35 +474,35 @@ def start_env(tmp_path, monkeypatch):
             stage_ssh=p("stage_ssh_agent", return_value=[]),
             run=p("subprocess.run"),
             ready=p("_wait_for_container_ready", return_value=True),
-            task_agent_list=p("docker_task_agent_list", return_value=[]),
+            task_agent_list=ta_list,
         )
 
 
 class TestParsePeerSpecs:
     def test_bare_name_takes_default_limit(self):
-        assert _parse_peer_specs(["cld_agent_api_fix"], 10) == {"cld_agent_api_fix": 10}
+        assert parse_peer_specs(["cld_agent_api_fix"], 10) == {"cld_agent_api_fix": 10}
 
     def test_explicit_limit(self):
-        assert _parse_peer_specs(["a:5"], 10) == {"a": 5}
+        assert parse_peer_specs(["a:5"], 10) == {"a": 5}
 
     def test_multiple_peers(self):
-        assert _parse_peer_specs(["a:5", "b"], 7) == {"a": 5, "b": 7}
+        assert parse_peer_specs(["a:5", "b"], 7) == {"a": 5, "b": 7}
 
     def test_empty(self):
-        assert _parse_peer_specs([], 10) == {}
+        assert parse_peer_specs([], 10) == {}
 
     def test_duplicate_name_raises(self):
         with pytest.raises(ValueError, match="named twice"):
-            _parse_peer_specs(["a:5", "a:6"], 10)
+            parse_peer_specs(["a:5", "a:6"], 10)
 
     @pytest.mark.parametrize("spec", ["a:0", "a:-1", "a:x", "a:"])
     def test_non_positive_limit_raises(self, spec):
         with pytest.raises(ValueError, match="positive integer"):
-            _parse_peer_specs([spec], 10)
+            parse_peer_specs([spec], 10)
 
     def test_missing_name_raises(self):
         with pytest.raises(ValueError, match="missing peer name"):
-            _parse_peer_specs([":5"], 10)
+            parse_peer_specs([":5"], 10)
 
 
 class TestTaskAgentStart:
@@ -683,65 +665,65 @@ class TestResolveTaskAgent:
 
     def test_full_container_name(self, tmp_path, monkeypatch):
         cfg = self._cfg(tmp_path, monkeypatch)
-        with patch("cld.cli.docker_task_agent_list", return_value=[_ta("cld_agent_myrepo_add-oauth")]):
-            assert _resolve_task_agent(cfg, "cld_agent_myrepo_add-oauth") == "cld_agent_myrepo_add-oauth"
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[_ta("cld_agent_myrepo_add-oauth")]):
+            assert resolve_task_agent(cfg, "cld_agent_myrepo_add-oauth") == "cld_agent_myrepo_add-oauth"
 
     def test_bare_slug(self, tmp_path, monkeypatch):
         cfg = self._cfg(tmp_path, monkeypatch)
-        with patch("cld.cli.docker_task_agent_list", return_value=[_ta("cld_agent_myrepo_add-oauth")]):
-            assert _resolve_task_agent(cfg, "add-oauth") == "cld_agent_myrepo_add-oauth"
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[_ta("cld_agent_myrepo_add-oauth")]):
+            assert resolve_task_agent(cfg, "add-oauth") == "cld_agent_myrepo_add-oauth"
 
     def test_bare_slug_with_underscore_in_repo_name(self, tmp_path, monkeypatch):
         cfg = self._cfg(tmp_path, monkeypatch)
-        with patch("cld.cli.docker_task_agent_list", return_value=[_ta("cld_agent_my_repo_add-oauth")]):
-            assert _resolve_task_agent(cfg, "add-oauth") == "cld_agent_my_repo_add-oauth"
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[_ta("cld_agent_my_repo_add-oauth")]):
+            assert resolve_task_agent(cfg, "add-oauth") == "cld_agent_my_repo_add-oauth"
 
     def test_mailbox_only_agent_resolves(self, tmp_path, monkeypatch):
         cfg = self._cfg(tmp_path, monkeypatch)
         _write_mailbox(tmp_path / "mailboxes", "cld_agent_myrepo_crashed", meta=_meta())
-        with patch("cld.cli.docker_task_agent_list", return_value=[]):
-            assert _resolve_task_agent(cfg, "crashed") == "cld_agent_myrepo_crashed"
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[]):
+            assert resolve_task_agent(cfg, "crashed") == "cld_agent_myrepo_crashed"
 
     def test_ambiguous_slug_lists_candidates(self, tmp_path, monkeypatch):
         cfg = self._cfg(tmp_path, monkeypatch)
         agents = [_ta("cld_agent_repoa_fix"), _ta("cld_agent_repob_fix")]
-        with patch("cld.cli.docker_task_agent_list", return_value=agents), \
+        with patch("cld.task_agent.docker_task_agent_list", return_value=agents), \
              patch("cld.cli.find_target_repo", side_effect=RuntimeError("not a repo")):
             with pytest.raises(RuntimeError, match="ambiguous"):
-                _resolve_task_agent(cfg, "fix")
+                resolve_task_agent(cfg, "fix")
 
     def test_ambiguity_resolved_by_cwd_repo(self, tmp_path, monkeypatch):
         cfg = self._cfg(tmp_path, monkeypatch)
         agents = [_ta("cld_agent_repoa_fix"), _ta("cld_agent_repob_fix")]
-        with patch("cld.cli.docker_task_agent_list", return_value=agents), \
-             patch("cld.cli.find_target_repo", return_value=Path("/host/repob")):
-            assert _resolve_task_agent(cfg, "fix") == "cld_agent_repob_fix"
+        with patch("cld.task_agent.docker_task_agent_list", return_value=agents), \
+             patch("cld.task_agent.find_target_repo", return_value=Path("/host/repob")):
+            assert resolve_task_agent(cfg, "fix") == "cld_agent_repob_fix"
 
     def test_unknown_name_errors(self, tmp_path, monkeypatch):
         cfg = self._cfg(tmp_path, monkeypatch)
-        with patch("cld.cli.docker_task_agent_list", return_value=[]), \
-             patch("cld.cli.find_target_repo", return_value=Path("/host/myrepo")):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[]), \
+             patch("cld.task_agent.find_target_repo", return_value=Path("/host/myrepo")):
             with pytest.raises(RuntimeError, match="neither live nor archived"):
-                _resolve_task_agent(cfg, "ghost")
+                resolve_task_agent(cfg, "ghost")
 
     def test_archived_full_name_resolves(self, tmp_path, monkeypatch):
         cfg = self._cfg(tmp_path, monkeypatch)
         _write_mailbox(tmp_path / "mailboxes" / "_archive", "cld_agent_myrepo_reaped", meta=_meta())
-        with patch("cld.cli.docker_task_agent_list", return_value=[]):
-            assert _resolve_task_agent(cfg, "cld_agent_myrepo_reaped") == "cld_agent_myrepo_reaped"
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[]):
+            assert resolve_task_agent(cfg, "cld_agent_myrepo_reaped") == "cld_agent_myrepo_reaped"
 
     def test_archived_bare_slug_resolves_via_cwd_repo(self, tmp_path, monkeypatch):
         cfg = self._cfg(tmp_path, monkeypatch)
         _write_mailbox(tmp_path / "mailboxes" / "_archive", "cld_agent_myrepo_reaped", meta=_meta())
-        with patch("cld.cli.docker_task_agent_list", return_value=[]), \
-             patch("cld.cli.find_target_repo", return_value=Path("/host/myrepo")):
-            assert _resolve_task_agent(cfg, "reaped") == "cld_agent_myrepo_reaped"
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[]), \
+             patch("cld.task_agent.find_target_repo", return_value=Path("/host/myrepo")):
+            assert resolve_task_agent(cfg, "reaped") == "cld_agent_myrepo_reaped"
 
 
 class TestTaskAgentRoster:
     def test_empty(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CLD_MAILBOX_ROOT", str(tmp_path / "mailboxes"))
-        with patch("cld.cli.docker_task_agent_list", return_value=[]):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[]):
             result = runner.invoke(app, ["task-agent", "status"])
         assert result.exit_code == 0, result.output
         assert "No task-agents found." in result.output
@@ -752,8 +734,8 @@ class TestTaskAgentRoster:
         _write_mailbox(root, "cld_agent_myrepo_live", meta=_meta(),
                        state={"phase": "idle", "msg_count": 3, "cost_usd_total": 1.5})
         _write_mailbox(root, "cld_agent_myrepo_orphan", meta=_meta())
-        with patch("cld.cli.docker_task_agent_list", return_value=[_ta("cld_agent_myrepo_live")]), \
-             patch("cld.cli.docker_task_agent_status", return_value="running"):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[_ta("cld_agent_myrepo_live")]), \
+             patch("cld.task_agent.docker_task_agent_status", return_value="running"):
             result = runner.invoke(app, ["task-agent", "status"])
         assert result.exit_code == 0, result.output
         assert "cld_agent_myrepo_live" in result.output
@@ -765,8 +747,8 @@ class TestTaskAgentRoster:
 
     def test_stopped_container_shows_its_state(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CLD_MAILBOX_ROOT", str(tmp_path / "mailboxes"))
-        with patch("cld.cli.docker_task_agent_list", return_value=[_ta("cld_agent_myrepo_x")]), \
-             patch("cld.cli.docker_task_agent_status", return_value="stopped"):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[_ta("cld_agent_myrepo_x")]), \
+             patch("cld.task_agent.docker_task_agent_status", return_value="stopped"):
             result = runner.invoke(app, ["task-agent", "status"])
         assert result.exit_code == 0, result.output
         assert "stopped" in result.output
@@ -784,8 +766,8 @@ class TestTaskAgentDetail:
                    "current": {"subject": "wrap up", "from": "cld_master_myrepo_ab12",
                                "started_at": "2026-08-12T11:00:00Z"}},
         )
-        with patch("cld.cli.docker_task_agent_list", return_value=[_ta(name)]), \
-             patch("cld.cli.docker_task_agent_status", return_value="running"):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[_ta(name)]), \
+             patch("cld.task_agent.docker_task_agent_status", return_value="running"):
             result = runner.invoke(app, ["task-agent", "status", "add-oauth"])
         assert result.exit_code == 0, result.output
         for expected in ("wire up oauth login", "implementer", "add-oauth", "aaaaaaaaaaaa",
@@ -798,8 +780,8 @@ class TestTaskAgentDetail:
         monkeypatch.setenv("CLD_MAILBOX_ROOT", str(root))
         name = "cld_agent_myrepo_reaped"
         _write_mailbox(root / "_archive", name, meta=_meta())
-        with patch("cld.cli.docker_task_agent_list", return_value=[]), \
-             patch("cld.cli.docker_task_agent_status", return_value="absent"):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[]), \
+             patch("cld.task_agent.docker_task_agent_status", return_value="absent"):
             result = runner.invoke(app, ["task-agent", "status", name])
         assert result.exit_code == 0, result.output
         assert "reaped (archived)" in result.output
@@ -810,8 +792,8 @@ class TestTaskAgentDetail:
         monkeypatch.setenv("CLD_MAILBOX_ROOT", str(root))
         name = "cld_agent_myrepo_booting"
         _write_mailbox(root, name)
-        with patch("cld.cli.docker_task_agent_list", return_value=[_ta(name)]), \
-             patch("cld.cli.docker_task_agent_status", return_value="running"):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[_ta(name)]), \
+             patch("cld.task_agent.docker_task_agent_status", return_value="running"):
             result = runner.invoke(app, ["task-agent", "status", name])
         assert result.exit_code == 0, result.output
         assert "none yet" in result.output
@@ -823,7 +805,7 @@ class TestTaskAgentLogsAndTranscript:
         monkeypatch.setenv("CLD_MAILBOX_ROOT", str(tmp_path / "mailboxes"))
         fake = MagicMock(stdout="supervisor line\n", stderr="")
         with patch("cld.cli.require_docker"), \
-             patch("cld.cli.docker_task_agent_list", return_value=[_ta("cld_agent_myrepo_x")]), \
+             patch("cld.task_agent.docker_task_agent_list", return_value=[_ta("cld_agent_myrepo_x")]), \
              patch("cld.cli.docker_task_agent_status", return_value="running"), \
              patch("cld.cli.subprocess.run", return_value=fake) as run_mock:
             result = runner.invoke(app, ["task-agent", "logs", "x", "-n", "20"])
@@ -839,7 +821,7 @@ class TestTaskAgentLogsAndTranscript:
         monkeypatch.setenv("CLD_MAILBOX_ROOT", str(root))
         _write_mailbox(root, "cld_agent_myrepo_x", meta=_meta())
         with patch("cld.cli.require_docker"), \
-             patch("cld.cli.docker_task_agent_list", return_value=[]), \
+             patch("cld.task_agent.docker_task_agent_list", return_value=[]), \
              patch("cld.cli.docker_task_agent_status", return_value="absent"):
             result = runner.invoke(app, ["task-agent", "logs", "cld_agent_myrepo_x"])
         assert result.exit_code == 1
@@ -858,7 +840,7 @@ class TestTaskAgentLogsAndTranscript:
             "id": "m2", "to": "cld_master_myrepo_ab12", "subject": "Re: kick off",
             "body": "done, branch pushed", "ts": "2026-08-12T10:05:00Z",
         }) + "\n")
-        with patch("cld.cli.docker_task_agent_list", return_value=[_ta(name)]):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[_ta(name)]):
             result = runner.invoke(app, ["task-agent", "transcript", "x"])
         assert result.exit_code == 0, result.output
         lines = result.output.splitlines()
@@ -871,7 +853,7 @@ class TestTaskAgentLogsAndTranscript:
         root = tmp_path / "mailboxes"
         monkeypatch.setenv("CLD_MAILBOX_ROOT", str(root))
         _write_mailbox(root, "cld_agent_myrepo_x", meta=_meta())
-        with patch("cld.cli.docker_task_agent_list", return_value=[]):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[]):
             result = runner.invoke(app, ["task-agent", "transcript", "cld_agent_myrepo_x"])
         assert result.exit_code == 0, result.output
         assert "No messages" in result.output
@@ -887,13 +869,13 @@ class TestReapReadiness:
     def test_idle_agent_passes(self, tmp_path, monkeypatch):
         cfg = self._cfg(tmp_path, monkeypatch)
         _write_mailbox(tmp_path / "mailboxes", "a", meta=_meta(), state={"phase": "idle"})
-        with patch("cld.cli.docker_task_agent_list", return_value=[]):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[]):
             _assert_reap_ready(cfg, "a", parent="")
 
     def test_no_state_file_passes(self, tmp_path, monkeypatch):
         cfg = self._cfg(tmp_path, monkeypatch)
         _write_mailbox(tmp_path / "mailboxes", "a", meta=_meta())
-        with patch("cld.cli.docker_task_agent_list", return_value=[]):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[]):
             _assert_reap_ready(cfg, "a", parent="")
 
     def test_mid_turn_refuses_naming_the_message(self, tmp_path, monkeypatch):
@@ -903,7 +885,7 @@ class TestReapReadiness:
             state={"phase": "processing",
                    "current": {"subject": "wrap up", "from": "master-1", "started_at": "t0"}},
         )
-        with patch("cld.cli.docker_task_agent_list", return_value=[]), \
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[]), \
              patch("cld.cli._REAP_WAIT_SECONDS", 0):
             with pytest.raises(RuntimeError, match="mid-turn on 'wrap up'"):
                 _assert_reap_ready(cfg, "a", parent="")
@@ -913,7 +895,8 @@ class TestReapReadiness:
         root = tmp_path / "mailboxes"
         _write_mailbox(root, "target", meta=_meta(), state={"phase": "idle"})
         _write_mailbox(root, "dependent", meta=_meta(peers={"target": 5}), state={"phase": "idle"})
-        with patch("cld.cli.docker_task_agent_list", return_value=[_ta("dependent")]):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[_ta("dependent")]), \
+             patch("cld.cli.docker_task_agent_list", return_value=[_ta("dependent")]):
             with pytest.raises(RuntimeError, match="live peer of dependent"):
                 _assert_reap_ready(cfg, "target", parent="")
 
@@ -922,40 +905,40 @@ class TestReapReadiness:
         root = tmp_path / "mailboxes"
         _write_mailbox(root, "target", meta=_meta(), state={"phase": "idle"})
         _write_mailbox(root, "dependent", meta=_meta(peers={"target": 5}))
-        with patch("cld.cli.docker_task_agent_list", return_value=[]):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[]):
             _assert_reap_ready(cfg, "target", parent="")
 
     def test_own_peers_never_block_itself(self, tmp_path, monkeypatch):
         cfg = self._cfg(tmp_path, monkeypatch)
         root = tmp_path / "mailboxes"
         _write_mailbox(root, "a", meta=_meta(peers={"a": 5}), state={"phase": "idle"})
-        with patch("cld.cli.docker_task_agent_list", return_value=[_ta("a")]):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[_ta("a")]):
             _assert_reap_ready(cfg, "a", parent="")
 
     def test_foreign_fleet_refused(self, tmp_path, monkeypatch):
         cfg = self._cfg(tmp_path, monkeypatch)
         _write_mailbox(tmp_path / "mailboxes", "a", meta=_meta(parent="master-1"), state={"phase": "idle"})
-        with patch("cld.cli.docker_task_agent_list", return_value=[]):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[]):
             with pytest.raises(RuntimeError, match="parent master is master-1"):
                 _assert_reap_ready(cfg, "a", parent="master-2")
 
     def test_own_fleet_passes(self, tmp_path, monkeypatch):
         cfg = self._cfg(tmp_path, monkeypatch)
         _write_mailbox(tmp_path / "mailboxes", "a", meta=_meta(parent="master-1"), state={"phase": "idle"})
-        with patch("cld.cli.docker_task_agent_list", return_value=[]):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[]):
             _assert_reap_ready(cfg, "a", parent="master-1")
 
     def test_container_label_beats_a_lying_meta_json(self, tmp_path, monkeypatch):
         """meta.json is written by the container; the label is host-set, so it wins."""
         cfg = self._cfg(tmp_path, monkeypatch)
         _write_mailbox(tmp_path / "mailboxes", "a", meta=_meta(parent="master-2"), state={"phase": "idle"})
-        with patch("cld.cli.docker_task_agent_list", return_value=[_ta("a", parent="master-1")]):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[_ta("a", parent="master-1")]):
             _assert_reap_ready(cfg, "a", parent="master-1")
 
     def test_human_reaps_any_fleet(self, tmp_path, monkeypatch):
         cfg = self._cfg(tmp_path, monkeypatch)
         _write_mailbox(tmp_path / "mailboxes", "a", meta=_meta(parent="master-1"), state={"phase": "idle"})
-        with patch("cld.cli.docker_task_agent_list", return_value=[]):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[]):
             _assert_reap_ready(cfg, "a", parent="")
 
 
@@ -969,7 +952,7 @@ class TestReapTaskAgent:
         root = tmp_path / "mailboxes"
         name = "cld_agent_myrepo_add-oauth"
         _write_mailbox(root, name, meta=_meta(), state={"phase": "idle"})
-        with patch("cld.cli.docker_task_agent_list", return_value=[_ta(name)]), \
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[_ta(name)]), \
              patch("cld.cli._stop_and_remove_container") as stop, \
              patch("cld.cli._forget_session_state") as forget:
             _reap_task_agent(cfg, name, parent="", force=False)
@@ -986,8 +969,8 @@ class TestReapTaskAgent:
         root = tmp_path / "mailboxes"
         name = "cld_agent_myrepo_x"
         _write_mailbox(root / "_archive", name, meta=_meta())
-        with patch("cld.cli.docker_task_agent_list", return_value=[]), \
-             patch("cld.cli.find_target_repo", return_value=Path("/host/myrepo")), \
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[]), \
+             patch("cld.task_agent.find_target_repo", return_value=Path("/host/myrepo")), \
              patch("cld.cli._stop_and_remove_container"), \
              patch("cld.cli._forget_session_state"):
             _reap_task_agent(cfg, name, parent="", force=False)
@@ -996,7 +979,7 @@ class TestReapTaskAgent:
     def test_unknown_repo_skips_forget_with_a_warning(self, tmp_path, monkeypatch, caplog):
         cfg = self._cfg(tmp_path, monkeypatch)
         _write_mailbox(tmp_path / "mailboxes", "cld_agent_myrepo_x", meta=_meta())
-        with patch("cld.cli.docker_task_agent_list", return_value=[]), \
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[]), \
              patch("cld.cli.find_target_repo", side_effect=RuntimeError("not a repo")), \
              patch("cld.cli._stop_and_remove_container"), \
              patch("cld.cli._forget_session_state") as forget, \
@@ -1010,7 +993,7 @@ class TestReapTaskAgent:
         root = tmp_path / "mailboxes"
         _write_mailbox(root, "target", meta=_meta(), state={"phase": "processing", "current": {}})
         _write_mailbox(root, "dependent", meta=_meta(peers={"target": 5}), state={"phase": "idle"})
-        with patch("cld.cli.docker_task_agent_list", return_value=[_ta("dependent"), _ta("target")]), \
+        with patch("cld.task_agent.docker_task_agent_list", return_value=[_ta("dependent"), _ta("target")]), \
              patch("cld.cli._stop_and_remove_container") as stop, \
              patch("cld.cli._forget_session_state"):
             _reap_task_agent(cfg, "target", parent="", force=True)
@@ -1038,7 +1021,7 @@ class TestTaskAgentShutdownCommand:
         name = "cld_agent_myrepo_add-oauth"
         _write_mailbox(root, name, meta=_meta(), state={"phase": "idle"})
         with patch("cld.cli.require_docker"), \
-             patch("cld.cli.docker_task_agent_list", return_value=[_ta(name)]), \
+             patch("cld.task_agent.docker_task_agent_list", return_value=[_ta(name)]), \
              patch("cld.cli._stop_and_remove_container"), \
              patch("cld.cli._forget_session_state"):
             result = runner.invoke(app, ["task-agent", "shutdown", "add-oauth"])
@@ -1052,7 +1035,7 @@ class TestTaskAgentShutdownCommand:
         _write_mailbox(root, name, meta=_meta(),
                        state={"phase": "processing", "current": {"subject": "s", "from": "m"}})
         with patch("cld.cli.require_docker"), \
-             patch("cld.cli.docker_task_agent_list", return_value=[_ta(name)]), \
+             patch("cld.task_agent.docker_task_agent_list", return_value=[_ta(name)]), \
              patch("cld.cli._REAP_WAIT_SECONDS", 0), \
              patch("cld.cli._stop_and_remove_container") as stop:
             result = runner.invoke(app, ["task-agent", "shutdown", "x"])
@@ -1062,7 +1045,7 @@ class TestTaskAgentShutdownCommand:
     def test_all_empty(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CLD_MAILBOX_ROOT", str(tmp_path / "mailboxes"))
         with patch("cld.cli.require_docker"), \
-             patch("cld.cli.docker_task_agent_list", return_value=[]):
+             patch("cld.task_agent.docker_task_agent_list", return_value=[]):
             result = runner.invoke(app, ["task-agent", "shutdown", "--all"])
         assert result.exit_code == 0, result.output
         assert "No task-agents found." in result.output
@@ -1083,7 +1066,7 @@ class TestTaskAgentShutdownCommand:
             alive.discard(name)
 
         with patch("cld.cli.require_docker"), \
-             patch("cld.cli.docker_task_agent_list", side_effect=listing), \
+             patch("cld.task_agent.docker_task_agent_list", side_effect=listing), \
              patch("cld.cli._stop_and_remove_container", side_effect=stop), \
              patch("cld.cli._forget_session_state"):
             result = runner.invoke(app, ["task-agent", "shutdown", "--all"])
@@ -1101,6 +1084,7 @@ class TestTaskAgentShutdownCommand:
                        state={"phase": "idle"})
         agents = [_ta("cld_agent_r_a"), _ta("cld_agent_r_b")]
         with patch("cld.cli.require_docker"), \
+             patch("cld.task_agent.docker_task_agent_list", return_value=agents), \
              patch("cld.cli.docker_task_agent_list", return_value=agents), \
              patch("cld.cli._stop_and_remove_container") as stop, \
              patch("cld.cli._forget_session_state"):
@@ -1118,7 +1102,7 @@ class TestTaskAgentShutdownCommand:
                        state={"phase": "idle"})
         agents = [_ta("cld_agent_r_a"), _ta("cld_agent_r_b")]
         with patch("cld.cli.require_docker"), \
-             patch("cld.cli.docker_task_agent_list", return_value=agents), \
+             patch("cld.task_agent.docker_task_agent_list", return_value=agents), \
              patch("cld.cli._stop_and_remove_container") as stop, \
              patch("cld.cli._forget_session_state"):
             result = runner.invoke(app, ["task-agent", "shutdown", "--all", "--force"])
@@ -1133,7 +1117,7 @@ class TestTaskAgentShutdownCommand:
         agents = [_ta("cld_agent_r_mine", parent="master-1"),
                   _ta("cld_agent_r_theirs", parent="master-2")]
         with patch("cld.cli.require_docker"), \
-             patch("cld.cli.docker_task_agent_list", return_value=agents), \
+             patch("cld.task_agent.docker_task_agent_list", return_value=agents), \
              patch("cld.cli._stop_and_remove_container") as stop, \
              patch("cld.cli._forget_session_state"):
             result = runner.invoke(app, ["task-agent", "shutdown", "--all", "--parent", "master-1"])
@@ -1144,132 +1128,11 @@ class TestTaskAgentShutdownCommand:
 class TestHandleErrorsExitCodes:
     """typer.Exit subclasses RuntimeError, so _handle_errors has to let it through."""
 
-    def test_deliberate_zero_exit_is_not_turned_into_failure(self):
-        """An in-master broker dispatch raises Exit(<broker rc>); 0 must stay 0."""
-        with patch("cld.cli.in_master_container", return_value=True), \
-             patch("cld.cli.broker_available", return_value=True), \
-             patch("cld.cli.find_target_repo", return_value=Path("/host/myrepo")), \
-             patch("cld.cli.broker_agent_op", return_value=0):
-            result = runner.invoke(app, ["agent", "status"])
-        assert result.exit_code == 0, result.output
-
-    def test_broker_failure_code_is_propagated(self):
-        with patch("cld.cli.in_master_container", return_value=True), \
-             patch("cld.cli.broker_available", return_value=True), \
-             patch("cld.cli.find_target_repo", return_value=Path("/host/myrepo")), \
-             patch("cld.cli.broker_agent_op", return_value=3):
-            result = runner.invoke(app, ["agent", "status"])
-        assert result.exit_code == 3
-
     def test_clean_user_error_has_no_command_failed_noise(self):
         result = runner.invoke(app, ["run"])
         assert result.exit_code == 1
         assert "Provide a task file" in result.output
         assert "Command failed" not in result.output
-
-
-class TestTaskAgentInMaster:
-    """Inside master there is no docker socket: lifecycle goes through the broker,
-    which stamps --parent and refuses --force (docs/design-task-agents.md §9)."""
-
-    def _in_master(self, stack, tmp_path, monkeypatch, broker=True):
-        monkeypatch.setenv("CLD_MAILBOX_ROOT", str(tmp_path / "mailboxes"))
-        stack.enter_context(patch("cld.cli.in_master_container", return_value=True))
-        stack.enter_context(patch("cld.cli.broker_available", return_value=broker))
-        stack.enter_context(patch("cld.cli.find_target_repo", return_value=Path("/host/myrepo")))
-        return stack.enter_context(patch("cld.cli.broker_task_agent_op", return_value=0))
-
-    def test_start_forwards_rebuilt_argv(self, tmp_path, monkeypatch):
-        with ExitStack() as stack:
-            op = self._in_master(stack, tmp_path, monkeypatch)
-            result = runner.invoke(app, [
-                "task-agent", "start", "@implementer", "-n", "add-oauth", "-p", "do it",
-                "--branch", "oauth", "-m", "opus", "-r", "@-", "--peer", "cld_agent_x_y:3",
-            ])
-        assert result.exit_code == 0, result.output
-        target, verb, argv = op.call_args.args
-        assert (target, verb) == ("/host/myrepo", "start")
-        assert argv == [
-            "@implementer", "-n", "add-oauth", "-p", "do it", "--branch", "oauth",
-            "-m", "opus", "-r", "@-", "--peer", "cld_agent_x_y:3",
-        ]
-        assert "--parent" not in argv          # the broker sets it, host-side
-
-    def test_start_folds_a_task_file_into_the_prompt(self, tmp_path, monkeypatch):
-        task = tmp_path / "task.md"
-        task.write_text("# Do the thing\n\ndetails\n")
-        with ExitStack() as stack:
-            op = self._in_master(stack, tmp_path, monkeypatch)
-            result = runner.invoke(app, [
-                "task-agent", "start", "implementer", str(task), "-n", "s", "-p", "and this",
-            ])
-        assert result.exit_code == 0, result.output
-        argv = op.call_args.args[2]
-        assert str(task) not in argv          # a container path means nothing host-side
-        body = argv[argv.index("-p") + 1]
-        assert body.startswith("# Do the thing")
-        assert "## Additional Instructions" in body and body.endswith("and this")
-
-    def test_start_forwards_an_at_ref_verbatim(self, tmp_path, monkeypatch):
-        """The host must resolve it against the *target* repo, not master's own."""
-        with ExitStack() as stack:
-            op = self._in_master(stack, tmp_path, monkeypatch)
-            result = runner.invoke(app, [
-                "task-agent", "start", "implementer", "@some-task", "-n", "s",
-            ])
-        assert result.exit_code == 0, result.output
-        assert "@some-task" in op.call_args.args[2]
-
-    def test_status_and_logs_dispatch(self, tmp_path, monkeypatch):
-        with ExitStack() as stack:
-            op = self._in_master(stack, tmp_path, monkeypatch)
-            assert runner.invoke(app, ["task-agent", "status"]).exit_code == 0
-            assert op.call_args.args[1:] == ("status", [])
-            assert runner.invoke(app, ["task-agent", "logs", "slug", "-n", "20"]).exit_code == 0
-            assert op.call_args.args[1:] == ("logs", ["slug", "-n", "20"])
-
-    def test_shutdown_dispatches_name_and_all(self, tmp_path, monkeypatch):
-        with ExitStack() as stack:
-            op = self._in_master(stack, tmp_path, monkeypatch)
-            assert runner.invoke(app, ["task-agent", "shutdown", "slug"]).exit_code == 0
-            assert op.call_args.args[1:] == ("shutdown", ["slug"])
-            assert runner.invoke(app, ["task-agent", "shutdown", "--all"]).exit_code == 0
-            assert op.call_args.args[1:] == ("shutdown", ["--all"])
-
-    def test_shutdown_force_refused_locally_with_a_reason(self, tmp_path, monkeypatch):
-        with ExitStack() as stack:
-            op = self._in_master(stack, tmp_path, monkeypatch)
-            result = runner.invoke(app, ["task-agent", "shutdown", "slug", "--force"])
-        assert result.exit_code == 1
-        assert "host-only" in result.output
-        assert "wrap-up has not finished" in result.output
-        assert not op.called
-
-    def test_missing_broker_names_what_still_works(self, tmp_path, monkeypatch):
-        with ExitStack() as stack:
-            op = self._in_master(stack, tmp_path, monkeypatch, broker=False)
-            result = runner.invoke(app, ["task-agent", "shutdown", "slug"])
-        assert result.exit_code == 1
-        assert "host_broker_key" in result.output
-        assert "transcript" in result.output      # reading the fleet needs no broker
-        assert not op.called
-
-    def test_transcript_works_without_the_broker_or_docker(self, tmp_path, monkeypatch):
-        root = tmp_path / "mailboxes"
-        name = "cld_agent_myrepo_add-oauth"
-        d = _write_mailbox(root, name, meta=_meta())
-        (d / "archive" / "m1.json").write_text(json.dumps({
-            "id": "m1", "from": "cld_master_myrepo_ab12", "to": name,
-            "subject": "kick off", "body": "start here", "ts": "2026-08-12T10:00:00Z",
-        }))
-        with ExitStack() as stack:
-            op = self._in_master(stack, tmp_path, monkeypatch, broker=False)
-            docker = stack.enter_context(
-                patch("cld.cli.docker_task_agent_list", side_effect=AssertionError("asked docker")))
-            result = runner.invoke(app, ["task-agent", "transcript", "add-oauth"])
-        assert result.exit_code == 0, result.output
-        assert "kick off" in result.output
-        assert not op.called and not docker.called
 
 
 class TestTaskAgentRosterScoping:
@@ -1280,8 +1143,8 @@ class TestTaskAgentRosterScoping:
         _write_mailbox(root, "cld_agent_r_theirs", meta=_meta(parent="master-2"))
         agents = [_ta("cld_agent_r_mine", parent="master-1"),
                   _ta("cld_agent_r_theirs", parent="master-2")]
-        with patch("cld.cli.docker_task_agent_list", return_value=agents), \
-             patch("cld.cli.docker_task_agent_status", return_value="running"):
+        with patch("cld.task_agent.docker_task_agent_list", return_value=agents), \
+             patch("cld.task_agent.docker_task_agent_status", return_value="running"):
             result = runner.invoke(app, ["task-agent", "status", "--parent", "master-1"])
         assert result.exit_code == 0, result.output
         assert "cld_agent_r_mine" in result.output

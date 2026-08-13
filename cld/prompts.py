@@ -45,6 +45,31 @@ def find_prompt_matches(name: str, repo_root: Path, cld_root: Path) -> list[Path
     return matches
 
 
+def parse_description(path: Path) -> str:
+    """The `description:` field of a prompt's frontmatter, or "" when there is none."""
+    lines = path.read_text().splitlines()
+    if not lines or lines[0].strip() != "---":
+        return ""
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if line.startswith("description:"):
+            return line[len("description:"):].strip()
+    return ""
+
+
+def list_prompt_items(prompts_dir: Path) -> list[tuple[str, str]]:
+    """``(ref, description)`` for every prompt under *prompts_dir*, recursively.
+
+    The ref is the extension-less path relative to the tree, which is what an
+    `@<name>` argument accepts. Shared by the host and container `cld prompts`.
+    """
+    return [
+        (str(path.relative_to(prompts_dir).with_suffix("")), parse_description(path))
+        for path in sorted(prompts_dir.rglob("*.md"))
+    ]
+
+
 def resolve_prompt_ref(name: str, repo_root: Path, cld_root: Path) -> Path:
     """Resolve @<name> to a path.
 

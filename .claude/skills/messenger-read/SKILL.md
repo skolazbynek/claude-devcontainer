@@ -12,7 +12,7 @@ user-invocable: true
 The user must provide a message id (obtained from `messenger-inbox`). Run:
 
 ```bash
-python -m cld.messenger.read <id>
+cld msg read <id>
 ```
 
 Show the output verbatim. Does not archive the message.

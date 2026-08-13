@@ -6,14 +6,10 @@ from cld.messenger import mailbox
 from cld.messenger.identity import resolve_self
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(prog="python -m cld.messenger.inbox")
-    ap.add_argument("--all", action="store_true", help="Include archived messages")
-    args = ap.parse_args()
-
+def show(include_archived: bool = False) -> None:
     name, root = resolve_self()
     unread = mailbox.list_inbox(root, name, unread_only=True)
-    archived = mailbox.list_inbox(root, name, unread_only=False) if args.all else []
+    archived = mailbox.list_inbox(root, name, unread_only=False) if include_archived else []
 
     if not unread and not archived:
         print(f"(no messages for {name})")
@@ -31,6 +27,13 @@ def main() -> None:
 def _print_rows(rows: list[dict]) -> None:
     for m in rows:
         print(f"  {m['id']}  {m['ts']}  {m['from']:<30}  {m['subject']}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(prog="python -m cld.messenger.inbox")
+    ap.add_argument("--all", action="store_true", help="Include archived messages")
+    args = ap.parse_args()
+    show(args.all)
 
 
 if __name__ == "__main__":

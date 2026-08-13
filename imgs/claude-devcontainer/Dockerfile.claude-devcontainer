@@ -30,4 +30,13 @@ RUN chmod +x /workspace/container_run.sh && chown claude:claude /workspace/conta
 
 USER claude
 
+# `cld` inside a container is the container-side app (docs/design-cli-split.md), not
+# the host one: it needs no docker daemon and only carries verbs that work here. A
+# shim rather than a console script -- the package is COPY'd into /opt/cld with
+# PYTHONPATH, never pip-installed, so there is nothing to generate an entry point.
+# -P keeps cwd off sys.path, so a repo that happens to contain a `cld/` package
+# (this one) cannot shadow the baked copy.
+RUN printf '#!/bin/sh\nexec python3 -P -m cld.cli_container "$@"\n' > /home/claude/.local/bin/cld \
+    && chmod +x /home/claude/.local/bin/cld
+
 ENTRYPOINT ["/workspace/container_run.sh"]

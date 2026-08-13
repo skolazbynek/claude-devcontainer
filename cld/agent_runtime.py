@@ -1,5 +1,6 @@
 """Shared agent-lifecycle helpers (wait, cost, formatting)."""
 
+import calendar
 import json
 import subprocess
 import time
@@ -71,3 +72,21 @@ def read_agent_cost(session: str, vcs: VcsBackend) -> float | None:
 def format_duration(seconds: float) -> str:
     m, s = divmod(int(seconds), 60)
     return f"{m}m{s:02d}s"
+
+
+def format_age(iso_ts: str) -> str:
+    try:
+        # Mailbox timestamps carry microseconds; chain state's don't.
+        whole = iso_ts.split(".", 1)[0].rstrip("Z") + "Z"
+        t = time.strptime(whole, "%Y-%m-%dT%H:%M:%SZ")
+        then = calendar.timegm(t)
+        secs = int(time.time()) - then
+    except Exception:
+        return iso_ts
+    if secs < 60:
+        return f"{secs}s ago"
+    if secs < 3600:
+        return f"{secs // 60}m ago"
+    if secs < 86400:
+        return f"{secs // 3600}h ago"
+    return f"{secs // 86400}d ago"

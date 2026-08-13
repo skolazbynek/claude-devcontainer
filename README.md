@@ -198,7 +198,9 @@ The repo agent has one persistent Claude session that survives across messages -
 
 ```
 cld/                               Python package (CLI + shared logic)
-  cli.py                           typer app with all subcommands
+  cli.py                           host typer app (all docker-daemon verbs)
+  cli_container.py                 container typer app, shipped as `cld` in the image
+  task_agent.py                    task-agent helpers shared by both apps
   docker.py                        container arg building, image management, path translation
   run.py                           one-shot run launch logic (`cld run`)
   chain.py                         declarative multi-agent chain runner
@@ -248,7 +250,7 @@ cld agent status
 cld agent shutdown
 ```
 
-Master itself has no filesystem view of the target repo -- only a placeholder directory so `cd` works. `cld agent` in master resolves that placeholder to the target's host path and hands it to the host broker, which runs host-side `cld agent` for RepoB (validated against master's `org.cld.targets` label). The peer container it launches gets RW at `/workspace/origin`, does its own anchor staging on boot, and forgets its bookmark on SIGTERM so master never writes to RepoB. `cld master repos` inside master's shell lists what it can target.
+Master itself has no filesystem view of the target repo -- only a placeholder directory so `cd` works. `cld agent` in master resolves that placeholder to the target's host path and hands it to the host broker, which runs host-side `cld agent` for RepoB (validated against master's `org.cld.targets` label). The peer container it launches gets RW at `/workspace/origin`, does its own anchor staging on boot, and forgets its bookmark on SIGTERM so master never writes to RepoB. `cld repos` inside master's shell lists what it can target.
 
 ### Workspace isolation
 

@@ -17,7 +17,7 @@ Compose a message from the user's intent and deliver it.
 If the user did not name a recipient, list available targets:
 
 ```bash
-python -m cld.messenger.agents
+cld msg agents
 ```
 
 The recipient is the container `name` (or its repo basename as a shortname).
@@ -57,7 +57,7 @@ BODY_FILE="$(mktemp -t messenger-send-body.XXXXXX.md)"
 cat > "$BODY_FILE" <<'EOF'
 <the drafted body verbatim>
 EOF
-python -m cld.messenger.send --to <recipient> --subject "<subject>" --body-file "$BODY_FILE" \
+cld msg send --to <recipient> --subject "<subject>" --body-file "$BODY_FILE" \
     [--expects-reply] [--answers <id>]
 rm -f "$BODY_FILE"
 ```

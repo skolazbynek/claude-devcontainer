@@ -13,13 +13,13 @@ user-invocable: true
 Run:
 
 ```bash
-python -m cld.messenger.inbox
+cld msg inbox
 ```
 
 Add `--all` to include the archive as well:
 
 ```bash
-python -m cld.messenger.inbox --all
+cld msg inbox --all
 ```
 
 Show the output verbatim. Each row is `<id>  <ts>  <from>  <subject>`. The ids
