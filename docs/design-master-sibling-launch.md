@@ -15,6 +15,12 @@
 > section. The cwd→target resolution, `master_targets` placeholders, and
 > `cld master repos` below are unchanged; only the launch *mechanism* moved
 > from socket to broker.
+>
+> **Superseding design (not yet implemented):** the cwd→target resolution and
+> the placeholder directories are replaced by an explicit `--repo <name|path>`
+> in `docs/design-master-target-selection.md`, which also documents where the
+> "container-path == host-path" claim below is wrong (placeholders are mirrored
+> under the container `$HOME`).
 
 ## Goal
 
