@@ -31,3 +31,13 @@ skill that said `cld task-agent …` was broken). Shared task-agent helpers move
 All commands accepting personas / task-files should change and unify their interface. They should accept an arbitrary (maybe limited) number of task-files/personas and a single positional argument (task description). The task-files are interchangeable with personas. The task-files can be specified either by a file path or by the @<taskfile> notation that works the same way as now: get's the respective file from the `cld/prompts` directory. The task-files are appended one after another in the order they were specified.
 Example of my vision: `cld run @personas/architect @personas/agent ./tasks/task_description.md -p "When finished, reply to the master"`.
 The goal is to provide a unified prompt interface for CLI commands that allows chaining multiple prepared prompts together.
+
+**Done.** Design: `docs/design-prompt-chaining.md`. One resolver
+(`cld.prompts.resolve_prompt_arg` -> `(path, kind)`, `@<path-under-prompts>` or a real
+path, containment-checked), one composition (`compose_brief`: refs in argument order,
+then `-p` verbatim, no invented headers), one channel into the container (the anchor
+scratch envelope -> `.cld-run/brief.md`, replacing the `/config/{persona,task}.md`
+mounts, `AGENT_INLINE_PROMPT`, `AGENT_SYSTEM_PROMPT_FILE` and `INSTRUCTION_FILE`).
+Applies to bare `cld`, `cld run`, `cld master`, `cld task-agent start`, `cld chain run`
+and chain steps (`persona:` -> `prompts: [...]`). The broker now requires every
+positional to be an `@ref`; the container client folds its own local files into `-p`.

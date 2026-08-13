@@ -6,11 +6,10 @@ defaults:
 
 steps:
   - name: design
-    persona: architect
-
+    prompts: ["@personas/architect"]
   - name: implement
-    persona: implementer
+    prompts: ["@personas/implementer"]
     model: opus
 
   - name: review
-    persona: reviewer
+    prompts: ["@personas/reviewer"]

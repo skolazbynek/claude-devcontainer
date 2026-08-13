@@ -15,7 +15,6 @@ from cld.docker import (
     in_master_container,
     require_docker,
     run_extra_paths,
-    to_host_path,
 )
 from cld.log import get_logger
 
@@ -24,23 +23,25 @@ log = get_logger(__name__)
 
 def launch_run(
     cfg: Config,
-    task_file: Path | None = None,
-    inline_prompt: str | None = None,
+    brief: str,
     name: str = "",
     model: str = "",
     revision: str = "",
     session_name: str | None = None,
     quiet: bool = False,
     *,
-    system_prompt_file: Path | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> dict:
     """Launch a one-shot autonomous Claude agent in a Docker container.
 
+    *brief* is the already-composed prompt (see ``cld.prompts.compose_brief``); it
+    ships inside the anchor scratch envelope and the entrypoint reads it from
+    ``.cld-run/brief.md``.
+
     The container entrypoint stages anchor B inside its own ephemeral workspace
-    after ``jj workspace add -r <A>``; ``anchor_env_args`` only carries the
-    resolved base revision + scratch envelope. The final ``AGENT_ANCHOR_HASH``
-    (== B) is computed peer-side and surfaces in the agent's ``summary.json``.
+    after ``jj workspace add -r <A>``; ``anchor_env_args`` carries the resolved base
+    revision + that envelope. The final ``AGENT_ANCHOR_HASH`` (== B) is computed
+    peer-side and surfaces in the agent's ``summary.json``.
     """
     if in_master_container():
         log.error(
@@ -50,8 +51,8 @@ def launch_run(
         )
         sys.exit(1)
     require_docker()
-    if not task_file and not inline_prompt:
-        log.error("No task file or prompt provided")
+    if not brief.strip():
+        log.error("No prompt refs or inline prompt provided")
         sys.exit(1)
 
     repo_root = find_target_repo(cfg)
@@ -75,28 +76,18 @@ def launch_run(
 
     args = ["--name", session]
     args += build_container_args(repo_root, session, cfg)
-    args += anchor_env_args(cfg, session, revision)
-    if task_file:
-        host_task = to_host_path(str(task_file.resolve()), cfg)
-        args += ["-v", f"{host_task}:/config/task.md:ro"]
-    if inline_prompt:
-        args += ["-e", f"AGENT_INLINE_PROMPT={inline_prompt}"]
+    # The brief travels in the anchor scratch envelope (-> .cld-run/brief.md); no
+    # prompt mounts, no host temp file to outlive this detached launch.
+    args += anchor_env_args(cfg, session, revision, brief=brief)
     if model:
         args += ["-e", f"AGENT_MODEL={model}"]
-    if system_prompt_file:
-        host_prompt = to_host_path(str(system_prompt_file.resolve()), cfg)
-        args += ["-v", f"{host_prompt}:/config/persona.md:ro"]
-        args += ["-e", "AGENT_SYSTEM_PROMPT_FILE=/config/persona.md"]
     if extra_env:
         for k, v in extra_env.items():
             args += ["-e", f"{k}={v}"]
 
     if not quiet:
         log.info("Starting agent in background...")
-        if task_file:
-            log.info(f"Task file: {task_file}")
-        if inline_prompt:
-            log.info("Inline prompt: provided")
+        log.info("Brief: %d chars", len(brief))
         log.info(f"Repository: {repo_root}")
         print()
 

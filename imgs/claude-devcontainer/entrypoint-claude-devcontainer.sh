@@ -143,15 +143,11 @@ fi
 printf '#!/bin/bash\nexec %s %s "$@"\n' "$CLAUDE_BIN" "$CLAUDE_EXTRA_ARGS" > /tmp/bin/claude
 chmod +x /tmp/bin/claude
 
-TASK_FILE_MOUNT="/config/task.md"
+# The launcher composed the prompt refs and -p into one brief and shipped it in the
+# anchor scratch, so it is committed in anchor B (docs/design-prompt-chaining.md).
+BRIEF_FILE="$WORKSPACE_CURRENT/.cld-run/brief.md"
 COMPOSED_PROMPT=""
-if [ -n "$AGENT_INLINE_PROMPT" ] && [ -f "$TASK_FILE_MOUNT" ]; then
-    COMPOSED_PROMPT="$(cat "$TASK_FILE_MOUNT")"$'\n\n## Additional Instructions\n\n'"$AGENT_INLINE_PROMPT"
-elif [ -n "$AGENT_INLINE_PROMPT" ]; then
-    COMPOSED_PROMPT="$AGENT_INLINE_PROMPT"
-elif [ -f "$TASK_FILE_MOUNT" ]; then
-    COMPOSED_PROMPT="$(cat "$TASK_FILE_MOUNT")"
-fi
+[ -f "$BRIEF_FILE" ] && COMPOSED_PROMPT="$(cat "$BRIEF_FILE")"
 
 if [ -n "${MASTER_MODE:-}" ]; then
     # Materialize registered sibling targets as empty placeholder directories

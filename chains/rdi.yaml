@@ -6,15 +6,15 @@ defaults:
 
 steps:
   - name: research
-    persona: researcher
+    prompts: ["@personas/researcher"]
     model: opus
     prompt: |
       You're acting as an independent research agent. You never interact with an user. Ignore all mentions of 'user interactions' in the prompt below, including (but not limited to) asking questions and brainstorming. Instead, output your research into the output file for the next agent in the chain.
   
   - name: design
-    persona: architect
+    prompts: ["@personas/architect"]
     model: opus
 
   - name: implement
-    persona: implementer
+    prompts: ["@personas/implementer"]
     model: sonnet

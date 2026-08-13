@@ -6,7 +6,6 @@ defaults:
 
 steps:
   - name: review
-    persona: reviewer
-
+    prompts: ["@personas/reviewer"]
   - name: implement
-    persona: implementer
+    prompts: ["@personas/implementer"]

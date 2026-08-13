@@ -59,7 +59,7 @@ class TestLoadValidate:
     def test_single_step_chain_parses_and_validates(self, tmp_path):
         f = _write_chain(
             tmp_path / "c.yaml", "demo",
-            "  - name: build\n    persona: implementer\n",
+            "  - name: build\n    prompts: ['@personas/implementer']\n",
         )
         chain = load_chain(f)
         assert chain.name == "demo"
@@ -72,8 +72,8 @@ class TestLoadValidate:
         f = _write_chain(
             tmp_path / "c.yaml", "demo",
             "  - parallel:\n"
-            "    - name: a\n      persona: implementer\n"
-            "    - name: b\n      persona: reviewer\n",
+            "    - name: a\n      prompts: ['@personas/implementer']\n"
+            "    - name: b\n      prompts: ['@personas/reviewer']\n",
         )
         chain = load_chain(f)
         validate_chain(chain, tmp_path, _CLD_ROOT)
@@ -85,7 +85,7 @@ class TestNameOverride:
     def test_apply_name_override_replaces_name(self, tmp_path):
         f = _write_chain(
             tmp_path / "c.yaml", "demo",
-            "  - name: build\n    persona: implementer\n",
+            "  - name: build\n    prompts: ['@personas/implementer']\n",
         )
         chain = load_chain(f)
         overridden = apply_name_override(chain, "myrun")
@@ -95,7 +95,7 @@ class TestNameOverride:
     def test_apply_name_override_empty_is_noop(self, tmp_path):
         f = _write_chain(
             tmp_path / "c.yaml", "demo",
-            "  - name: build\n    persona: implementer\n",
+            "  - name: build\n    prompts: ['@personas/implementer']\n",
         )
         chain = load_chain(f)
         assert apply_name_override(chain, "").name == "demo"
@@ -103,7 +103,7 @@ class TestNameOverride:
     def test_apply_name_override_rejects_bad_chars(self, tmp_path):
         f = _write_chain(
             tmp_path / "c.yaml", "demo",
-            "  - name: build\n    persona: implementer\n",
+            "  - name: build\n    prompts: ['@personas/implementer']\n",
         )
         chain = load_chain(f)
         with pytest.raises(ValueError):
@@ -116,10 +116,10 @@ class TestNameOverride:
         la_mock = _install_chain_mocks(monkeypatch, vcs, [{"status": "success"}])
         f = _write_chain(
             vcs.repo_root / "c.yaml", "demo",
-            "  - name: build\n    persona: implementer\n",
+            "  - name: build\n    prompts: ['@personas/implementer']\n",
         )
 
-        def fake(cfg, *, revision="", session_name=None, **kw):
+        def fake(cfg, brief="", *, revision="", session_name=None, **kw):
             _make_fake_agent_commit(
                 vcs, revision, session_name,
                 {"chain-outputs/myrun/build.md": "X\n"},
@@ -127,7 +127,7 @@ class TestNameOverride:
             return {"session_name": session_name}
 
         la_mock.side_effect = fake
-        result = run_chain(Config(), f, inline_prompt="x", name_suffix="myrun")
+        result = run_chain(Config(), f, initial_task="x", name_suffix="myrun")
         assert result.chain_name == "myrun"
         assert result.chain_branch == "chain_myrun"
         session_used = la_mock.call_args.kwargs["session_name"]
@@ -146,10 +146,10 @@ class TestRunChain:
 
         f = _write_chain(
             vcs.repo_root / "c.yaml", "t",
-            "  - name: build\n    persona: implementer\n",
+            "  - name: build\n    prompts: ['@personas/implementer']\n",
         )
 
-        def fake(cfg, *, revision="", session_name=None, **kw):
+        def fake(cfg, brief="", *, revision="", session_name=None, **kw):
             _make_fake_agent_commit(
                 vcs, revision, session_name,
                 {"chain-outputs/t/build.md": "BUILD_OUTPUT\n"},
@@ -158,7 +158,7 @@ class TestRunChain:
 
         la_mock.side_effect = fake
 
-        result = run_chain(Config(), f, inline_prompt="do it")
+        result = run_chain(Config(), f, initial_task="do it")
 
         assert result.success
         assert la_mock.call_count == 1
@@ -181,25 +181,25 @@ class TestRunChain:
 
         f = _write_chain(
             vcs.repo_root / "c.yaml", "t",
-            "  - name: first\n    persona: implementer\n"
-            "  - name: second\n    persona: reviewer\n",
+            "  - name: first\n    prompts: ['@personas/implementer']\n"
+            "  - name: second\n    prompts: ['@personas/reviewer']\n",
         )
 
         captured = {}
 
-        def fake(cfg, *, revision="", session_name=None, task_file=None, **kw):
+        def fake(cfg, brief="", *, revision="", session_name=None, **kw):
             files = {}
             if session_name.endswith("_first"):
                 files = {"chain-outputs/t/first.md": "FIRST_OUTPUT\n"}
             elif session_name.endswith("_second"):
-                captured["task"] = Path(task_file).read_text()
+                captured["task"] = brief
                 files = {"chain-outputs/t/second.md": "SECOND_OUTPUT\n"}
             _make_fake_agent_commit(vcs, revision, session_name, files)
             return {"session_name": session_name}
 
         la_mock.side_effect = fake
 
-        result = run_chain(Config(), f, inline_prompt="do it")
+        result = run_chain(Config(), f, initial_task="do it")
 
         assert result.success
         assert la_mock.call_count == 2
@@ -213,17 +213,17 @@ class TestRunChain:
 
         f = _write_chain(
             vcs.repo_root / "c.yaml", "t",
-            "  - name: build\n    persona: implementer\n"
-            "  - name: never\n    persona: reviewer\n",
+            "  - name: build\n    prompts: ['@personas/implementer']\n"
+            "  - name: never\n    prompts: ['@personas/reviewer']\n",
         )
 
-        def fake(cfg, *, revision="", session_name=None, **kw):
+        def fake(cfg, brief="", *, revision="", session_name=None, **kw):
             _make_fake_agent_commit(vcs, revision, session_name, {"x.md": "partial\n"})
             return {"session_name": session_name}
 
         la_mock.side_effect = fake
 
-        result = run_chain(Config(), f, inline_prompt="do it")
+        result = run_chain(Config(), f, initial_task="do it")
 
         assert not result.success
         assert la_mock.call_count == 1
@@ -240,7 +240,7 @@ class TestChainRunDetached:
 
         f = _write_chain(
             vcs.repo_root / "c.yaml", "demo",
-            "  - name: build\n    persona: implementer\n",
+            "  - name: build\n    prompts: ['@personas/implementer']\n",
         )
 
         spawn = MagicMock(return_value=44321)
@@ -269,7 +269,7 @@ class TestChainRunDetached:
         anchor = resolve_anchor(vcs, "")
         f = _write_chain(
             vcs.repo_root / "c.yaml", "demo",
-            "  - name: build\n    persona: implementer\n",
+            "  - name: build\n    prompts: ['@personas/implementer']\n",
         )
         state_dir = vcs.repo_root / ".cld" / "chains" / "chain_demo"
         state_dir.mkdir(parents=True)
@@ -281,7 +281,7 @@ class TestChainRunDetached:
 
         la_mock = _install_chain_mocks(monkeypatch, vcs, [{"status": "success"}])
 
-        def fake(cfg, *, revision="", session_name=None, **kw):
+        def fake(cfg, brief="", *, revision="", session_name=None, **kw):
             _make_fake_agent_commit(
                 vcs, revision, session_name,
                 {"chain-outputs/demo/build.md": "OUT\n"},
@@ -309,7 +309,7 @@ class TestChainRunDetached:
         monkeypatch.chdir(vcs.repo_root)
         f = _write_chain(
             vcs.repo_root / "c.yaml", "demo",
-            "  - name: build\n    persona: implementer\n",
+            "  - name: build\n    prompts: ['@personas/implementer']\n",
         )
         state_dir = vcs.repo_root / ".cld" / "chains" / "chain_demo"
         state_dir.mkdir(parents=True)

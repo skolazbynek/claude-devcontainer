@@ -7,14 +7,13 @@ defaults:
 steps:
   - parallel:
     - name: researcher-1
-      persona: researcher
+      prompts: ["@personas/researcher"]
     - name: researcher-2
-      persona: researcher
+      prompts: ["@personas/researcher"]
     - name: researcher-3
-      persona: researcher
-
+      prompts: ["@personas/researcher"]
   - name: combinator
-    persona: reviewer
+    prompts: ["@personas/reviewer"]
     model: sonnet
     prompt: |
       Three prior researchers produced findings. Your job is to review them and consolidate them for a review by a human.

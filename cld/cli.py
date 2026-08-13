@@ -46,7 +46,7 @@ from cld.agent_runtime import format_age
 from cld.messenger import mailbox
 from cld.run import launch_run
 from cld.log import get_logger, setup_logging
-from cld.prompts import list_prompt_items, persona_resolve, resolve_prompt_ref
+from cld.prompts import compose_brief, list_prompt_items, resolve_prompt_args
 from cld.task_agent import (
     format_peers,
     known_task_agent_names,
@@ -124,71 +124,67 @@ def main(
     _reject_in_container()
     if ctx.invoked_subcommand is not None:
         return
-    remaining = list(ctx.args)
-    task_file = remaining[0] if remaining else None
-    extra_args = remaining[1:] if len(remaining) > 1 else None
-    _run_devcontainer(task_file, name, model, revision, prompt, extra_args)
+    # Positionals are prompt refs until the first one that is neither an @ref nor an
+    # existing file; the rest are passed through to the container's claude invocation.
+    refs, extra_args = _split_prompt_refs(list(ctx.args))
+    _run_devcontainer(refs, name, model, revision, prompt, extra_args)
 
 
 @app.command()
 @_handle_errors
 def run(
-    task_file: Optional[str] = typer.Argument(None, help="Path to task markdown file, or @<name> to resolve from prompts/"),
+    refs: Optional[list[str]] = typer.Argument(None, help="Prompt refs in order: @<ref> from prompts/, or a file path"),
     name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
     model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
     revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change -- @ for jj, HEAD for git)"),
-    prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (appended to task file if both given)"),
+    prompt: str = typer.Option("", "-p", "--prompt", help="Inline task description, appended after the refs"),
 ):
     """Launch a one-shot autonomous Claude agent (headless, --rm, commits to a branch)."""
     cld_root = Path(__file__).resolve().parent.parent
-    task_path = _resolve_task_file(task_file, find_repo_root(), cld_root)
-
-    if not task_path and not prompt:
-        typer.echo("Error: Provide a task file, --prompt, or both", err=True)
-        raise typer.Exit(1)
+    brief = _compose_from_args(refs or [], prompt, find_repo_root(), cld_root)
 
     cfg = Config.from_env()
     setup_logging(cfg)
     log.info(
-        "run: name=%s, model=%s, revision=%s, task_file=%s, prompt=%s",
+        "run: name=%s, model=%s, revision=%s, refs=%s, prompt=%s",
         name or "<auto>",
         model or "<default>",
         revision or "<default>",
-        str(task_path) if task_path else "<none>",
+        ", ".join(refs or []) or "<none>",
         "<provided>" if prompt else "<none>",
     )
 
-    launch_run(
-        cfg,
-        task_file=task_path,
-        inline_prompt=prompt or None,
-        name=name,
-        model=model,
-        revision=revision,
-    )
+    launch_run(cfg, brief, name=name, model=model, revision=revision)
 
 
-def _resolve_task_file(task_file: str | None, repo_root: Path, cld_root: Path) -> Path | None:
-    """Resolve a task-file argument: a path, or ``@<name>`` from the prompts/ trees."""
-    if not task_file:
-        return None
-    if task_file.startswith("@"):
-        try:
-            task_path = resolve_prompt_ref(task_file[1:], repo_root, cld_root)
-        except (FileNotFoundError, ValueError) as e:
-            typer.echo(f"Error: {e}", err=True)
-            raise typer.Exit(1)
-        log.info("resolved @%s -> %s", task_file[1:], task_path)
-        return task_path
-    task_path = Path(task_file)
-    if not task_path.is_file():
-        typer.echo(f"Error: Task file not found: {task_file}", err=True)
+def _split_prompt_refs(args: list[str]) -> tuple[list[str], list[str] | None]:
+    """Split leading prompt refs from trailing pass-through args (bare `cld` only)."""
+    refs: list[str] = []
+    for i, arg in enumerate(args):
+        if arg.startswith("@") or Path(arg).is_file():
+            refs.append(arg)
+        else:
+            return refs, args[i:]
+    return refs, None
+
+
+def _compose_from_args(refs: list[str], prompt: str, repo_root: Path, cld_root: Path) -> str:
+    """Resolve refs and compose the brief, turning input errors into clean exits."""
+    try:
+        resolved = resolve_prompt_args(refs, repo_root, cld_root)
+    except (FileNotFoundError, ValueError) as e:
+        typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1)
-    return task_path
+    for path, kind in resolved:
+        log.info("prompt %s: %s", kind, path)
+    if not resolved and not prompt:
+        typer.echo("Error: Provide at least one prompt ref, --prompt, or both", err=True)
+        raise typer.Exit(1)
+    return compose_brief([p for p, _ in resolved], prompt)
 
 
 def _run_devcontainer(
-    task_file: str | None,
+    refs: list[str],
     name: str,
     model: str,
     revision: str,
@@ -197,19 +193,15 @@ def _run_devcontainer(
 ) -> None:
     """Ephemeral interactive devcontainer launch. Persistent master/agent live in their own sub-apps."""
     require_docker()
-    task_path = Path(task_file) if task_file else None
-    if task_path and not task_path.is_file():
-        typer.echo(f"Error: Task file not found: {task_file}", err=True)
-        raise typer.Exit(1)
     cfg = Config.from_env()
     setup_logging(cfg)
 
     log.info(
-        "devcontainer: name=%s, model=%s, revision=%s, task_file=%s, prompt=%s",
+        "devcontainer: name=%s, model=%s, revision=%s, refs=%s, prompt=%s",
         name or "<auto>",
         model or "<default>",
         revision or "<default>",
-        str(task_path) if task_path else "<none>",
+        ", ".join(refs) or "<none>",
         "<provided>" if prompt else "<none>",
     )
 
@@ -230,13 +222,10 @@ def _run_devcontainer(
     session = build_session_name("cld", name)
     repo_root = find_target_repo(cfg)
 
+    brief = _compose_from_args(refs, prompt, repo_root, cld_root) if (refs or prompt) else ""
+
     args = build_container_args(repo_root, session, cfg, interactive=True)
-    args += anchor_env_args(cfg, session, revision)
-    if task_path:
-        host_task = to_host_path(str(task_path.resolve()), cfg)
-        args += ["-v", f"{host_task}:/config/task.md:ro"]
-    if prompt:
-        args += ["-e", f"AGENT_INLINE_PROMPT={prompt}"]
+    args += anchor_env_args(cfg, session, revision, brief=brief)
     if model:
         args += ["-e", f"AGENT_MODEL={model}"]
 
@@ -290,11 +279,10 @@ _READY_SENTINEL = {"master": "/tmp/cld-master-ready", "agent": "/tmp/cld-agent-r
 
 def _run_persistent_devcontainer(
     role: str,
-    task_path: Path | None,
+    brief: str,
     name: str,
     model: str,
     revision: str,
-    prompt: str,
     cfg: Config,
 ) -> None:
     """Master/agent-mode devcontainer: start-or-attach the one persistent container per repo.
@@ -323,9 +311,9 @@ def _run_persistent_devcontainer(
     log.info("%s devcontainer: name=%s, status=%s", role, session, status)
 
     if status in ("running", "stopped"):
-        if prompt or task_path:
+        if brief:
             typer.echo(
-                f"Error: --{role} re-attach: -p/--prompt and task_file cannot be used "
+                f"Error: --{role} re-attach: prompt refs and -p/--prompt cannot be used "
                 "when the container already exists (prompt was consumed at first launch)",
                 err=True,
             )
@@ -353,12 +341,7 @@ def _run_persistent_devcontainer(
         repo_root, session, cfg, interactive=False,
         master=(role == "master"), agent=(role == "agent"),
     )
-    args += anchor_env_args(cfg, session, revision)
-    if task_path:
-        host_task = to_host_path(str(task_path.resolve()), cfg)
-        args += ["-v", f"{host_task}:/config/task.md:ro"]
-    if prompt:
-        args += ["-e", f"AGENT_INLINE_PROMPT={prompt}"]
+    args += anchor_env_args(cfg, session, revision, brief=brief)
     if model:
         args += ["-e", f"AGENT_MODEL={model}"]
 
@@ -435,7 +418,7 @@ def _do_restart(role: str) -> None:
     # Bypasses _shutdown_persistent_container so the session bookmark
     # survives; the container entrypoint reattaches at its tip.
     _stop_and_remove_container(container_name, restart=True)
-    _run_persistent_devcontainer(role, None, "", "", "", "", cfg)
+    _run_persistent_devcontainer(role, "", "", "", "", cfg)
 
 
 def _do_status(role: str) -> None:
@@ -513,15 +496,12 @@ def master(
     """Start (or attach to) the persistent master devcontainer for this repo."""
     if ctx.invoked_subcommand is not None:
         return
-    remaining = list(ctx.args)
-    task_file = remaining[0] if remaining else None
-    task_path = Path(task_file) if task_file else None
-    if task_path and not task_path.is_file():
-        typer.echo(f"Error: Task file not found: {task_file}", err=True)
-        raise typer.Exit(1)
     cfg = Config.from_env()
     setup_logging(cfg)
-    _run_persistent_devcontainer("master", task_path, "", model, revision, prompt, cfg)
+    refs, _ = _split_prompt_refs(list(ctx.args))
+    cld_root = Path(__file__).resolve().parent.parent
+    brief = _compose_from_args(refs, prompt, find_repo_root(), cld_root) if (refs or prompt) else ""
+    _run_persistent_devcontainer("master", brief, "", model, revision, cfg)
 
 
 @master_app.command("restart")
@@ -576,7 +556,7 @@ def agent(
         return
     cfg = Config.from_env()
     setup_logging(cfg)
-    _run_persistent_devcontainer("agent", None, "", model, revision, "", cfg)
+    _run_persistent_devcontainer("agent", "", "", model, revision, cfg)
 
 
 @agent_app.command("restart")
@@ -705,10 +685,9 @@ _REAP_WAIT_SECONDS = 10
 @task_agent_app.command("start")
 @_handle_errors
 def task_agent_start(
-    persona: str = typer.Argument(..., help="Persona ref, e.g. @implementer (resolved like chain personas)"),
-    task_file: Optional[str] = typer.Argument(None, help="Task markdown file, or @<name> to resolve from prompts/"),
+    refs: Optional[list[str]] = typer.Argument(None, help="Prompt refs in order: @<ref> from prompts/ (e.g. @personas/implementer), or a file path"),
     name: str = typer.Option("", "-n", "--name", help="Task slug, kebab-case (default: --branch)"),
-    prompt: str = typer.Option("", "-p", "--prompt", help="Inline task text (appended to the task file if both given)"),
+    prompt: str = typer.Option("", "-p", "--prompt", help="Inline task description, appended after the refs"),
     branch: str = typer.Option("", "--branch", help="Deliverable branch name (default: the task slug)"),
     model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
     revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change)"),
@@ -722,12 +701,11 @@ def task_agent_start(
 
     cld_root = Path(__file__).resolve().parent.parent
     repo_root = find_target_repo(cfg)
-    task_path = _resolve_task_file(task_file, repo_root, cld_root)
-    if not task_path and not prompt:
-        typer.echo("Error: Provide a task file, --prompt, or both", err=True)
-        raise typer.Exit(1)
-
-    persona_path = persona_resolve(persona.lstrip("@"), repo_root, cld_root)
+    resolved = resolve_prompt_args(refs or [], repo_root, cld_root)
+    brief = _compose_from_args(refs or [], prompt, repo_root, cld_root)
+    # Display only: the roster's Persona column and the launch banner. A task-agent with
+    # no persona ref is coherent -- the lifecycle preamble is always layered in.
+    role = next((p.stem for p, kind in resolved if kind == "persona"), "")
     slug = name or branch
     if not slug:
         typer.echo(
@@ -775,7 +753,7 @@ def task_agent_start(
 
     log.info(
         "task-agent: name=%s, task=%s, persona=%s, branch=%s, anchor=%s, peers=%s, parent=%s",
-        session, slug, persona_path.stem, branch, anchor[:12],
+        session, slug, role or "<none>", branch, anchor[:12],
         ",".join(f"{p}:{h}" for p, h in sorted(peers.items())) or "none",
         parent or "<none>",
     )
@@ -787,19 +765,9 @@ def task_agent_start(
         ),
     )
     # The already-resolved anchor, not `revision`: the launch must pin exactly the
-    # commit the live-stack refusal inspected.
-    args += anchor_env_args(cfg, session, anchor)
-    host_persona = to_host_path(str(persona_path.resolve()), cfg)
-    args += [
-        "-v", f"{host_persona}:/config/persona.md:ro",
-        "-e", "AGENT_PERSONA_FILE=/config/persona.md",
-        "-e", f"AGENT_PERSONA={persona_path.stem}",
-    ]
-    if task_path:
-        host_task = to_host_path(str(task_path.resolve()), cfg)
-        args += ["-v", f"{host_task}:/config/task.md:ro"]
-    if prompt:
-        args += ["-e", f"AGENT_INLINE_PROMPT={prompt}"]
+    # commit the live-stack refusal inspected. The brief rides in the same envelope.
+    args += anchor_env_args(cfg, session, anchor, brief=brief)
+    args += ["-e", f"AGENT_PERSONA={role}"]
     if model:
         args += ["-e", f"AGENT_MODEL={model}"]
 
@@ -833,7 +801,7 @@ def task_agent_start(
 
     typer.echo(f"Task-agent '{session}' started for {repo_root}.")
     typer.echo(f"  Task:       {slug}")
-    typer.echo(f"  Persona:    {persona_path.stem}")
+    typer.echo(f"  Persona:    {role or '-'}")
     typer.echo(f"  Branch:     {branch}")
     typer.echo(f"  Anchor:     {anchor[:12]}")
     typer.echo(f"  Peers:      {format_peers(peers)}")
@@ -1119,8 +1087,8 @@ app.add_typer(chain_app, name="chain")
 @_handle_errors
 def chain_run(
     chain_file: str = typer.Argument(..., help="Path to chain YAML file or @<name>"),
-    task_file: Optional[str] = typer.Argument(None, help="Initial task file"),
-    prompt: str = typer.Option("", "-p", "--prompt", help="Inline initial prompt"),
+    refs: Optional[list[str]] = typer.Argument(None, help="Prompt refs for the initial task, in order: @<ref> or a file path"),
+    prompt: str = typer.Option("", "-p", "--prompt", help="Inline initial task description, appended after the refs"),
     name: str = typer.Option("", "-n", "--name", help="Chain session name suffix"),
     model: str = typer.Option("", "-m", "--model", help="Override default model"),
     revision: str = typer.Option("", "-r", "--revision", help="Starting revision"),
@@ -1134,13 +1102,8 @@ def chain_run(
     if not chain_path.is_file():
         typer.echo(f"Error: chain file not found: {chain_file}", err=True)
         raise typer.Exit(1)
-    task_path = Path(task_file) if task_file else None
-    if task_path and not task_path.is_file():
-        typer.echo(f"Error: task file not found: {task_file}", err=True)
-        raise typer.Exit(1)
-    if not task_path and not prompt:
-        typer.echo("Error: provide a task file, --prompt, or both", err=True)
-        raise typer.Exit(1)
+    cld_root = Path(__file__).resolve().parent.parent
+    brief = _compose_from_args(refs or [], prompt, find_repo_root(), cld_root)
 
     cfg = Config.from_env()
     setup_logging(cfg)
@@ -1153,10 +1116,8 @@ def chain_run(
         if model:
             os.environ["CLD_CHAIN_DEFAULT_MODEL"] = model
             cfg = Config.from_env()
-        initial = task_path.read_text() if task_path else None
         result = run_chain(
-            cfg, chain_path,
-            initial_task=initial, inline_prompt=prompt or None,
+            cfg, chain_path, initial_task=brief,
             revision=revision, name_suffix=name,
         )
         print_chain_report(result, get_backend())
@@ -1201,8 +1162,7 @@ def chain_run(
         total_cost_usd=0.0,
         failure_reason="",
         inputs={
-            "task_file": str(task_path.resolve()) if task_path else "",
-            "inline_prompt": prompt,
+            "brief": brief,
             "revision": revision,
             "model": model,
             "name": name,
@@ -1259,22 +1219,11 @@ def _chain_runner(
         os.environ["CLD_CHAIN_DEFAULT_MODEL"] = model_override
         cfg = Config.from_env()
 
-    task_text: str | None = None
-    task_file_path = state.inputs.get("task_file", "")
-    if task_file_path:
-        try:
-            task_text = Path(task_file_path).read_text()
-        except OSError as e:
-            log.error("Could not read task file %s: %s", task_file_path, e)
-            writer.mark_finished("failed", reason=f"Cannot read task file: {e}")
-            raise typer.Exit(1)
-
     try:
         result = run_chain(
             cfg,
             Path(state.chain_file),
-            initial_task=task_text,
-            inline_prompt=state.inputs.get("inline_prompt") or None,
+            initial_task=state.inputs.get("brief", ""),
             revision=state.inputs.get("revision", ""),
             name_suffix=state.inputs.get("name", ""),
             state_writer=writer,

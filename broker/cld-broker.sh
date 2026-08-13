@@ -127,9 +127,11 @@ action_agent() {
 #             agent's edge (§7).
 #   --parent  denied from the caller and appended by us as the validated $session,
 #             so an agent's recorded owner is host-set and cannot be forged.
-#   persona   must be a bare name. It is resolved host-side and mounted into the new
-#             container, so a path would let a container read any host file the user
-#             can (cld.prompts.persona_resolve rejects it too; this is the boundary).
+#   prompts   every positional must be an `@ref`. Refs are resolved host-side and their
+#             text composed into the new container's brief, so a bare path would let a
+#             container read any host file the user can. The container-side client folds
+#             its own local files into `-p` instead (docs/design-prompt-chaining.md §4);
+#             cld.prompts contains the escape check for the refs themselves.
 action_task_agent() {
     local target="${1:-}" op="${2:-}"
     shift 2 2>/dev/null || { echo "denied: task-agent needs <target> <op>" >&2; exit 2; }
@@ -149,14 +151,20 @@ action_task_agent() {
         esac
     done
 
-    # start's first positional is the persona. Checked here and nowhere else in argv:
-    # task text legitimately contains slashes, so a blanket path check would deny
+    # start's positionals are prompt refs, and only `@refs` may cross: they name files
+    # in the *target repo's* prompts tree, which the host resolves. Option values are
+    # skipped -- task text legitimately contains slashes, so checking them would deny
     # ordinary work like -p "fix cld/cli.py".
     if [ "$op" = start ]; then
-        case "${1:-}" in
-            ""|-*)   echo "denied: task-agent start needs a persona name first" >&2; exit 2 ;;
-            */*|.*)  echo "denied: persona '$1' must be a bare name, not a path" >&2; exit 2 ;;
-        esac
+        local skip_value=0
+        for a in "$@"; do
+            if [ "$skip_value" = 1 ]; then skip_value=0; continue; fi
+            case "$a" in
+                -*)  skip_value=1 ;;
+                @*)  ;;
+                *)   echo "denied: prompt ref '$a' must be an @ref, not a path" >&2; exit 2 ;;
+            esac
+        done
     fi
 
     cd "$target" || { echo "cannot cd to $target" >&2; exit 3; }

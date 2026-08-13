@@ -35,7 +35,9 @@ log = get_logger(__name__)
 _DEFAULT_POLL_INTERVAL = 1.0
 _CLD_ROOT = Path("/opt/cld")
 _TASK_PREAMBLE = "task-agent"
-_TASK_FILE_MOUNT = Path("/config/task.md")
+# The launcher composes the brief host-side and ships it in the anchor scratch,
+# so it is committed in anchor B and readable here (docs/design-prompt-chaining.md).
+_BRIEF_FILE = Path("/workspace/current/.cld-run/brief.md")
 
 
 def _now_iso() -> str:
@@ -59,17 +61,13 @@ def _atomic_write_json(path: Path, data: dict) -> None:
     tmp.rename(path)
 
 
-def _compose_task_text() -> str:
-    """The concrete task, from the inline prompt and/or the mounted task file.
+def _read_brief() -> str:
+    """The brief the launcher composed, from the anchor scratch (docs/design-prompt-chaining.md).
 
-    Same convention the entrypoint uses for the other modes: file body first, then
-    the inline prompt under an "Additional Instructions" heading.
+    Composition is host-side now -- prompt refs in argument order, then the inline
+    description -- so this is a read, not a merge of two container-side slots.
     """
-    inline = os.environ.get("AGENT_INLINE_PROMPT", "").strip()
-    from_file = _TASK_FILE_MOUNT.read_text().strip() if _TASK_FILE_MOUNT.is_file() else ""
-    if from_file and inline:
-        return f"{from_file}\n\n## Additional Instructions\n\n{inline}"
-    return from_file or inline
+    return _BRIEF_FILE.read_text().strip() if _BRIEF_FILE.is_file() else ""
 
 
 @dataclass(frozen=True)
@@ -85,7 +83,6 @@ class TaskMode:
     deliverable_branch: str
     peers: dict[str, int]
     persona_name: str
-    persona_path: Path
     preamble_path: Path
     task_text: str
     anchor: str
@@ -107,31 +104,22 @@ class TaskMode:
             raise RuntimeError(
                 "AGENT_DELIVERABLE_BRANCH must be set in task mode -- wrap-up has no target without it"
             )
-        persona_file = os.environ.get("AGENT_PERSONA_FILE", "")
-        if not persona_file:
-            raise RuntimeError(
-                "AGENT_PERSONA_FILE must be set in task mode (the launcher resolves and mounts the persona)"
-            )
-        persona_path = Path(persona_file)
-        if not persona_path.is_file():
-            raise RuntimeError(f"persona file not found: {persona_path}")
         preamble_path = _CLD_ROOT / "prompts" / "personas" / f"{_TASK_PREAMBLE}.md"
         if not preamble_path.is_file():
             raise RuntimeError(
                 f"task-agent lifecycle preamble not found: {preamble_path} -- stale image, rebuild it"
             )
-        task_text = _compose_task_text()
+        task_text = _read_brief()
         if not task_text:
             raise RuntimeError(
-                "no task given: set AGENT_INLINE_PROMPT and/or mount a task file at /config/task.md"
+                f"no task given: the launcher writes the composed brief to {_BRIEF_FILE}"
             )
         return cls(
             slug=slug,
             parent_master=os.environ.get("AGENT_PARENT_MASTER", ""),
             deliverable_branch=branch,
             peers=parse_peers_env(os.environ.get("AGENT_PEERS", "")),
-            persona_name=os.environ.get("AGENT_PERSONA", "") or persona_path.stem,
-            persona_path=persona_path,
+            persona_name=os.environ.get("AGENT_PERSONA", ""),
             preamble_path=preamble_path,
             task_text=task_text,
             anchor=os.environ.get("AGENT_ANCHOR_HASH", ""),
@@ -152,11 +140,12 @@ def _format_peers(peers: dict[str, int]) -> str:
 def compose_kickoff(
     task: TaskMode, *, session_name: str, repo_root: Path, max_turns: int, root_ask_limit: int
 ) -> str:
-    """Layer the kickoff prompt: lifecycle preamble, chosen persona, then the task (§11).
+    """Layer the kickoff prompt: lifecycle preamble, then the brief (§11).
 
-    The two prompt layers are ours, so they get frontmatter stripped and their
-    placeholders substituted. The task text is the user's and is appended
-    **verbatim** -- a `$VAR` in a task description has to survive.
+    The preamble is ours, so it gets frontmatter stripped and its placeholders
+    substituted. The brief -- role personas included, since the launcher composed them
+    into it -- is the user's and is appended **verbatim**: a `$VAR` in a task
+    description has to survive.
     """
     values = {
         "REPO_BASENAME": task.repo_name or repo_root.name,
@@ -167,15 +156,12 @@ def compose_kickoff(
         "DELIVERABLE_BRANCH": task.deliverable_branch,
         "PARENT_MASTER": task.parent_master or "(none -- launched directly on the host)",
         "TASK_SLUG": task.slug,
-        "PERSONA": task.persona_name,
+        "PERSONA": task.persona_name or "(none)",
         "PEERS": _format_peers(task.peers),
         "ROOT_ASK_LIMIT": str(root_ask_limit),
     }
-    layers = [
-        Template(strip_frontmatter(path.read_text())).safe_substitute(values)
-        for path in (task.preamble_path, task.persona_path)
-    ]
-    return "\n\n".join([*layers, f"# Your task\n\n{task.task_text}"])
+    preamble = Template(strip_frontmatter(task.preamble_path.read_text())).safe_substitute(values)
+    return f"{preamble}\n\n# Your task\n\n{task.task_text}"
 
 
 class AgentSupervisor:
@@ -191,7 +177,7 @@ class AgentSupervisor:
         session_name: str,
         repo_root: Path,
         mailbox_root: Path,
-        persona_path: Path,
+        persona_path: Path | None,
         model: str = "sonnet",
         max_turns: int = 30,
         claude_bin: str = "claude",
@@ -435,7 +421,7 @@ def main() -> None:
             task.slug, task.persona_name, task.deliverable_branch,
             ",".join(sorted(task.peers)) or "none", task.parent_master or "none",
         )
-        persona_path = task.persona_path
+        persona_path = None
     else:
         persona_path = _CLD_ROOT / "prompts" / "personas" / f"{cfg.agent_kickoff_persona}.md"
         if not persona_path.is_file():

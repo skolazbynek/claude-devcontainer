@@ -7,12 +7,11 @@ defaults:
 steps:
   - parallel:
       - name: generic
-        persona: reviewer
+        prompts: ["@personas/reviewer"]
       - name: security
-        persona: security-reviewer
-
+        prompts: ["@personas/security-reviewer"]
   - name: synthesise
-    persona: reviewer
+    prompts: ["@personas/reviewer"]
     prompt: |
       Two prior reviewers produced findings. Combine them, deduplicate,
       and rank by severity. Drop anything that contradicts the user's

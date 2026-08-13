@@ -27,10 +27,10 @@ runner = CliRunner()
 
 
 class TestRunCommand:
-    def test_no_task_no_prompt_errors(self):
+    def test_no_refs_no_prompt_errors(self):
         result = runner.invoke(app, ["run"])
         assert result.exit_code == 1
-        assert "Provide a task file" in result.output
+        assert "at least one prompt ref" in result.output
 
     def test_missing_task_file_errors(self, tmp_path):
         result = runner.invoke(app, ["run", str(tmp_path / "nope.md")])
@@ -70,8 +70,8 @@ class TestRunAtNotation:
         assert "not found" in result.output
 
     def test_at_notation_ambiguous_name_errors(self, tmp_path):
-        (tmp_path / "prompts").mkdir(parents=True)
-        (tmp_path / "prompts" / "test-xdup-zz9.md").write_text("a")
+        (tmp_path / "prompts" / "tasks").mkdir(parents=True)
+        (tmp_path / "prompts" / "tasks" / "test-xdup-zz9.md").write_text("a")
         (tmp_path / "prompts" / "personas").mkdir()
         (tmp_path / "prompts" / "personas" / "test-xdup-zz9.md").write_text("b")
         with patch("cld.cli.find_repo_root", return_value=tmp_path):
@@ -79,28 +79,26 @@ class TestRunAtNotation:
         assert result.exit_code == 1
         assert "Ambiguous" in result.output
 
-    def test_at_notation_task_file_calls_launch_run(self, tmp_path):
-        task, _ = self._make_prompts(tmp_path)
+    def test_at_notation_composes_the_brief(self, tmp_path):
+        self._make_prompts(tmp_path)
         with patch("cld.cli.find_repo_root", return_value=tmp_path), \
              patch("cld.cli.launch_run") as la:
             result = runner.invoke(app, ["run", f"@{self._TASK_NAME}"])
         assert result.exit_code == 0, result.output
-        assert la.called
-        call_kwargs = la.call_args.kwargs
-        assert call_kwargs["task_file"] == task
-        assert call_kwargs.get("system_prompt_file") is None
+        assert la.call_args.args[1] == "# Task\nDo something\n"
 
-    def test_at_notation_with_inline_prompt(self, tmp_path):
-        """`cld run @name -p prompt` resolves the @-ref as task_file and passes prompt."""
-        task, _ = self._make_prompts(tmp_path)
+    def test_refs_and_inline_compose_in_order(self, tmp_path):
+        """Personas and task files are interchangeable blocks; -p lands last."""
+        self._make_prompts(tmp_path)
         with patch("cld.cli.find_repo_root", return_value=tmp_path), \
              patch("cld.cli.launch_run") as la:
-            result = runner.invoke(app, ["run", f"@{self._TASK_NAME}", "-p", "do the task"])
+            result = runner.invoke(app, [
+                "run", f"@personas/{self._PERSONA_NAME}", f"@{self._TASK_NAME}",
+                "-p", "do the task",
+            ])
         assert result.exit_code == 0, result.output
-        assert la.called
-        call_kwargs = la.call_args.kwargs
-        assert call_kwargs["task_file"] == task
-        assert call_kwargs["inline_prompt"] == "do the task"
+        brief = la.call_args.args[1]
+        assert brief == "# Test persona\n\n# Task\nDo something\n\ndo the task\n"
 
 
 class TestBareDevcontainer:
@@ -109,9 +107,9 @@ class TestBareDevcontainer:
             result = runner.invoke(app, [])
         assert result.exit_code == 0, result.output
         assert rd.called
-        # Signature: (task_file, name, model, revision, prompt, extra_args)
+        # Signature: (refs, name, model, revision, prompt, extra_args)
         args = rd.call_args.args
-        assert args[0] is None  # task_file
+        assert args[0] == []     # refs
         assert args[1] == ""     # name
 
     def test_bare_with_options(self):
@@ -507,12 +505,12 @@ class TestParsePeerSpecs:
 
 class TestTaskAgentStart:
     def _invoke(self, *extra):
-        return runner.invoke(app, ["task-agent", "start", "@implementer", *extra])
+        return runner.invoke(app, ["task-agent", "start", "@personas/implementer", *extra])
 
-    def test_requires_task_or_prompt(self, start_env):
-        result = self._invoke("-n", "add-oauth")
+    def test_requires_refs_or_prompt(self, start_env):
+        result = runner.invoke(app, ["task-agent", "start", "-n", "add-oauth"])
         assert result.exit_code == 1
-        assert "Provide a task file" in result.output
+        assert "at least one prompt ref" in result.output
         assert not start_env.run.called
 
     def test_requires_a_slug(self, start_env):
@@ -555,14 +553,13 @@ class TestTaskAgentStart:
         start_env.capacity.assert_called_once()
         assert start_env.capacity.call_args.args[1] == "cld_master_myrepo_ab12ef34"
 
-    def test_persona_mounted_and_named(self, start_env):
+    def test_persona_recorded_for_display(self, start_env):
+        """The first persona-kind ref names the role; nothing is mounted for it."""
         result = self._invoke("-p", "do it", "-n", "add-oauth")
         assert result.exit_code == 0, result.output
         argv = start_env.run.call_args.args[0]
-        persona = start_env.repo_root / "prompts" / "personas" / "implementer.md"
-        assert f"{persona}:/config/persona.md:ro" in argv
-        assert "AGENT_PERSONA_FILE=/config/persona.md" in argv
         assert "AGENT_PERSONA=implementer" in argv
+        assert not any("/config/persona.md" in a for a in argv)
 
     def test_unknown_persona_errors_before_spawning(self, start_env):
         result = runner.invoke(
@@ -572,17 +569,20 @@ class TestTaskAgentStart:
         assert "not found" in result.output
         assert not start_env.run.called
 
-    def test_task_file_mounted_and_prompt_env(self, start_env, tmp_path):
+    def test_refs_compose_into_the_brief(self, start_env, tmp_path):
         task = tmp_path / "task.md"
         task.write_text("# do the thing\n")
         result = self._invoke(str(task), "-p", "also this", "-n", "add-oauth", "-m", "opus")
         assert result.exit_code == 0, result.output
         argv = start_env.run.call_args.args[0]
-        assert f"{task}:/config/task.md:ro" in argv
-        assert "AGENT_INLINE_PROMPT=also this" in argv
+        assert not any("/config/task.md" in a for a in argv)
+        assert not any("AGENT_INLINE_PROMPT" in a for a in argv)
         assert "AGENT_MODEL=opus" in argv
         assert argv[:3] == ["docker", "run", "-d"]
         assert start_env.stage_ssh.called
+        # persona ref, then the local task file, then -p -- in argument order
+        brief = start_env.anchor_env.call_args.kwargs["brief"]
+        assert brief == "# impl\n\n# do the thing\n\nalso this\n"
 
     def test_missing_task_file_errors(self, start_env, tmp_path):
         result = self._invoke(str(tmp_path / "nope.md"), "-n", "s")
@@ -1131,7 +1131,7 @@ class TestHandleErrorsExitCodes:
     def test_clean_user_error_has_no_command_failed_noise(self):
         result = runner.invoke(app, ["run"])
         assert result.exit_code == 1
-        assert "Provide a task file" in result.output
+        assert "at least one prompt ref" in result.output
         assert "Command failed" not in result.output
 
 

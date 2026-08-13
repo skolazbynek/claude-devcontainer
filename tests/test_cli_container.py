@@ -77,38 +77,40 @@ class TestTaskAgentDispatch:
         with ExitStack() as stack:
             op = self._broker(stack, tmp_path, monkeypatch)
             result = runner.invoke(app, [
-                "task-agent", "start", "@implementer", "-n", "add-oauth", "-p", "do it",
+                "task-agent", "start", "@personas/implementer", "@some-task",
+                "-n", "add-oauth", "-p", "do it",
                 "--branch", "oauth", "-m", "opus", "-r", "@-", "--peer", "cld_agent_x_y:3",
             ])
         assert result.exit_code == 0, result.output
         target, verb, argv = op.call_args.args
         assert (target, verb) == ("/host/myrepo", "start")
         assert argv == [
-            "@implementer", "-n", "add-oauth", "-p", "do it", "--branch", "oauth",
-            "-m", "opus", "-r", "@-", "--peer", "cld_agent_x_y:3",
+            "@personas/implementer", "@some-task", "-n", "add-oauth", "-p", "do it",
+            "--branch", "oauth", "-m", "opus", "-r", "@-", "--peer", "cld_agent_x_y:3",
         ]
         assert "--parent" not in argv          # the broker sets it, host-side
 
-    def test_start_folds_a_task_file_into_the_prompt(self, tmp_path, monkeypatch):
-        task = tmp_path / "task.md"
-        task.write_text("# Do the thing\n\ndetails\n")
+    def test_start_folds_local_files_into_the_prompt_in_order(self, tmp_path, monkeypatch):
+        first = tmp_path / "a.md"; first.write_text("# First\n")
+        second = tmp_path / "b.md"; second.write_text("# Second\n")
         with ExitStack() as stack:
             op = self._broker(stack, tmp_path, monkeypatch)
             result = runner.invoke(app, [
-                "task-agent", "start", "implementer", str(task), "-n", "s", "-p", "and this",
+                "task-agent", "start", "@personas/implementer", str(first), str(second),
+                "-n", "s", "-p", "and this",
             ])
         assert result.exit_code == 0, result.output
         argv = op.call_args.args[2]
-        assert str(task) not in argv          # a container path means nothing host-side
+        assert str(first) not in argv         # a container path means nothing host-side
+        assert "@personas/implementer" in argv
         body = argv[argv.index("-p") + 1]
-        assert body.startswith("# Do the thing")
-        assert "## Additional Instructions" in body and body.endswith("and this")
+        assert body == "# First\n\n# Second\n\nand this"
 
     def test_start_forwards_an_at_ref_verbatim(self, tmp_path, monkeypatch):
         """The host must resolve it against the *target* repo, not master's own."""
         with ExitStack() as stack:
             op = self._broker(stack, tmp_path, monkeypatch)
-            result = runner.invoke(app, ["task-agent", "start", "implementer", "@some-task", "-n", "s"])
+            result = runner.invoke(app, ["task-agent", "start", "@some-task", "-n", "s"])
         assert result.exit_code == 0, result.output
         assert "@some-task" in op.call_args.args[2]
 

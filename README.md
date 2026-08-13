@@ -44,7 +44,7 @@ cld agent                                 # start; never attaches
 cld agent {restart | shutdown [--all] | status | logs}
 
 # One-shot autonomous run (headless, --rm, commits to a branch)
-cld run [-n name] [-m model] [-r revision] task.md
+cld run [refs...] [-n name] [-m model] [-r revision] [-p prompt]
 cld run -p "Fix the auth bug in src/login.py"
 cld run task.md -p "Focus on the database layer"
 
@@ -93,10 +93,10 @@ defaults:
 
 steps:
   - name: review
-    persona: reviewer
+    prompts: ["@personas/reviewer"]
 
   - name: implement
-    persona: implementer
+    prompts: ["@personas/implementer"]
 ```
 
 `chains/parallel-review.yaml` — two reviewers in parallel; synthesiser ranks findings:
@@ -111,12 +111,12 @@ defaults:
 steps:
   - parallel:
       - name: generic
-        persona: reviewer
+        prompts: ["@personas/reviewer"]
       - name: security
-        persona: security-reviewer
+        prompts: ["@personas/security-reviewer"]
 
   - name: synthesise
-    persona: reviewer
+    prompts: ["@personas/reviewer"]
     prompt: |
       Two prior reviewers produced findings. Combine them, deduplicate,
       and rank by severity. Drop anything that contradicts the user's

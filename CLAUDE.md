@@ -99,7 +99,7 @@ docker build -f imgs/claude-devcontainer/Dockerfile.claude-devcontainer -t claud
 docker build -f imgs/claude-run/Dockerfile.claude-run -t claude-run:latest imgs/claude-run
 
 # Ephemeral interactive devcontainer
-cld [-n name] [-m model] [-r revision] [-p prompt] [task-file.md]
+cld [refs...] [-n name] [-m model] [-r revision] [-p prompt]
 
 # Persistent master devcontainer (per-repo, start-or-attach; idempotent)
 cld master                             # start or re-attach
@@ -116,7 +116,7 @@ cld agent status                       # docker + supervisor state.json summary
 cld agent logs [-n N]                  # tail the container's log (= supervisor stderr)
 
 # Task-scoped agents (many per repo, one per task; see docs/design-task-agents.md)
-cld task-agent start @<persona> [task.md|@<name>] -n <slug> [-p prompt] \
+cld task-agent start [refs...] -n <slug> [-p prompt] \
     [--branch <name>] [-m model] [-r revision] [--peer <name>[:<hops>]]...
 cld task-agent status [<name>]         # roster (host-wide), or one agent in detail
 cld task-agent logs <name> [-n N]      # supervisor stderr -- NOT the conversation
@@ -132,7 +132,7 @@ cld task-agent shutdown --all [--force]
 #   refuses --force); `transcript` reads the mounted mailbox directly.
 
 # One-shot autonomous run
-cld run [-n name] [-m model] [-r revision] [-p prompt] [task-file.md|@<name>]
+cld run [refs...] [-n name] [-m model] [-r revision] [-p prompt]
 
 ```
 
@@ -179,12 +179,12 @@ Container-side env vars consumed by shell entrypoints (NOT read by Python `Confi
 | Var | Where set | Purpose |
 |---|---|---|
 | `SESSION_NAME` | `build_container_args` -> container | Branch/workspace name |
-| `INSTRUCTION_FILE` | agent launch -> container | Task file path |
+| (the brief) | launcher -> `.cld-run/brief.md` | The composed prompt: N refs in order, then `-p`, written into the anchor scratch rather than mounted (`docs/design-prompt-chaining.md`) |
 | `AGENT_MODEL` | launcher -> container | Claude model |
 | `AGENT_ANCHOR_HASH` | launcher -> container | Anchor commit hash; in-container guard enforces all session changes descend from it |
 | `WORKSPACE_PREINITIALIZED` | launcher -> container | Always `1`; host pre-creates the workspace as an empty editable_root child of the anchor |
 | `WORKSPACE_FILES` | `build_container_args` -> container | Colon-separated list of gitignored files to symlink from origin into workspace (set from config `ignore_gitignore`) |
-| `AGENT_COMMIT_MSG_LLM` / `AGENT_SYSTEM_PROMPT_FILE` | user -> container | Optional agent overrides |
+| `AGENT_COMMIT_MSG_LLM` | user -> container | Optional agent override |
 | `MYSQL_DEFAULTS_FILE` | `build_container_args` -> container | Credentials path inside container |
 | `TASK_AGENT_MODE` | `build_container_args(task_agent=…)` -> container | Marks a task-scoped agent. A *modifier* on `AGENT_MODE` (same mailbox precondition, readiness sentinel and supervisor exec), not a fourth mode: the entrypoint additionally creates the deliverable bookmark and seeds `known_hosts`, and skips the one-shot pre-run of the task prompt (the supervisor's kickoff owns it) |
 | `AGENT_TASK_SLUG` / `AGENT_PARENT_MASTER` / `AGENT_DELIVERABLE_BRANCH` / `AGENT_PEERS` | `build_container_args(task_agent=…)` -> container | Task-agent spawn facts the supervisor turns into `meta.json`. `AGENT_PEERS` is `name:hops` pairs, **comma**-separated (`:` is the pair delimiter, so the usual colon-separated list convention doesn't fit) |
@@ -252,7 +252,7 @@ Inspect with git: `git log <name>`, `git diff <name>~1..<name>`. Merge: `git mer
 Full design: `docs/design-agent-messaging.md`. One-line summary: one repo agent per repo, `send()`/`list_inbox()`/`read_message()`/`archive()` via the `messenger` MCP server, replies come back on your next turn, the agent remembers everything across messages (one persistent `claude -p --resume` session).
 
 - `cld/messenger/mailbox.py` -- pure filesystem transport (atomic `tmp/` write + `rename()` into `inbox/`; `archive/`; append-only `outbox.log`, whose lines carry the full subject+body so one mailbox is a complete transcript). No MCP/Docker coupling: `list_containers()` delegates to `cld/host_docker.py` (local docker on host, broker inside master) and `resolve_recipient()` short-circuits to filesystem delivery when the recipient names an existing mailbox dir (the reply path -- so agents message back with no host channel). Unit-testable with `tmp_path`. Also owns the task-agent registry surface (`meta.json` spawn facts via `ensure_meta`/`list_fleet`, `state.json` reads, `transcript()`, `_archive/<name>/` on teardown, and the `_edges/` hop counters plus obligation ledger) -- see `docs/design-task-agents.md`. Root entries starting with `_` are reserved, not mailboxes.
-- `cld/messenger/agent_loop.py` -- the supervisor daemon (`python -m cld.messenger.agent_loop`, execed as PID 1 by the entrypoint's `AGENT_MODE` branch). State machine: `KICKOFF` (once, via `prompts/personas/<agent_kickoff_persona>.md`, default `agent.md`) -> `IDLE` (poll `inbox/` every 1 s) -> `PROCESSING` (one message, strict FIFO via oldest mtime) -> `IDLE`, until `SIGTERM`. Writes `state.json` into its own mailbox dir after every transition. The kickoff prompt goes to claude on **stdin**, not in argv -- a persona's leading `---` frontmatter was otherwise parsed as an unknown option; frontmatter is stripped either way (`cld.prompts.strip_frontmatter`). Under `TASK_AGENT_MODE` the same state machine runs in **task mode** (`TaskMode.from_env()`): kickoff is `compose_kickoff()`'s three layers -- lifecycle preamble (`prompts/personas/task-agent.md`), the master-chosen role persona (mounted at `/config/persona.md`), then the task verbatim -- and `meta.json` is written once at boot. No extra phase; see `docs/design-task-agents.md` §5, §11.
+- `cld/messenger/agent_loop.py` -- the supervisor daemon (`python -m cld.messenger.agent_loop`, execed as PID 1 by the entrypoint's `AGENT_MODE` branch). State machine: `KICKOFF` (once, via `prompts/personas/<agent_kickoff_persona>.md`, default `agent.md`) -> `IDLE` (poll `inbox/` every 1 s) -> `PROCESSING` (one message, strict FIFO via oldest mtime) -> `IDLE`, until `SIGTERM`. Writes `state.json` into its own mailbox dir after every transition. The kickoff prompt goes to claude on **stdin**, not in argv -- a persona's leading `---` frontmatter was otherwise parsed as an unknown option; frontmatter is stripped either way (`cld.prompts.strip_frontmatter`). Under `TASK_AGENT_MODE` the same state machine runs in **task mode** (`TaskMode.from_env()`): kickoff is `compose_kickoff()`'s two layers -- the lifecycle preamble (`prompts/personas/task-agent.md`, placeholders substituted), then the brief the launcher composed (`.cld-run/brief.md`, verbatim, role persona already inside it) -- and `meta.json` is written once at boot. No extra phase; see `docs/design-task-agents.md` §5, §11.
 - `cld/mcp/messenger.py` -- FastMCP server wrapping `mailbox.py`. `send`/`list_inbox`/`read_message`/`archive` operate on the calling container's own mailbox, identified by `SESSION_NAME`. Two additive **fleet** tools are master surfaces instead, scoped to mailboxes whose `meta.json` records the caller as parent: `fleet_digest()` (one cheap row per task-agent -- task, phase, msg_count, cost, unread, last_activity, plus `open_asks`/`open_with`/`oldest_open`; no bodies) and `read_mailbox(name, since="")` (the full exchange, `inbox/` + `archive/` received and `outbox.log` sent, `since` exclusive, archived mailboxes included). The digest is what makes the master's per-turn crank affordable; sweeping inboxes would find nothing, since an agent archives each message within ~1 s.
 - **Hop gate (agent-to-agent only).** A message between two task-agents counts against that edge's absolute budget in `_edges/<sorted>.json`; past the limit the send is refused and **nothing more is ever delivered over that edge** -- not a retry, not a supervisor-synthesized reply, no cap notice (docs/design-task-agents.md D29: exempting the messages that announce the end is what loops). The blocked side escalates to its master, whose channel is a *different* edge and never budgeted. The gate lives in `mailbox.gated_send` and the closure rule one level down in `write_message`, because **two** instructed paths reach the transport -- the MCP `send()` tool and `cld msg send`, which the baked-in `messenger-send` skill documents. `edge_spent` is asked *before* a delivery and `bump_edge` counts *after* it, so the limit-th message is the last one that lands rather than the first one refused.
 - **Reply obligation is declared, not implied.** Every message carries `expects_reply` (does this open an obligation on the recipient) and `answers` (which message id does it discharge), both set by the sender and defaulted to "no". Arrival alone obliges nothing: an unconditional "every message gets a reply" makes each acknowledgment oblige another one, which in testing had two agents trading courtesies until the hop budget ran out. There is no special case for the master channel -- the master sets `expects_reply` like anyone else. A reply *may* also ask (`answers` + `expects_reply` together), which is what makes a clarification sub-dialogue work: the root obligation survives it and is discharged separately.
@@ -272,7 +272,7 @@ Module: `cld/chain.py`. Declarative multi-step pipeline runner. Entry point is `
 
 | Class | Role |
 |---|---|
-| `ChainStep` | Single agent step: name, persona, model, prompt, output, inputs, timeout |
+| `ChainStep` | Single agent step: name, prompts (ordered refs), model, prompt, output, inputs, timeout |
 | `ParallelGroup` | A group of `ChainStep` siblings to run in parallel |
 | `ChainDefaults` | Chain-level defaults for model and timeout |
 | `Chain` | Top-level: name, description, defaults, ordered `steps` tuple |
@@ -293,7 +293,7 @@ Module: `cld/chain.py`. Declarative multi-step pipeline runner. Entry point is `
 - `read_agent_cost(session, vcs)` -- reads `result.json` for `cost_usd`.
 - `format_duration(seconds)` -- formats as `Xm00s`.
 
-**Persona injection:** Each step declares a `persona:` name. `persona_resolve()` searches `<repo_root>/prompts/personas/` then `<cld_root>/prompts/personas/`. The resolved path is passed to `launch_agent(system_prompt_file=...)`, which mounts it as the agent's system prompt override.
+**Prompt refs per step:** Each step declares `prompts:` -- an ordered list of refs (`@personas/architect`, `@some-task`, or a path), personas and task files interchangeable -- plus an optional inline `prompt:`. `compose_task()` builds one brief per step: the refs first (they carry the role the system-prompt mount used to), then the step prompt, the initial task, prior step outputs, and the output-path footer. There is no system-prompt override and no host-side scratch staging; the brief travels in the anchor scratch envelope (`docs/design-prompt-chaining.md`).
 
 **Branch model:**
 - A persistent `chain_<name>` branch is created at the start and acts as the accumulator.

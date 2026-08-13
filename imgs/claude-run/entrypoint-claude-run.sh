@@ -4,8 +4,7 @@ source /workspace/container-init.sh
 source /workspace/vcs-lib.sh
 
 AGENT_NAME="${SESSION_NAME:?SESSION_NAME must be set}"
-TASK_FILE_MOUNT="${INSTRUCTION_FILE:-/config/task.md}"
-INSTRUCTION_FILE=""
+BRIEF_FILE="/workspace/current/.cld-run/brief.md"
 
 log() {
     local msg="[$(date +'%Y-%m-%d %H:%M:%S')] $*"
@@ -20,11 +19,6 @@ log_error() {
 }
 
 # --- Validate inputs ---
-
-if [ ! -f "$TASK_FILE_MOUNT" ] && [ -z "$AGENT_INLINE_PROMPT" ]; then
-    echo "Error: No task file mounted at $TASK_FILE_MOUNT and no AGENT_INLINE_PROMPT set" >&2
-    exit 1
-fi
 
 # Stage host configs before any VCS operation; jj working-copy changes need
 # user.email/user.name from ~/.config/jj.
@@ -71,16 +65,11 @@ RESULT_FILE="$OUTPUT_DIR/result.json"
 SUMMARY_FILE="$OUTPUT_DIR/summary.json"
 mkdir -p "$OUTPUT_DIR"
 
-if [ -n "$AGENT_INLINE_PROMPT" ]; then
-    INSTRUCTION_FILE="$OUTPUT_DIR/task.md"
-    if [ -f "$TASK_FILE_MOUNT" ]; then
-        cat "$TASK_FILE_MOUNT" > "$INSTRUCTION_FILE"
-        printf '\n\n## Additional Instructions\n\n%s\n' "$AGENT_INLINE_PROMPT" >> "$INSTRUCTION_FILE"
-    else
-        printf '%s' "$AGENT_INLINE_PROMPT" > "$INSTRUCTION_FILE"
-    fi
-else
-    INSTRUCTION_FILE="$TASK_FILE_MOUNT"
+# The brief only exists once the workspace is staged, so this check lives here rather
+# than up with the other input validation.
+if [ ! -s "$BRIEF_FILE" ]; then
+    echo "Error: no brief at $BRIEF_FILE -- the launcher composes it into the anchor scratch" >&2
+    exit 1
 fi
 
 log "Agent $AGENT_NAME started (VCS: $VCS_TYPE, anchor: ${AGENT_ANCHOR_HASH:0:12})"
@@ -91,7 +80,7 @@ build_claude_config
 
 # --- Execute Claude ---
 
-INSTRUCTIONS=$(cat "$INSTRUCTION_FILE")
+INSTRUCTIONS=$(cat "$BRIEF_FILE")
 
 if [ "$VCS_TYPE" = "jj" ]; then
     VCS_NOTE="Your working directory is isolated in a jujutsu workspace. All changes will be committed as a single change when you're done."
@@ -99,7 +88,8 @@ else
     VCS_NOTE="Your working directory is isolated in a git worktree. All changes will be committed when you're done."
 fi
 
-SYSTEM_PROMPT_FILE="${AGENT_SYSTEM_PROMPT_FILE:-/opt/cld/run-system-prompt.md}"
+# Image-owned frame; the user's layer is the brief, appended below.
+SYSTEM_PROMPT_FILE="/opt/cld/run-system-prompt.md"
 SYSTEM_PROMPT="$(cat "$SYSTEM_PROMPT_FILE")
 
 $VCS_NOTE
@@ -205,7 +195,7 @@ cat > "$SUMMARY_FILE" <<EOF
   "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "duration_seconds": $DURATION,
   "claude_exit_code": $CLAUDE_EXIT,
-  "instruction_file": "$INSTRUCTION_FILE",
+  "brief_file": "$BRIEF_FILE",
   "vcs_type": "$VCS_TYPE",
   "failure": $FAILURE_JSON_STR,
   "changes": {

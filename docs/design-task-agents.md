@@ -1,5 +1,13 @@
 # Task-scoped agents (`cld task-agent`)
 
+> **Superseded in part (implemented):** the kickoff's middle layer is gone. The
+> launcher composes N prompt refs plus `-p` into one brief host-side and ships it in
+> the anchor scratch (`.cld-run/brief.md`); the supervisor layers the lifecycle
+> preamble and then that brief. Wherever this document says `/config/persona.md`,
+> `/config/task.md`, `AGENT_PERSONA_FILE` or a bare-persona-name argv rule, see
+> `docs/design-prompt-chaining.md`. `AGENT_PERSONA` survives as the roster's display
+> name (the first persona-kind ref).
+
 > Status: design, POC scope. Date: 2026-08-11.
 > Supersedes the mental model in which an agent is one immortal worker per repo.
 > Feeds the implementer; this document is the spec, not the code.

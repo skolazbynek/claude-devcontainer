@@ -128,27 +128,31 @@ def _dispatch_task_agent_to_broker(cfg: Config, op: str, extra_args: list[str]) 
 
 
 def _task_agent_start_argv(
-    persona: str, task_file: str | None, name: str, prompt: str,
+    refs: list[str], name: str, prompt: str,
     branch: str, model: str, revision: str, peer: list[str],
 ) -> list[str]:
     """Rebuild `start`'s argv for the broker, which re-parses it host-side.
 
-    The task *file* is the one argument that cannot cross: `/workspace/current` is
+    Paths are the one argument that cannot cross: `/workspace/current` is
     container-ephemeral and a sibling target is an empty placeholder, so a path that
     resolves here resolves to nothing (or to the wrong file) there. An `@ref` is
     forwarded verbatim precisely so the host resolves it against the *target* repo;
-    a real path is read here and folded into the inline prompt, which reproduces
-    exactly what the container would have composed from the two anyway.
+    a real path is read here -- reading its own files is exactly what this container is
+    entitled to do -- and folded into the inline text, in order, which reproduces the
+    brief the host would have composed. The broker refuses a bare path for the same
+    reason (docs/design-prompt-chaining.md §4).
     """
-    argv = [persona]
-    inline = prompt
-    if task_file and task_file.startswith("@"):
-        argv.append(task_file)
-    elif task_file:
-        body = Path(task_file).read_text().strip()
+    argv: list[str] = []
+    bodies: list[str] = []
+    for ref in refs:
+        if ref.startswith("@"):
+            argv.append(ref)
+            continue
+        body = Path(ref).read_text().strip()
         if not body:
-            raise ValueError(f"task file is empty: {task_file}")
-        inline = f"{body}\n\n## Additional Instructions\n\n{prompt}" if prompt else body
+            raise ValueError(f"prompt file is empty: {ref}")
+        bodies.append(body)
+    inline = "\n\n".join([*bodies, prompt] if prompt else bodies)
     if name:
         argv += ["-n", name]
     if inline:
@@ -174,10 +178,9 @@ app.add_typer(task_agent_app, name="task-agent")
 @task_agent_app.command("start")
 @_handle_errors
 def task_agent_start(
-    persona: str = typer.Argument(..., help="Persona ref, e.g. @implementer (resolved like chain personas)"),
-    task_file: Optional[str] = typer.Argument(None, help="Task markdown file, or @<name> to resolve from prompts/"),
+    refs: Optional[list[str]] = typer.Argument(None, help="Prompt refs in order: @<ref> resolved host-side, or a path in this container (folded into -p)"),
     name: str = typer.Option("", "-n", "--name", help="Task slug, kebab-case (default: --branch)"),
-    prompt: str = typer.Option("", "-p", "--prompt", help="Inline task text (appended to the task file if both given)"),
+    prompt: str = typer.Option("", "-p", "--prompt", help="Inline task description, appended after the refs"),
     branch: str = typer.Option("", "--branch", help="Deliverable branch name (default: the task slug)"),
     model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
     revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change)"),
@@ -187,7 +190,7 @@ def task_agent_start(
     cfg = Config.from_env()
     setup_logging(cfg)
     _dispatch_task_agent_to_broker(cfg, "start", _task_agent_start_argv(
-        persona, task_file, name, prompt, branch, model, revision, peer,
+        refs or [], name, prompt, branch, model, revision, peer,
     ))
 
 

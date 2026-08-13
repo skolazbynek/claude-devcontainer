@@ -9,7 +9,7 @@ RUN mkdir -p /workspace/output /config && \
 COPY entrypoint-claude-run.sh /workspace/run
 RUN chmod +x /workspace/run && chown claude:claude /workspace/run
 
-# Copy the default one-shot system prompt (overridable via AGENT_SYSTEM_PROMPT_FILE).
+# Copy the one-shot frame the image owns; the user's layer is the composed brief.
 RUN mkdir -p /opt/cld
 COPY run-system-prompt.md /opt/cld/run-system-prompt.md
 

@@ -16,7 +16,7 @@ from cld.agent_runtime import wait_for_agent, read_agent_cost, format_duration
 from cld.config import Config
 from cld.docker import find_repo_root
 from cld.log import get_logger
-from cld.prompts import persona_resolve, stage_persona_without_frontmatter
+from cld.prompts import compose_brief, resolve_prompt_arg
 from cld.vcs import get_backend
 from cld.vcs.anchor import assert_descendant, resolve_anchor
 
@@ -29,7 +29,7 @@ log = get_logger(__name__)
 @dataclass(frozen=True)
 class ChainStep:
     name: str
-    persona: str
+    prompts: tuple[str, ...] = ()
     model: str = ""
     prompt: str = ""
     output: str = ""
@@ -118,15 +118,24 @@ def _build_step(raw, path) -> ChainStep:
     if "parallel" in raw:
         raise ValueError(f"{path}: nested 'parallel' is not allowed")
     name = raw.get("name")
-    persona = raw.get("persona")
     if not isinstance(name, str) or not name:
         raise ValueError(f"{path}: step missing required 'name'")
-    if not isinstance(persona, str) or not persona:
-        raise ValueError(f"{path}: step '{name}' missing required 'persona'")
+    if "persona" in raw:
+        raise ValueError(
+            f"{path}: step '{name}' uses 'persona'; it is now 'prompts', an ordered list "
+            "of refs (personas and task files interchangeable), e.g. "
+            "prompts: [\"@personas/architect\"]. See docs/design-prompt-chaining.md"
+        )
+    prompts = raw.get("prompts", []) or []
+    if isinstance(prompts, str):
+        raise ValueError(f"{path}: step '{name}': 'prompts' must be a list of refs, not a string")
+    prompt = str(raw.get("prompt", "") or "")
+    if not prompts and not prompt:
+        raise ValueError(f"{path}: step '{name}' needs at least one of 'prompts' or 'prompt'")
     inputs = raw.get("inputs", []) or []
     return ChainStep(
         name=name,
-        persona=persona,
+        prompts=tuple(prompts),
         model=str(raw.get("model", "") or ""),
         prompt=str(raw.get("prompt", "") or ""),
         output=str(raw.get("output", "") or ""),
@@ -144,7 +153,7 @@ def validate_chain(chain: Chain, repo_root: Path, cld_root: Path) -> None:
     Checks:
     - Chain name matches [a-zA-Z0-9_-]+.
     - All step names match the same regex and are unique within the chain.
-    - Every persona resolves to a file (uses persona_resolve).
+    - Every prompt ref resolves to a file (uses resolve_prompt_arg).
     - `inputs:` reference only step names that appear EARLIER in the chain
       (no forward references, no parallel siblings referencing each other).
     """
@@ -177,10 +186,11 @@ def _validate_step_shape(s: ChainStep, seen_names, repo_root, cld_root, declared
         raise ValueError(f"step name '{s.name}' must match {_NAME_RE.pattern}")
     if s.name in seen_names:
         raise ValueError(f"duplicate step name '{s.name}'")
-    try:
-        persona_resolve(s.persona, repo_root, cld_root)
-    except FileNotFoundError as e:
-        raise ValueError(f"step '{s.name}': {e}") from e
+    for ref in s.prompts:
+        try:
+            resolve_prompt_arg(ref, repo_root, cld_root)
+        except (FileNotFoundError, ValueError) as e:
+            raise ValueError(f"step '{s.name}': {e}") from e
     for ref in s.inputs:
         if ref not in declared_so_far:
             raise ValueError(
@@ -202,22 +212,28 @@ def compose_task(
     *,
     chain: Chain,
     step: ChainStep,
-    initial_task: str | None,
+    initial_task: str,
     prior_outputs: list[tuple[str, str]],
-    scratch_dir: Path,
+    repo_root: Path,
     cld_root: Path,
-) -> Path:
-    """Compose the task file for this step.
+) -> str:
+    """Compose this step's brief: its refs, then its prompt, then what the chain adds.
 
-    Returns the path to the staged task file under ``scratch_dir`` (the chain
-    workspace's .cld-run/). The agent should be launched with this as task_file=.
+    The refs come first (they carry the role, as the persona system prompt used to) and
+    are composed by ``cld.prompts.compose_brief``; the chain's own sections -- initial
+    task, prior step outputs, the output-path footer -- follow. Returned as text: the
+    launcher ships it in the anchor scratch, so there is no host-side staging.
     """
     sections = []
+
+    refs = [path for path, _ in (resolve_prompt_arg(r, repo_root, cld_root) for r in step.prompts)]
+    if refs:
+        sections.append(compose_brief(refs).strip())
 
     if step.prompt:
         sections.append(step.prompt.strip())
 
-    if initial_task is not None:
+    if initial_task:
         sections.append("# Initial Task\n\n" + initial_task.strip())
 
     if prior_outputs:
@@ -235,10 +251,7 @@ def compose_task(
     footer = Template(footer_tpl).safe_substitute(OUTPUT_PATH=output_path)
     sections.append(footer)
 
-    full = "\n\n".join(sections) + "\n"
-    staged = scratch_dir / f"chain-{chain.name}-{step.name}.md"
-    staged.write_text(full)
-    return staged
+    return "\n\n".join(sections) + "\n"
 
 
 def apply_name_override(chain: Chain, override: str) -> Chain:
@@ -344,35 +357,28 @@ def execute_step(
     chain: Chain,
     step: ChainStep,
     session_name: str,
-    initial_task: str | None,
+    initial_task: str,
     prior_outputs: list[tuple[str, str]],
     repo_root: Path,
     cld_root: Path,
-    scratch_dir: Path,
 ) -> StepResult:
     """Launch one agent for one step, wait for completion, return its result."""
-    scratch_dir.mkdir(parents=True, exist_ok=True)
-    persona_path = persona_resolve(step.persona, repo_root, cld_root)
-    persona_path = stage_persona_without_frontmatter(persona_path, scratch_dir)
-    task_file = compose_task(
+    brief = compose_task(
         chain=chain, step=step,
         initial_task=initial_task,
         prior_outputs=prior_outputs,
-        scratch_dir=scratch_dir, cld_root=cld_root,
+        repo_root=repo_root, cld_root=cld_root,
     )
-    log.debug("composed task file: %s", task_file)
     if log.isEnabledFor(logging.DEBUG):
-        log.debug("%s", task_file.read_text()[:500])
+        log.debug("composed brief: %s", brief[:500])
     model = step.model or chain.defaults.model or cfg.chain_default_model or ""
     revision = chain_branch(chain)
     start = time.monotonic()
     launch_run(
-        cfg,
-        task_file=task_file,
+        cfg, brief,
         model=model,
         revision=revision,
         session_name=session_name,
-        system_prompt_file=persona_path,
         quiet=True,
     )
     summary = wait_for_agent(session_name, vcs, cfg)
@@ -414,8 +420,7 @@ def run_chain(
     cfg: Config,
     chain_file: Path,
     *,
-    initial_task: str | None = None,
-    inline_prompt: str | None = None,
+    initial_task: str = "",
     revision: str = "",
     name_suffix: str = "",
     state_writer: "StateWriter | None" = None,
@@ -452,20 +457,16 @@ def run_chain(
     # per-step B descends from A.
     # For jj, resolve A's change_id and use it (not the commit_id) as the
     # descendant-check anchor: change_id is stable across working-copy rewrites
-    # (e.g. host-side snapshot churn on scratch_dir) whereas the commit_id may
+    # (e.g. host-side snapshot churn) whereas the commit_id may
     # become hidden and lookup as-an-ancestor fails.
     anchor_ref = _anchor_ref(vcs, anchor)
     initialise_chain_branch(chain, vcs, anchor)
-    # Host-side scratch (composed task files, staged personas) that get RO-mounted
-    # into per-step agent containers. Lives under gitignored `.cld/`.
-    scratch_dir = repo_root / ".cld" / "chain-scratch" / chain_branch(chain)
-    scratch_dir.mkdir(parents=True, exist_ok=True)
     log.info("Chain anchor: %s", anchor[:12])
 
     if state_writer is not None:
         state_writer.set_anchor(anchor)
 
-    initial_text = _merge_initial(initial_task, inline_prompt)
+    initial_text = initial_task
 
     results: list[StepResult] = []
     total_start = time.monotonic()
@@ -487,7 +488,6 @@ def run_chain(
                     prior_outputs=prior_outputs,
                     initial_task=step_initial,
                     repo_root=repo_root, cld_root=cld_root,
-                    scratch_dir=scratch_dir,
                 )
                 results.extend(group_results)
                 failures = [r for r in group_results if r.status not in ("success", "no_changes", "unknown")]
@@ -517,12 +517,12 @@ def run_chain(
             session = step_session(chain, step)
             model_eff = step.model or chain.defaults.model or cfg.chain_default_model or ""
             log.info(
-                "Step %d/%d '%s' launching (persona=%s, model=%s)",
-                i + 1, len(chain.steps), step.name, step.persona, model_eff,
+                "Step %d/%d '%s' launching (prompts=%s, model=%s)",
+                i + 1, len(chain.steps), step.name, ",".join(step.prompts) or "-", model_eff,
             )
             log.debug(
-                "step %d/%d '%s' launching (persona=%s, model=%s, revision=%s, session=%s)",
-                i + 1, len(chain.steps), step.name, step.persona, model_eff,
+                "step %d/%d '%s' launching (prompts=%s, model=%s, revision=%s, session=%s)",
+                i + 1, len(chain.steps), step.name, ",".join(step.prompts) or "-", model_eff,
                 chain_branch(chain), session,
             )
             if state_writer is not None:
@@ -537,7 +537,6 @@ def run_chain(
                 prior_outputs=prior_outputs,
                 repo_root=repo_root,
                 cld_root=cld_root,
-                scratch_dir=scratch_dir,
             )
             results.append(result)
             log.info(
@@ -641,11 +640,6 @@ def print_chain_report(result: ChainResult, vcs) -> None:
     print()
 
 
-def _merge_initial(task: str | None, prompt: str | None) -> str:
-    if task and prompt:
-        return f"{task}\n\n## Additional Instructions\n\n{prompt}\n"
-    return task or prompt or ""
-
 
 def _run_parallel(
     *,
@@ -658,36 +652,30 @@ def _run_parallel(
     initial_task: str | None,
     repo_root: Path,
     cld_root: Path,
-    scratch_dir: Path,
 ) -> list[StepResult]:
     """Launch all siblings (serialized launch), wait concurrently, return results."""
-    scratch_dir.mkdir(parents=True, exist_ok=True)
-    sessions: list[tuple[ChainStep, str, Path]] = []
+    sessions: list[tuple[ChainStep, str]] = []
     for sibling in group.siblings:
         session = step_session(chain, sibling, group_idx=group_idx)
-        persona_path = persona_resolve(sibling.persona, repo_root, cld_root)
-        persona_path = stage_persona_without_frontmatter(persona_path, scratch_dir)
-        task_file = compose_task(
+        brief = compose_task(
             chain=chain, step=sibling,
             initial_task=initial_task,
             prior_outputs=prior_outputs,
-            scratch_dir=scratch_dir, cld_root=cld_root,
+            repo_root=repo_root, cld_root=cld_root,
         )
         model = sibling.model or chain.defaults.model or cfg.chain_default_model or ""
         log.debug("parallel sibling '%s' launching session=%s", sibling.name, session)
         launch_run(
-            cfg,
-            task_file=task_file,
+            cfg, brief,
             model=model,
             revision=chain_branch(chain),
             session_name=session,
-            system_prompt_file=persona_path,
             quiet=True,
         )
-        sessions.append((sibling, session, task_file))
+        sessions.append((sibling, session))
 
     results: list[StepResult] = []
-    for sibling, session, _task in sessions:
+    for sibling, session in sessions:
         start = time.monotonic()
         summary = wait_for_agent(session, vcs, cfg)
         output_path = chain_output_path(chain.name, sibling)

@@ -2,7 +2,7 @@
 name: task-agent-start
 description: >
   Spawn a task-scoped agent (`cld task-agent start`) from a master container: pick a
-  slug and a role persona, write the task, and draw its peer edges. Invoke when the
+  slug and its prompt refs, write the task, and draw its peer edges. Invoke when the
   user wants to hand a bounded piece of work to a fresh agent, fan work out across
   repos, or add an agent to a running fleet.
 user-invocable: true
@@ -35,14 +35,17 @@ cld repos          # <path> own | <path> target
 registered sibling are spawned exactly the same way; you have no filesystem view of a
 sibling, which is what makes the *pushed branch* rule in `task-agent-wrapup` matter.
 
-## Step 2: Choose the slug, the persona and the branch
+## Step 2: Choose the slug, the prompt refs and the branch
 
 - **Slug** (`-n`): short, kebab-case, describes the task — `add-oauth`, not `task-1`.
   It becomes the container name (`cld_agent_<repo>_<slug>`), the handle for every other
   command, and the default deliverable branch. Prefer a fresh slug over re-using one; a
   live collision gets a `-2` suffix and stops being self-explanatory.
-- **Persona**: the role, resolved from `prompts/personas/` (`implementer`, `architect`,
-  `reviewer`, …). Pass the bare name — a path is refused.
+- **Prompt refs**: an ordered list of `@refs` — the role persona first
+  (`@personas/implementer`), then any prepared task prompt (`@some-task`). Personas and
+  task files are interchangeable blocks; they are appended in the order you pass them.
+  From inside master only `@refs` cross to the host; a path in *your* filesystem is read
+  here and folded into `-p` for you.
 - **`--branch`**: only when the deliverable branch should differ from the slug.
 
 ## Step 3: Write the task
@@ -73,7 +76,7 @@ task-agents per repo.
 ## Step 5: Spawn
 
 ```bash
-cld task-agent start <persona> -n <slug> -p "<task>" \
+cld task-agent start [@refs...] -n <slug> -p "<task>" \
     [--branch <name>] [-m <model>] [-r <revision>] [--peer <name>[:<hops>]]…
 ```
 

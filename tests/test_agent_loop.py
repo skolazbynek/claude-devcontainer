@@ -367,7 +367,6 @@ def _task_mode(task_files, **overrides):
         "deliverable_branch": "add-oauth-login",
         "peers": {"cld_agent_repoA_contract": 15},
         "persona_name": "implementer",
-        "persona_path": persona,
         "preamble_path": preamble,
         "task_text": "Wire up OAuth login.",
         "anchor": "abc123def456",
@@ -384,7 +383,7 @@ class TestComposeKickoff:
 
     def test_layer_order(self, task_files, tmp_path):
         prompt = self._compose(_task_mode(task_files), tmp_path)
-        assert prompt.index("# Preamble") < prompt.index("# Implementer") < prompt.index("# Your task")
+        assert prompt.index("# Preamble") < prompt.index("# Your task")
 
     def test_substitutes_in_both_layers(self, task_files, tmp_path):
         prompt = self._compose(_task_mode(task_files), tmp_path)
@@ -396,8 +395,6 @@ class TestComposeKickoff:
         assert "anchor=abc123def456" in prompt
         assert "turns=7" in prompt
         assert "repo=repo" in prompt
-        # ...including the role persona, not just the preamble
-        assert "branch is add-oauth-login" in prompt
         assert "${" not in prompt
 
     def test_task_appended_verbatim(self, task_files, tmp_path):
@@ -406,11 +403,10 @@ class TestComposeKickoff:
         prompt = self._compose(task, tmp_path)
         assert "Set $DELIVERABLE_BRANCH and ${CONTAINER_NAME} literally" in prompt
 
-    def test_frontmatter_stripped_from_both_layers(self, task_files, tmp_path):
+    def test_frontmatter_stripped_from_the_preamble(self, task_files, tmp_path):
         prompt = self._compose(_task_mode(task_files), tmp_path)
         assert prompt.startswith("# Preamble")
         assert "description: meta" not in prompt
-        assert "description: role" not in prompt
 
     def test_peers_rendered(self, task_files, tmp_path):
         prompt = self._compose(_task_mode(task_files), tmp_path)
@@ -457,42 +453,37 @@ class TestTaskModeFromEnv:
         baked = tmp_path / "cld_root" / "prompts" / "personas"
         baked.mkdir(parents=True)
         (baked / "task-agent.md").write_text(preamble.read_text())
-        monkeypatch.setattr("cld.messenger.agent_loop._TASK_FILE_MOUNT", tmp_path / "task.md")
+        monkeypatch.setattr("cld.messenger.agent_loop._BRIEF_FILE", tmp_path / "brief.md")
+        (tmp_path / "brief.md").write_text("Wire up OAuth login.\n")
         monkeypatch.setenv("AGENT_TASK_SLUG", "add-oauth")
         monkeypatch.setenv("AGENT_DELIVERABLE_BRANCH", "add-oauth-login")
         monkeypatch.setenv("AGENT_PERSONA", "implementer")
-        monkeypatch.setenv("AGENT_PERSONA_FILE", str(persona))
         monkeypatch.setenv("AGENT_PARENT_MASTER", "cld_master_repoA_ab12")
         monkeypatch.setenv("AGENT_PEERS", "cld_agent_repoA_contract:15")
         monkeypatch.setenv("AGENT_ANCHOR_HASH", "abc123")
-        monkeypatch.setenv("AGENT_INLINE_PROMPT", "Wire up OAuth login.")
 
     def test_reads_all_fields(self, task_files):
         task = TaskMode.from_env()
-        _, persona = task_files
         assert task.slug == "add-oauth"
         assert task.parent_master == "cld_master_repoA_ab12"
         assert task.deliverable_branch == "add-oauth-login"
         assert task.peers == {"cld_agent_repoA_contract": 15}
         assert task.persona_name == "implementer"
-        assert task.persona_path == persona
         assert task.anchor == "abc123"
         assert task.task_text == "Wire up OAuth login."
 
-    def test_task_from_file_only(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("AGENT_INLINE_PROMPT")
-        (tmp_path / "task.md").write_text("From the task file.\n")
-        assert TaskMode.from_env().task_text == "From the task file."
+    def test_task_is_the_composed_brief(self, tmp_path):
+        (tmp_path / "brief.md").write_text("# Implementer\n\nWire up OAuth login.\n")
+        assert TaskMode.from_env().task_text == "# Implementer\n\nWire up OAuth login."
 
-    def test_task_from_file_and_inline(self, tmp_path):
-        (tmp_path / "task.md").write_text("From the task file.\n")
-        assert TaskMode.from_env().task_text == (
-            "From the task file.\n\n## Additional Instructions\n\nWire up OAuth login."
-        )
+    def test_missing_brief_refuses(self, tmp_path):
+        (tmp_path / "brief.md").unlink()
+        with pytest.raises(RuntimeError, match="no task given"):
+            TaskMode.from_env()
 
-    def test_persona_name_defaults_to_file_stem(self, monkeypatch):
+    def test_persona_name_is_display_only_and_may_be_empty(self, monkeypatch):
         monkeypatch.delenv("AGENT_PERSONA")
-        assert TaskMode.from_env().persona_name == "implementer"
+        assert TaskMode.from_env().persona_name == ""
 
     def test_empty_peers(self, monkeypatch):
         monkeypatch.setenv("AGENT_PEERS", "")
@@ -508,24 +499,9 @@ class TestTaskModeFromEnv:
         with pytest.raises(RuntimeError, match="wrap-up has no target"):
             TaskMode.from_env()
 
-    def test_missing_persona_env_raises(self, monkeypatch):
-        monkeypatch.delenv("AGENT_PERSONA_FILE")
-        with pytest.raises(RuntimeError, match="AGENT_PERSONA_FILE"):
-            TaskMode.from_env()
-
-    def test_unreadable_persona_raises(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("AGENT_PERSONA_FILE", str(tmp_path / "nope.md"))
-        with pytest.raises(RuntimeError, match="persona file not found"):
-            TaskMode.from_env()
-
     def test_missing_preamble_raises(self, monkeypatch, tmp_path):
         (tmp_path / "cld_root" / "prompts" / "personas" / "task-agent.md").unlink()
         with pytest.raises(RuntimeError, match="preamble not found"):
-            TaskMode.from_env()
-
-    def test_no_task_raises(self, monkeypatch):
-        monkeypatch.delenv("AGENT_INLINE_PROMPT")
-        with pytest.raises(RuntimeError, match="no task given"):
             TaskMode.from_env()
 
     def test_repo_name_prefers_host_repo_over_workspace_dir(self, monkeypatch, tmp_path):
@@ -561,7 +537,7 @@ class TestSupervisorTaskMode:
             session_name="cld_agent_repoA_add-oauth",
             repo_root=repo_root,
             mailbox_root=mailbox_root,
-            persona_path=task.persona_path,
+            persona_path=None,
             claude_bin=str(_STUB_CLAUDE),
             max_turns=7,
             task=task,
@@ -594,7 +570,7 @@ class TestSupervisorTaskMode:
     def test_kickoff_uses_composed_prompt(self, task_supervisor):
         task_supervisor.kickoff()
         prompt = _read_prompt_log(task_supervisor._prompt_log)[0]
-        assert prompt.index("# Preamble") < prompt.index("# Implementer") < prompt.index("# Your task")
+        assert prompt.index("# Preamble") < prompt.index("# Your task")
         assert "Wire up OAuth login." in prompt
 
     def test_phases_unchanged(self, task_supervisor):
