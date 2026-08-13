@@ -86,7 +86,7 @@ class TestMessengerConfig:
     def test_defaults(self, tmp_path):
         cfg = Config.from_env(user_config=tmp_path / "u", project_config=tmp_path / "p")
         assert cfg.mailbox_root.endswith(".cld/mailboxes")
-        assert cfg.agent_max_turns == 30
+        assert cfg.agent_max_turns == 120
         assert cfg.agent_kickoff_persona == "agent"
 
     def test_toml_overrides(self, tmp_path):

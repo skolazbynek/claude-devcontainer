@@ -44,6 +44,14 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _is_max_turns(stdout: str) -> bool:
+    """True when claude's JSON envelope says it stopped at the turn cap."""
+    try:
+        return json.loads(stdout).get("subtype") == "error_max_turns"
+    except (json.JSONDecodeError, AttributeError):
+        return False
+
+
 def _extract_cost(data: dict) -> float:
     for key in ("total_cost_usd", "cost_usd"):
         value = data.get(key)
@@ -250,6 +258,18 @@ class AgentSupervisor:
 
         log.info("invoking claude (resume=%s, prompt_size=%d): %s", resume, len(prompt), " ".join(cmd))
         result = subprocess.run(cmd, capture_output=True, text=True, input=prompt, cwd=str(self.repo_root))
+        # Hitting --max-turns is claude exiting 1 with a complete JSON envelope
+        # (subtype "error_max_turns", with the session_id and the cost). It is not a
+        # failure of this agent: the turn budget is per *message*, so the work done so
+        # far is real, the session is resumable, and the next message gets a fresh
+        # budget. Raising here instead killed the supervisor mid-kickoff -- i.e. every
+        # task-agent whose task needed more than the cap died with its container.
+        if result.returncode != 0 and _is_max_turns(result.stdout):
+            log.warning(
+                "claude hit the %d-turn cap; session kept. Send another message to "
+                "continue, or raise agent_max_turns.", self.max_turns,
+            )
+            return json.loads(result.stdout)
         if result.returncode != 0:
             # In --output-format json, claude reports errors as a JSON envelope on stdout;
             # stderr is usually empty. Emit both streams to the container log before raising
@@ -341,10 +361,15 @@ class AgentSupervisor:
             ):
                 last_text = data.get("result", "")
                 log.warning("message %s: no reply sent by Claude -- synthesizing fallback", msg_id)
+                capped = (
+                    f"(stopped at the {self.max_turns}-turn cap before replying; "
+                    "send another message to continue) "
+                    if data.get("subtype") == "error_max_turns" else ""
+                )
                 mailbox.write_message(
                     self.mailbox_root, self.session_name, msg["from"],
                     f"Re: {msg['subject']}",
-                    f"(no reply produced; last text: {last_text})",
+                    f"{capped}(no reply produced; last text: {last_text})",
                     answers=msg["id"],
                 )
 

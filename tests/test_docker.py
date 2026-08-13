@@ -410,6 +410,15 @@ class TestBuildContainerArgsTaskAgent:
         assert "AGENT_PARENT_MASTER=cld_master_repoA_ab12" in args
         assert "AGENT_TASK_SLUG=add-oauth" in args
 
+    def test_turn_cap_propagated(self, tmp_path):
+        """In-container Config.from_env() sees no host TOML, so the cap has to be passed."""
+        args = build_container_args(
+            tmp_path, "cld_agent_r_t",
+            Config(mailbox_root=str(tmp_path / "mb"), agent_max_turns=200),
+            task_agent=TaskAgentSpec(slug="t"),
+        )
+        assert "CLD_AGENT_MAX_TURNS=200" in args
+
     def test_budget_fallbacks_propagated(self, tmp_path):
         spec = TaskAgentSpec(slug="t")
         args = build_container_args(

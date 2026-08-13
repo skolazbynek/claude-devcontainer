@@ -374,6 +374,52 @@ def _task_mode(task_files, **overrides):
     return TaskMode(**{**kwargs, **overrides})
 
 
+class TestTurnCapIsNotFatal:
+    """Hitting --max-turns is claude exiting 1 with a full JSON envelope. Raising there
+    killed the supervisor mid-kickoff, so any task needing more turns died with its
+    container."""
+
+    _CAPPED = {
+        "is_error": True, "subtype": "error_max_turns", "session_id": "sess-1",
+        "total_cost_usd": 1.5, "result": "got partway",
+        "errors": ["Reached maximum number of turns (7)"],
+    }
+
+    def _capped_run(self, supervisor, monkeypatch):
+        import subprocess as sp
+        completed = sp.CompletedProcess([], 1, stdout=json.dumps(self._CAPPED), stderr="")
+        monkeypatch.setattr("cld.messenger.agent_loop.subprocess.run", lambda *a, **k: completed)
+
+    def test_run_claude_returns_the_envelope(self, supervisor, monkeypatch):
+        self._capped_run(supervisor, monkeypatch)
+        data = supervisor._run_claude("do it", resume=False)
+        assert data["session_id"] == "sess-1"
+
+    def test_kickoff_keeps_the_session_and_goes_idle(self, supervisor, monkeypatch):
+        self._capped_run(supervisor, monkeypatch)
+        supervisor.kickoff()
+        assert supervisor.session_id == "sess-1"
+        state = json.loads((supervisor.mailbox_root / supervisor.session_name / "state.json").read_text())
+        assert state["phase"] == "idle"
+
+    def test_a_real_failure_still_raises(self, supervisor, monkeypatch):
+        import subprocess as sp
+        completed = sp.CompletedProcess([], 1, stdout='{"is_error": true, "subtype": "error_other"}', stderr="boom")
+        monkeypatch.setattr("cld.messenger.agent_loop.subprocess.run", lambda *a, **k: completed)
+        with pytest.raises(RuntimeError, match="claude exited 1"):
+            supervisor._run_claude("do it", resume=False)
+
+    def test_fallback_reply_says_the_cap_was_hit(self, supervisor, monkeypatch):
+        mailbox.write_message(supervisor.mailbox_root, "cld_master_x", supervisor.session_name,
+                              "question", "well?", expects_reply=True)
+        msg_id = mailbox.list_inbox(supervisor.mailbox_root, supervisor.session_name)[0]["id"]
+        supervisor.session_id = "sess-1"
+        self._capped_run(supervisor, monkeypatch)
+        supervisor.process_one(msg_id)
+        sent = (supervisor.mailbox_root / supervisor.session_name / "outbox.log").read_text()
+        assert "turn cap" in sent
+
+
 class TestComposeKickoff:
     def _compose(self, task, tmp_path):
         return compose_kickoff(

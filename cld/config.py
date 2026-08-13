@@ -237,7 +237,7 @@ class Config:
 
     # Inter-container agent messaging (mailboxes + repo agent supervisor)
     mailbox_root: str = _default_mailbox_root()
-    agent_max_turns: int = 30
+    agent_max_turns: int = 120
     agent_kickoff_persona: str = "agent"
 
     # Task-scoped agents (see docs/design-task-agents.md). max_task_agents caps
@@ -303,7 +303,7 @@ class Config:
             ignore_gitignore=tuple(layered.get("ignore_gitignore", ())),
             ssh_auth_sock=_resolve_ssh_auth_sock(layered),
             mailbox_root=_env_str("CLD_MAILBOX_ROOT", layered.get("mailbox_root", _default_mailbox_root())),
-            agent_max_turns=_env_int("CLD_AGENT_MAX_TURNS", int(layered.get("agent_max_turns", 30))),
+            agent_max_turns=_env_int("CLD_AGENT_MAX_TURNS", int(layered.get("agent_max_turns", 120))),
             agent_kickoff_persona=_env_str("CLD_AGENT_KICKOFF_PERSONA", layered.get("agent_kickoff_persona", "agent")),
             max_task_agents=_env_int("CLD_MAX_TASK_AGENTS", int(layered.get("max_task_agents", 4))),
             peer_absolute_limit=_env_int("CLD_PEER_ABSOLUTE_LIMIT", int(layered.get("peer_absolute_limit", 10))),

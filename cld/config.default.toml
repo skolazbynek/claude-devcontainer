@@ -52,7 +52,9 @@ home_mounts_devcontainer = [
 
 # Inter-container agent messaging (mailboxes + repo agent supervisor)
 # mailbox_root = "~/.cld/mailboxes"  # host root for the mailbox tree
-# agent_max_turns = 30               # per-message turn cap for the agent supervisor
+# agent_max_turns = 120              # per-message turn cap for the agent supervisor
+#                                    # (an implementation task spends turns fast; 30 was
+#                                    #  not enough for one to reach its first commit)
 # agent_kickoff_persona = "agent"  # persona used to kick off a new agent session
 
 # Task-scoped agents (see docs/design-task-agents.md)

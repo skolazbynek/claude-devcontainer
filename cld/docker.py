@@ -454,6 +454,7 @@ def build_container_args(
                 # operator's configured budgets have to be passed in.
                 "-e", f"CLD_PEER_ABSOLUTE_LIMIT={cfg.peer_absolute_limit}",
                 "-e", f"CLD_ROOT_ASK_LIMIT={cfg.root_ask_limit}",
+                "-e", f"CLD_AGENT_MAX_TURNS={cfg.agent_max_turns}",
             ]
     else:
         args += ["--rm"]
