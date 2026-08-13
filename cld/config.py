@@ -65,13 +65,13 @@ _TOML_KEYS = {
     "max_task_agents",
     "peer_absolute_limit",
     "root_ask_limit",
-    "host_broker_key",
-    "host_broker_endpoint",
-    "host_broker_known_hosts",
+    "broker_key",
+    "broker_endpoint",
+    "broker_known_hosts",
     # Not a Config field -- no Python code reads this. Recognized here only so
     # _load_toml() doesn't warn "unknown key" on repos that set it; the value
-    # is read directly out of .cld/config.toml by host-broker.sh's own parser
-    # (PROJECT_SUBDIR for the host test broker / runtests container).
+    # is read directly out of .cld/config.toml by cld-broker.sh's own parser
+    # (PROJECT_SUBDIR for the cld broker / runtests container).
     "pyproject_dir",
 }
 
@@ -124,6 +124,14 @@ def _load_toml(path: Path) -> dict:
             f"{path}: 'master_extra_mounts_ro' has been renamed to 'master_targets' "
             "(and its semantics changed -- see docs/design-master-sibling-launch.md). "
             "Rename the key; the values (host paths) are still valid as-is."
+        )
+    renamed = {k: k.removeprefix("host_") for k in data if k.startswith("host_broker_")}
+    if renamed:
+        pairs = ", ".join(f"'{old}' -> '{new}'" for old, new in sorted(renamed.items()))
+        raise RuntimeError(
+            f"{path}: the broker config keys lost their 'host_' prefix ({pairs}). "
+            "Rename them; the values are still valid as-is. Ignoring them would leave "
+            "the broker silently off, which breaks every task-agent launch."
         )
     unknown = set(data) - _TOML_KEYS
     for key in sorted(unknown):
@@ -240,13 +248,13 @@ class Config:
     peer_absolute_limit: int = 10
     root_ask_limit: int = 3
 
-    # Host test broker (master only): if host_broker_key is set, master mounts
-    # the restricted private key and gets a `host-run` wrapper that ships pytest
+    # The cld broker (master only): if broker_key is set, master mounts
+    # the restricted private key and gets a `cld broker` wrapper that ships pytest
     # args to a host-side SSH broker running the `runtests` container. Empty =
-    # off. See docs/design-host-test-running.md.
-    host_broker_key: str = ""
-    host_broker_endpoint: str = "host.docker.internal:2222"
-    host_broker_known_hosts: str = ""
+    # off. See docs/design-cld-broker.md.
+    broker_key: str = ""
+    broker_endpoint: str = "host.docker.internal:2222"
+    broker_known_hosts: str = ""
 
     # Diagnostics
     debug: bool = False
@@ -300,7 +308,7 @@ class Config:
             max_task_agents=_env_int("CLD_MAX_TASK_AGENTS", int(layered.get("max_task_agents", 4))),
             peer_absolute_limit=_env_int("CLD_PEER_ABSOLUTE_LIMIT", int(layered.get("peer_absolute_limit", 10))),
             root_ask_limit=_env_int("CLD_ROOT_ASK_LIMIT", int(layered.get("root_ask_limit", 3))),
-            host_broker_key=_env_str("CLD_HOST_BROKER_KEY", layered.get("host_broker_key", "")),
-            host_broker_endpoint=_env_str("CLD_HOST_BROKER_ENDPOINT", layered.get("host_broker_endpoint", "host.docker.internal:2222")),
-            host_broker_known_hosts=_env_str("CLD_HOST_BROKER_KNOWN_HOSTS", layered.get("host_broker_known_hosts", "")),
+            broker_key=_env_str("CLD_BROKER_KEY", layered.get("broker_key", "")),
+            broker_endpoint=_env_str("CLD_BROKER_ENDPOINT", layered.get("broker_endpoint", "host.docker.internal:2222")),
+            broker_known_hosts=_env_str("CLD_BROKER_KNOWN_HOSTS", layered.get("broker_known_hosts", "")),
         )

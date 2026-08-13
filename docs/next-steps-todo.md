@@ -11,6 +11,13 @@ If it's completely redundant (we can launch agents from inside master on top of 
 ## BrokerCTL naming
 The host-side brokerctl, script, ssh daemon and the whole design feature should have a single, unifying naming both on host and inside container. It's currently named brokerctl on host and host-run inside the container. Make sure it's semantics are unified.
 
+**Done.** One root word, `broker`: host `broker/cld-broker.sh` (the sshd ForceCommand
+dispatcher) + `broker/cld-brokerctl.sh` (operator control) + `/etc/cld/broker.conf`;
+container `cld broker <action>` (`cld/broker.py`, Python -- the generated `host-run`
+shell wrapper is gone); config keys `broker_key` / `broker_endpoint` /
+`broker_known_hosts` (old spellings are a hard error, not a silent broker-off).
+Naming table and operator migration: `docs/design-cld-broker.md` §0.
+
 ## Different CLD clis for host and for container
 Within the CLD application, there are commands usable only from host or usable only from container. Design a split: a CLI application used on host and different one shipped into containers. The goal is to make the usage cleaner and more straighforward. It's possible to design a different way to ship the application into the master container if it helps usability.
 

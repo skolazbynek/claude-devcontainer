@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# brokerctl -- operate the cld host test broker sshd. First-time setup is manual
+# cld-brokerctl -- operate the cld host broker sshd. First-time setup is manual
 # (see ../broker-setup-home.md); day-to-day this is all you need:
 #
-#     brokerctl start | restart | shutdown | status | logs [N]
+#     cld-brokerctl start | restart | shutdown | status | logs [N]
 #
 # Everything lives under $CLD_BROKER_DIR (default ~/.cld/broker): the sshd config,
 # its PID file, and its log. No sshd flags to remember.
@@ -62,5 +62,5 @@ case "${1:-}" in
     shutdown|stop)    shutdown ;;
     status)           status ;;
     logs)             tail -n "${2:-40}" "$LOG" 2>/dev/null || echo "no log at $LOG" ;;
-    *) echo "usage: brokerctl {start|restart|shutdown|status|logs [N]}" >&2; exit 2 ;;
+    *) echo "usage: cld-brokerctl {start|restart|shutdown|status|logs [N]}" >&2; exit 2 ;;
 esac

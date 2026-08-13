@@ -842,10 +842,10 @@ launch, and cleanup deltas so `cld agent` can later be deleted cleanly.
 - Entrypoint (`entrypoint-claude-devcontainer.sh`) — a task-agent branch that
   creates the deliverable bookmark at the anchor and execs the supervisor in
   task mode. Session-bookmark create/forget unchanged.
-- `cld/host_docker.py` — route `task-agent` spawn/enumerate/shutdown through the
+- `cld/broker.py` — route `task-agent` spawn/enumerate/shutdown through the
   broker when `in_master_container()`; extend `list-containers` parsing to carry
   `kind`/`parent`/`task`. No new broker seam.
-- `host-broker/host-broker.sh` — extend the `agent` action (or add `task-agent`)
+- `broker/cld-broker.sh` — extend the `agent` action (or add `task-agent`)
   to launch/manage host-side task-agents, validated against master labels; the
   shutdown path runs the reap-readiness checks (§7) and the caller-side cleanup
   (bookmark forget + mailbox archive), and **must not accept `--force`**; the launch

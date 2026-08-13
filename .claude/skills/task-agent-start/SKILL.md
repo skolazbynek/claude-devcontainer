@@ -17,7 +17,7 @@ immortal for as long as its container runs — see the `agent-start` skill).
 ## Prerequisite: inside a master, with a host channel
 
 ```bash
-[ -x /tmp/bin/host-run ] && [ -d /var/cld/mailboxes ] && echo master-ok
+cld broker --help >/dev/null 2>&1 && [ -d /var/cld/mailboxes ] && echo master-ok
 ```
 
 Spawning and reaping need the host broker (there is no docker socket in-container).

@@ -1,8 +1,8 @@
 ---
-name: host-run-tests
+name: broker-run-tests
 description: >
-  Run the target repo's test suite (pytest) via the host test broker's
-  `host-run` wrapper instead of raw ssh, mysql, or docker commands. Use this
+  Run the target repo's test suite (pytest) via the cld broker's
+  `cld broker` client instead of raw ssh, mysql, or docker commands. Use this
   whenever you need to run tests inside a `cld master` container and secrets
   (DB/Redis credentials etc.) are not otherwise available in-container. Invoke
   when the user asks to run tests, run pytest, or check whether tests pass,
@@ -10,11 +10,11 @@ description: >
 user-invocable: true
 ---
 
-# Run tests via the host test broker (`host-run`)
+# Run tests via the cld broker (`cld broker run-tests`)
 
 Some repos keep test secrets (MySQL/Redis/etc. credentials) entirely on the
 host and never mount them into `cld master`. For those repos, the master
-container ships a `host-run` wrapper that triggers a fixed, host-side action
+container ships a `cld broker` client that triggers a fixed, host-side action
 over a restricted SSH connection: it runs the repo's tests in an isolated
 `runtests` container against your current change, and streams back only the
 output. You never see or need the raw secrets, and you never construct the
@@ -32,11 +32,11 @@ This only exists for `cld master` sessions (never `cld agent`, `cld run`, or
 bare `cld`). Check for the wrapper:
 
 ```bash
-command -v host-run || command -v /tmp/bin/host-run
+cld broker --help >/dev/null 2>&1 && echo broker-ok
 ```
 
 If neither is found, this repo's master isn't configured with a host test
-broker (`host_broker_key` unset in its `.cld/config.toml`). Don't try to set
+broker (`broker_key` unset in its `.cld/config.toml`). Don't try to set
 one up yourself -- that's host-side infrastructure the user configures
 out-of-band. Don't fall back to running the plain test command in-container
 either: without the broker there is no other way to get real DB/Redis/etc.
@@ -46,26 +46,26 @@ nothing real (or erroring on missing config in a way that's easy to
 misread as a code bug). Tell the user the broker isn't configured for this
 repo and stop.
 
-If `command -v host-run` finds nothing but `/tmp/bin/host-run` exists, use
+If that fails the broker is not configured for this container; the message names what to set. Otherwise use
 the full path for the rest of this skill -- PATH may not include `/tmp/bin`
 in every attached shell.
 
 ## Step 2: Run the tests
 
 ```bash
-host-run <pytest args...>
+cld broker run-tests <pytest args...>
 ```
 
 Examples:
 
 ```bash
-host-run                       # full suite
-host-run -k login -x tests/    # filtered, stop on first failure
-host-run tests/unit/test_foo.py
+cld broker run-tests           # full suite
+cld broker run-tests -k login -x tests/  # filtered, stop on first failure
+cld broker run-tests tests/unit/test_foo.py
 ```
 
 There's no need to pass `--action`; it defaults to `run-tests`. (A repo's
-broker admin may have defined extra actions -- `host-run --action <name>
+broker admin may have defined extra actions -- `cld broker <name>
 <args>` -- but `run-tests` is the only one that exists unless you were told
 otherwise.)
 
@@ -87,10 +87,10 @@ failures):
 
 ## Why this exists
 
-Full design: the repo's own `docs/design-host-test-running.md` and
-`host-broker/README.md` (only present when working in the `cld` tool's own
+Full design: the repo's own `docs/design-cld-broker.md` and
+`broker/README.md` (only present when working in the `cld` tool's own
 repo, not in target repos). The short version: `jj`/`git`'s multi-workspace
 model isolates the test run from your host `@`, and the raw `.env` is
 mounted only into the ephemeral, `claude`-unreachable `runtests` container --
-`host-run` is the *only* host-facing channel, and it can only ever run the
+`cld broker` is the *only* host-facing channel, and it can only ever run the
 fixed, pre-defined action with pytest-shaped arguments.

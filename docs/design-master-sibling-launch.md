@@ -10,8 +10,8 @@
 > broker's `agent` action, which runs host-side `cld agent` for that repo
 > (validated against master's host-set `org.cld.targets` label). Bare `cld`,
 > `cld run`, `cld master`, `cld chain`, and interactive attach from inside
-> master are **not** supported. See `cld/host_docker.py`,
-> `host-broker/host-broker.sh`, and the README "No docker socket in containers"
+> master are **not** supported. See `cld/broker.py`,
+> `broker/cld-broker.sh`, and the README "No docker socket in containers"
 > section. The cwd→target resolution, `master_targets` placeholders, and
 > `cld master repos` below are unchanged; only the launch *mechanism* moved
 > from socket to broker.

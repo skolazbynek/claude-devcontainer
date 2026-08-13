@@ -19,7 +19,7 @@
 # `resolve_test_context`; add your own helper if your action needs more.
 set -euo pipefail
 
-CONF="${CLD_BROKER_CONF:-/etc/cld/host-broker.conf}"
+CONF="${CLD_BROKER_CONF:-/etc/cld/broker.conf}"
 # shellcheck source=/dev/null
 [ -r "$CONF" ] && . "$CONF"
 
@@ -170,7 +170,7 @@ action_task_agent() {
 }
 
 # Template for a second action -- copy, rename, point at its image, enable by
-# uncommenting. Callable from the container as `host-run --action lint …`.
+# uncommenting. Callable from the container as `cld broker lint …`.
 # action_lint() {
 #     exec docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
 #         -v "$REPO:/repo" -e "REVISION=$REV" -e "PROJECT_SUBDIR=$PROJECT_SUBDIR" \

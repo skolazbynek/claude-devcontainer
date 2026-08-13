@@ -4,7 +4,7 @@ Prerequisites for every section below: run from inside a `cld master` container,
 the host broker configured.
 
 ```bash
-[ -x /tmp/bin/host-run ] && [ -d /var/cld/mailboxes ] && echo master-ok
+[ -x cld broker ] && [ -d /var/cld/mailboxes ] && echo master-ok
 ```
 
 If this fails, spawn/reap steps won't work but read-only steps (`status`,
@@ -42,7 +42,7 @@ If this fails, spawn/reap steps won't work but read-only steps (`status`,
 - `task-agent cap reached for <master>: N/N running [...]` → reap an existing agent
   (`cld task-agent shutdown <name>`) or raise `max_task_agents`/`CLD_MAX_TASK_AGENTS`.
 - `Error: the host broker is not configured for this master...` → check
-  `host_broker_key`/`CLD_HOST_BROKER_KEY` config; read-only commands still work.
+  `broker_key`/`CLD_BROKER_KEY` config; read-only commands still work.
 
 ---
 
@@ -71,7 +71,7 @@ If this fails, spawn/reap steps won't work but read-only steps (`status`,
   (task-agent handoffs are strictly reap-then-spawn).
 - Broker-side failures (wrong target, SSH key/known_hosts issues reaching the sibling
   host) surface as broker errors on stdout — cross-check
-  `host-run -k login -x <target>` manually if the error is opaque.
+  `cld broker run-tests -k login -x <target>` manually if the error is opaque.
 
 ---
 

@@ -1,4 +1,4 @@
-# Broker config -- sourced by host-broker.sh. Copy to /etc/cld/host-broker.conf
+# Broker config -- sourced by cld-broker.sh. Copy to /etc/cld/broker.conf
 # (or point CLD_BROKER_CONF at it).
 #
 # The broker serves ANY repo that has a running master: it resolves the target

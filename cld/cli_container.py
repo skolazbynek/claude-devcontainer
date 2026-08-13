@@ -16,7 +16,7 @@ import typer
 
 from cld.config import Config
 from cld.docker import find_target_repo
-from cld.host_docker import broker_agent_op, broker_available, broker_task_agent_op
+from cld.broker import broker_agent_op, broker_available, broker_task_agent_op, run_action
 from cld.log import get_logger, setup_logging
 from cld.messenger import agents as agents_cmd
 from cld.messenger import archive as archive_cmd
@@ -89,13 +89,13 @@ def _dispatch_agent_to_broker(cfg: Config, op: str, extra_args: list[str] | None
 
     This container has no docker daemon (socket removed by design); the broker runs
     host-side `cld agent <op>` for the cwd-selected target repo and streams its
-    output back. Exits with the broker's exit code. See cld/host_docker.py.
+    output back. Exits with the broker's exit code. See cld/broker.py.
     """
     if not broker_available():
         typer.echo(
             "Error: the host broker is not configured for this container, so `cld agent` "
-            "cannot reach the host to launch a sibling agent. Set `host_broker_key` "
-            "(and `host_broker_known_hosts`) in cld config and restart master.",
+            "cannot reach the host to launch a sibling agent. Set `broker_key` "
+            "(and `broker_known_hosts`) in cld config and restart master.",
             err=True,
         )
         raise typer.Exit(1)
@@ -115,7 +115,7 @@ def _dispatch_task_agent_to_broker(cfg: Config, op: str, extra_args: list[str]) 
     if not broker_available():
         typer.echo(
             "Error: the host broker is not configured for this container, so `cld task-agent` "
-            "cannot reach the host. Set `host_broker_key` (and `host_broker_known_hosts`) "
+            "cannot reach the host. Set `broker_key` (and `broker_known_hosts`) "
             "in cld config and restart master. Reading the fleet still works without it: "
             "the messenger's fleet_digest()/read_mailbox() tools and `cld task-agent "
             "transcript` all read the mounted mailbox.",
@@ -367,6 +367,31 @@ def msg_agents(
 ):
     """List cld containers that can be messaged."""
     agents_cmd.show(kind or None)
+
+
+# --- The broker ---------------------------------------------------------------
+
+
+@app.command(context_settings=_ANY_ARGS)
+@_handle_errors
+def broker(
+    ctx: typer.Context,
+    action: str = typer.Argument(..., help="Broker action: run-tests, list-containers, agent, task-agent"),
+):
+    """Run a host-side action through the cld broker (docs/design-cld-broker.md).
+
+    Everything after the action is forwarded verbatim as that action's argv, e.g.
+    `cld broker run-tests -k login -x tests/`. The broker decides what an action may
+    do; this is only the client.
+    """
+    if not broker_available():
+        typer.echo(
+            "Error: the cld broker is not configured for this container. Set `broker_key` "
+            "(and `broker_known_hosts`) in cld config and restart master.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    raise typer.Exit(run_action(action, *ctx.args).returncode)
 
 
 # --- Config-only surfaces -----------------------------------------------------

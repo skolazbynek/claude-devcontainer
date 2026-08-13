@@ -1,20 +1,21 @@
-# cld host test broker
+# cld host broker
 
-The host-side glue that lets a `cld master` container trigger **one** fixed
-command -- run the target repo's tests -- without ever seeing the secrets.
+The host-side glue that lets a `cld master` container trigger a fixed set of
+host-side actions -- run the target repo's tests, enumerate cld containers,
+launch/manage sibling agents -- without ever seeing the secrets.
 
 A container asks over SSH; a dedicated, single-purpose `sshd` answers with a
-forced command (`host-broker.sh`). It serves **any repo that has a running
+forced command (`cld-broker.sh`). It serves **any repo that has a running
 master** -- no whitelist: it resolves the target repo from the calling master
 container's `org.cld.repo-root` label, resolves which change that session is on
-(reading the jj store, never touching the working copy), and runs the standalone
-[`runtests`](../runtests/) container against it, mounting the repo's raw `.env`
-into that ephemeral runner. `claude` only ever sees the streamed test output.
-See `../docs/design-host-test-running.md` for the full design.
+(reading the jj store, never touching the working copy), and for `run-tests`
+runs the standalone [`runtests`](../runtests/) container against it, mounting
+the repo's raw `.env` into that ephemeral runner. `claude` only ever sees the
+streamed output. See `../docs/design-cld-broker.md` for the full design.
 
 ```
-container: host-run -k login -x tests/
-   └─ssh (restricted key)─▶ dedicated sshd ─ForceCommand▶ host-broker.sh
+container: cld broker run-tests -k login -x tests/
+   └─ssh (restricted key)─▶ dedicated sshd ─ForceCommand▶ cld-broker.sh
         ├─ validate: action=run-tests, session=cld_master_…
         ├─ REPO = docker inspect <session> -> org.cld.repo-root label
         ├─ REV  = jj -R <repo> log -r <session>     (store-reading only)
@@ -27,20 +28,20 @@ container: host-run -k login -x tests/
 
 | File | Role |
 |---|---|
-| `host-broker.sh` | the `ForceCommand` target; the only thing the key can run |
-| `host-broker.conf.sample` | broker-wide config (image, PATH); copy to `/etc/cld/host-broker.conf` |
+| `cld-broker.sh` | the `ForceCommand` target; the only thing the key can run |
+| `broker.conf.sample` | broker-wide config (image, PATH); copy to `/etc/cld/broker.conf` |
 | `sshd_cld_broker.conf` | sample config for the dedicated `sshd` instance |
 | `keygen.sh` | generate the broker keypair, host key, and `authorized_keys` |
-| `brokerctl.sh` | operate the sshd: `start` / `restart` / `shutdown` / `status` / `logs` |
+| `cld-cld-brokerctl.sh` | operate the sshd: `start` / `restart` / `shutdown` / `status` / `logs` |
 
 ## Operating
 
-After first-time setup, symlink `brokerctl.sh` onto your PATH and drive the
+After first-time setup, symlink `cld-cld-brokerctl.sh` onto your PATH and drive the
 daemon with it — it starts sshd detached, tracks it by PID file, and logs to a
 file, so there are no sshd flags to remember:
 
 ```
-brokerctl start | restart | shutdown | status | logs [N]
+cld-brokerctl start | restart | shutdown | status | logs [N]
 ```
 
 It reads `$CLD_BROKER_DIR` (default `~/.cld/broker`). `restart` is the one to run
@@ -49,17 +50,17 @@ after editing the broker config or rebuilding the `runtests` image.
 ## Setup (once, host-side)
 
 Assumes the `runtests` image is built (`../runtests/build.sh`) and the docker
-socket is **not** exposed to `cld master` (that is what keeps `host-run` as
+socket is **not** exposed to `cld master` (that is what keeps the broker as
 claude's only host channel).
 
 1. **Keys.** `./keygen.sh /etc/cld` (or any dir), then note the printed
    `known_hosts` line.
-2. **Config.** Copy `host-broker.conf.sample` to `/etc/cld/host-broker.conf` and
+2. **Config.** Copy `broker.conf.sample` to `/etc/cld/broker.conf` and
    set `RUNTESTS_IMAGE` + `PATH`. `PATH` must include both `docker` and `cld`
    (the `agent` action runs host-side `cld agent` for sibling launches). There
    is nothing per-repo to set -- the repo and its secrets path are resolved per
    request.
-3. **Broker script.** Install `host-broker.sh` at `/opt/cld/host-broker.sh`
+3. **Broker script.** Install `cld-broker.sh` at `/opt/cld/cld-broker.sh`
    (path referenced by `ForceCommand`), `chmod +x`.
 4. **sshd.** Edit `sshd_cld_broker.conf` (`AllowUsers`, `ListenAddress` for your
    bridge gateway, key paths), then launch the dedicated instance:
@@ -97,7 +98,7 @@ docker rm -f cld_master_demo; jj -R "$REPO" bookmark delete cld_master_demo
 
 The broker dispatches `$SSH_ORIGINAL_COMMAND` (`<action> <session> <base64-argv>`)
 to a shell function named `action_<name>` (hyphens → underscores). To add one,
-define a function in `host-broker.sh` — that's the whole change:
+define a function in `cld-broker.sh` — that's the whole change:
 
 ```bash
 action_lint() {
@@ -111,11 +112,12 @@ prepared: `$session` (validated master session id) and `$REPO` (resolved from
 the session label). Per-action context is resolved lazily inside the action --
 `run-tests` calls `resolve_test_context` for `$REV` / `$SECRETS_ENV_FILE` /
 `$PROJECT_SUBDIR` -- so read-only actions don't depend on the session bookmark
-being resolvable. Call it from a container with `host-run --action lint <args>`
-(no `--action` ⇒ `run-tests`). An action name that has no matching function is
-denied, so enabling/disabling is just defining/removing the function.
+being resolvable. Call it from a container with `cld broker lint <args>`
+(action name is the first argument; `run-tests` needs no special-casing). An
+action name that has no matching function is denied, so enabling/disabling is
+just defining/removing the function.
 
-**Built-in actions:** `run-tests` (default; pytest in the `runtests` container),
+**Built-in actions:** `run-tests` (pytest in the `runtests` container),
 `list-containers` (read-only cld-container enumeration for the messenger /
 `cld agent status`), `agent` (`<target> <op>` -- launch/manage a sibling
 `cld agent` on the host) and `task-agent` (`<target> <op>` -- the `cld task-agent`

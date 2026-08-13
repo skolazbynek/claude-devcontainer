@@ -858,8 +858,8 @@ class TestListContainers:
             type("R", (), {"returncode": 0, "stdout": "agent|/home/u/repoA\n"})(),
             type("R", (), {"returncode": 0, "stdout": "master|/home/u/repoB\n"})(),
         ]
-        with patch("cld.host_docker.in_master_container", return_value=False), \
-             patch("cld.host_docker.subprocess.run", side_effect=[ps_result, *inspect_results]):
+        with patch("cld.broker.in_master_container", return_value=False), \
+             patch("cld.broker.subprocess.run", side_effect=[ps_result, *inspect_results]):
             containers = list_containers()
         assert containers == [
             {"name": "cld_agent_repoA", "kind": "agent", "repo": "/home/u/repoA", "status": "running"},
@@ -868,8 +868,8 @@ class TestListContainers:
 
     def test_docker_failure_returns_empty(self, tmp_path):
         fail_result = type("R", (), {"returncode": 1, "stdout": "", "stderr": "docker not found"})()
-        with patch("cld.host_docker.in_master_container", return_value=False), \
-             patch("cld.host_docker.subprocess.run", return_value=fail_result):
+        with patch("cld.broker.in_master_container", return_value=False), \
+             patch("cld.broker.subprocess.run", return_value=fail_result):
             assert list_containers() == []
 
 

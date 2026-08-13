@@ -13,31 +13,12 @@ if [ -n "${MYSQL_DEFAULTS_FILE:-}" ] && [ -f "$MYSQL_DEFAULTS_FILE" ]; then
     chmod +x /tmp/bin/mysql
 fi
 
-# Install the host-run wrapper when a host test broker is configured. It ships
-# arbitrary args to the broker as base64(NUL-joined argv) so they can only ever
-# become pytest argv, never a host command; the broker runs the `runtests`
-# container on the host and streams output back. CLD_HOST_BROKER is [user@]host:port
-# (default user: zet). See docs/design-host-test-running.md.
-if [ -n "${CLD_HOST_BROKER:-}" ] && [ -f /run/secrets/host-broker-key ]; then
-    cat > /tmp/bin/host-run <<'HOSTRUN'
-#!/bin/bash
-set -euo pipefail
-# host-run [--action <name>] <args...>  (default action: run-tests)
-action=run-tests
-[ "${1:-}" = --action ] && { action="$2"; shift 2; }
-endpoint="$CLD_HOST_BROKER"
-hostport="${endpoint##*@}"
-user=zet
-[ "$endpoint" != "$hostport" ] && user="${endpoint%@*}"
-payload=$(printf '%s\0' "$@" | base64 -w0)
-exec ssh -i /run/secrets/host-broker-key \
-    -o UserKnownHostsFile=/run/secrets/host-broker-known \
-    -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
-    -p "${hostport##*:}" "$user@${hostport%%:*}" \
-    -- "$action $SESSION_NAME $payload"
-HOSTRUN
-    chmod +x /tmp/bin/host-run
-    echo "[INFO] Host test broker ready: run tests via 'host-run <pytest args>'"
+# The broker client is `cld broker <action>` (cld/broker.py), not a wrapper script:
+# one implementation of the ssh call, shared by the CLI and by everything that
+# reaches the host through it. CLD_BROKER_ENDPOINT is [user@]host:port (default
+# user: zet). See docs/design-cld-broker.md.
+if [ -n "${CLD_BROKER_ENDPOINT:-}" ] && [ -f /run/secrets/broker-key ]; then
+    echo "[INFO] cld broker ready: run tests via 'cld broker run-tests <pytest args>'"
 fi
 
 # Symlink workspace-root files (e.g., .env) from origin into workspace.

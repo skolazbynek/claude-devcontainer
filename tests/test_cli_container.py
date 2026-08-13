@@ -142,7 +142,7 @@ class TestTaskAgentDispatch:
             op = self._broker(stack, tmp_path, monkeypatch, available=False)
             result = runner.invoke(app, ["task-agent", "shutdown", "slug"])
         assert result.exit_code == 1
-        assert "host_broker_key" in result.output
+        assert "broker_key" in result.output
         assert "transcript" in result.output      # reading the fleet needs no broker
         assert not op.called
 

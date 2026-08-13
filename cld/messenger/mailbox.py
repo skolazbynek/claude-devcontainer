@@ -18,7 +18,7 @@ mailboxes. ``meta.json`` and ``state.json`` are split by lifetime: what an agent
 All mutations are same-filesystem ``rename()`` calls, so no reader ever observes
 a partial write. Pure filesystem code -- no MCP/FastMCP imports here so it stays
 unit-testable with ``tmp_path``. Container enumeration (the one non-filesystem
-bit) is delegated to ``cld.host_docker`` and imported lazily inside
+bit) is delegated to ``cld.broker`` and imported lazily inside
 ``list_containers``.
 """
 
@@ -688,7 +688,7 @@ def list_containers(kind: str | None = None) -> list[dict]:
     master (there is no docker socket in-container). Stopped masters are
     included; agent containers run ``--rm`` and disappear once exited.
     """
-    from cld.host_docker import list_cld_containers
+    from cld.broker import list_cld_containers
     return list_cld_containers(kind)
 
 

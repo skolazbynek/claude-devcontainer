@@ -28,9 +28,9 @@ MAILBOX_MOUNT = "/var/cld/mailboxes"
 # Allowlist only -- avoid leaking gh/aws/gcloud/etc creds.
 _RO_HOME_MOUNT_ROOT = "/tmp/host-config"
 
-# Host test-broker key + pinned known_hosts land here (RO). See stage_host_broker.
-_HOST_BROKER_KEY_MOUNT = "/run/secrets/host-broker-key"
-_HOST_BROKER_KNOWN_HOSTS_MOUNT = "/run/secrets/host-broker-known"
+# Broker key + pinned known_hosts land here (RO). See stage_broker.
+_BROKER_KEY_MOUNT = "/run/secrets/broker-key"
+_BROKER_KNOWN_HOSTS_MOUNT = "/run/secrets/broker-known-hosts"
 
 
 def find_repo_root(start: Path | None = None) -> Path:
@@ -259,7 +259,7 @@ def anchor_env_args(cfg: Config, session: str, revision: str) -> list[str]:
     peer entrypoint uses it as the base for ``jj workspace add`` and then creates
     the anchor commit B inside that workspace via ``stage_from_env``. See
     docs/design-anchor-change.md. Only ever called host-side now: launches from
-    inside master are delegated to the host broker (see cld/host_docker.py), so
+    inside master are delegated to the host broker (see cld/broker.py), so
     the container itself never builds a peer's args.
     """
     from cld.vcs import get_backend
@@ -511,7 +511,7 @@ def build_container_args(
     # $HOME back to host paths (path translation, sibling-target resolution).
     # Always set -- these used to ride along with the docker socket mount, which
     # has since been removed (the host channel is now the broker; see
-    # cld/host_docker.py and docs/design-host-test-running.md).
+    # cld/broker.py and docs/design-cld-broker.md).
     args += [
         "-e", f"CLD_HOST_PROJECT_DIR={host_repo_root}",
         "-e", f"CLD_HOST_HOME={host_home}",
@@ -526,8 +526,8 @@ def build_container_args(
     # No docker socket is mounted into any container (it was equivalent to host
     # root). In-container docker needs -- peer enumeration and sibling `cld
     # agent` launches from inside master -- go through the host broker over SSH
-    # (see cld/host_docker.py, host-broker/host-broker.sh). The broker key is
-    # mounted master-only by stage_host_broker below.
+    # (see cld/broker.py, broker/cld-broker.sh). The broker key is
+    # mounted master-only by stage_broker below.
 
     # MySQL (conditional)
     if cfg.mysql_config:
@@ -545,9 +545,9 @@ def build_container_args(
             log.warning(f"CLD_MYSQL_CONFIG set but file not found: {cfg.mysql_config}")
 
     # Host test broker (master only): mount the restricted key + known_hosts and
-    # install the host-run wrapper. No-op unless host_broker_key is set.
+    # make the broker reachable. No-op unless broker_key is set.
     if master:
-        args += stage_host_broker(cfg)
+        args += stage_broker(cfg)
 
     # Mailbox tree (persistent roles only) -- shared RW mount so every master,
     # agent and task-agent container sees the same mailbox filesystem.
@@ -610,7 +610,7 @@ def build_container_args(
         args += ["-e", f"MASTER_TARGETS={joined}"]
         # Host-set, immutable allowlist the broker validates sibling `cld agent`
         # launches against (a container can rewrite its MASTER_TARGETS env but
-        # not this label). See action_agent in host-broker/host-broker.sh.
+        # not this label). See action_agent in broker/cld-broker.sh.
         args += ["--label", f"org.cld.targets={joined}"]
 
     log.debug("Container args: %s", mask_secrets(repr(args)))
@@ -867,41 +867,41 @@ def stage_ssh_agent(cfg: Config) -> list[str]:
     ]
 
 
-def stage_host_broker(cfg: Config) -> list[str]:
-    """Return docker args wiring a master container to the host test broker.
+def stage_broker(cfg: Config) -> list[str]:
+    """Return docker args wiring a master container to the cld broker.
 
     Mounts the restricted broker private key (and, if given, the pinned
     known_hosts) RO, adds a host-gateway alias so the container can reach the
-    host-side sshd, and sets ``CLD_HOST_BROKER`` so ``container-init.sh`` installs
-    the ``host-run`` wrapper. No-op unless ``cfg.host_broker_key`` is set. The
+    host-side sshd, and sets ``CLD_BROKER_ENDPOINT`` so the in-container client
+    (``cld broker <action>``) can reach it. No-op unless ``cfg.broker_key`` is set. The
     broker only accepts ``cld_master_*`` sessions, so this is master-only.
-    See docs/design-host-test-running.md.
+    See docs/design-cld-broker.md.
     """
-    if not cfg.host_broker_key:
+    if not cfg.broker_key:
         return []
-    key = Path(cfg.host_broker_key).expanduser()
+    key = Path(cfg.broker_key).expanduser()
     if not key.is_file():
-        log.warning("host_broker_key set but not found: %s", key)
+        log.warning("broker_key set but not found: %s", key)
         return []
     host_key = to_host_path(str(key.resolve()), cfg)
     args = [
         "--add-host", "host.docker.internal:host-gateway",
-        "-v", f"{host_key}:{_HOST_BROKER_KEY_MOUNT}:ro",
-        "-e", f"CLD_HOST_BROKER={cfg.host_broker_endpoint}",
+        "-v", f"{host_key}:{_BROKER_KEY_MOUNT}:ro",
+        "-e", f"CLD_BROKER_ENDPOINT={cfg.broker_endpoint}",
     ]
-    if cfg.host_broker_known_hosts:
-        known = Path(cfg.host_broker_known_hosts).expanduser()
+    if cfg.broker_known_hosts:
+        known = Path(cfg.broker_known_hosts).expanduser()
         if known.is_file():
             host_known = to_host_path(str(known.resolve()), cfg)
-            args += ["-v", f"{host_known}:{_HOST_BROKER_KNOWN_HOSTS_MOUNT}:ro"]
+            args += ["-v", f"{host_known}:{_BROKER_KNOWN_HOSTS_MOUNT}:ro"]
         else:
-            log.warning("host_broker_known_hosts set but not found: %s", known)
+            log.warning("broker_known_hosts set but not found: %s", known)
     else:
         log.warning(
-            "host_broker_key set but host_broker_known_hosts is empty -- "
-            "host-run's strict host-key check will fail without a pinned known_hosts"
+            "broker_key set but broker_known_hosts is empty -- "
+            "cld broker run-tests's strict host-key check will fail without a pinned known_hosts"
         )
-    log.info("Host test broker wired: key -> %s, endpoint %s", _HOST_BROKER_KEY_MOUNT, cfg.host_broker_endpoint)
+    log.info("Host test broker wired: key -> %s, endpoint %s", _BROKER_KEY_MOUNT, cfg.broker_endpoint)
     return args
 
 

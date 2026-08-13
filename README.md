@@ -269,7 +269,7 @@ No container mounts `/var/run/docker.sock` (it was equivalent to host root; see 
 - **Peer enumeration** (`list_agents`, `cld agent status`): master calls the broker's `list-containers` action, which runs `docker ps` on the host and streams structured records back. Agents don't enumerate at all -- message replies address the sender by the full name carried in the message, delivered by filesystem, so agents need no host channel.
 - **Launching a sibling `cld agent` from inside master**: `cld agent` in master resolves the cwd's target repo and calls the broker's `agent` action, which runs host-side `cld agent` for that repo (validated against the master's host-set `org.cld.targets` label). Arg-building, anchor staging, and image builds all happen natively on the host.
 
-See `cld/host_docker.py` (the host-vs-broker seam) and `host-broker/host-broker.sh` (the actions). Path translation (`CLD_HOST_PROJECT_DIR`/`CLD_HOST_HOME`) still converts container paths to host paths for target resolution; it is now set unconditionally rather than riding along with the socket mount.
+See `cld/broker.py` (the host-vs-broker seam) and `broker/cld-broker.sh` (the actions). Path translation (`CLD_HOST_PROJECT_DIR`/`CLD_HOST_HOME`) still converts container paths to host paths for target resolution; it is now set unconditionally rather than riding along with the socket mount.
 
 ### Security model and known gaps
 
@@ -317,7 +317,7 @@ Full set of keys:
 | `devcontainer_image` | string | `"claude-devcontainer:latest"` | Devcontainer image (`cld`, `cld master`) |
 | `run_image` | string | `"claude-run:latest"` | One-shot run image (`cld run`) |
 | `mysql_config` | string | `""` | Path to a `.cnf` file, mounted RO at `/run/secrets/mysql.cnf` |
-| `pyproject_dir` | string | `"."` | Directory (relative to repo root) holding `pyproject.toml` and `.env`. Not a `Config` field -- read directly out of `.cld/config.toml` by `host-broker.sh` on the host, for the host test broker's `PROJECT_SUBDIR` and secrets path (see "Host-side test running" in `CLAUDE.md`) |
+| `pyproject_dir` | string | `"."` | Directory (relative to repo root) holding `pyproject.toml` and `.env`. Not a `Config` field -- read directly out of `.cld/config.toml` by `cld-broker.sh` on the host, for the broker's `PROJECT_SUBDIR` and secrets path (see "Host-side test running" in `CLAUDE.md`) |
 | `ssl_certs_path` | string | `""` | Opt-in override: host path (dir or PEM file) that **replaces** the baked CA bundle. Empty = use the baked bundle |
 | `home_mounts_always` | array of strings | `[".claude.json", ".config/anthropic", ".config/claude", ".config/jj"]` | RO `$HOME` paths staged into every container |
 | `home_mounts_devcontainer` | array of strings | `[".gitconfig", ".bashrc", ".config/nvim", ".local/state/nvim", ".cache/nvim"]` | Additional RO `$HOME` paths staged only for interactive devcontainer sessions |
@@ -331,9 +331,9 @@ Full set of keys:
 | `mailbox_root` | string | `"~/.cld/mailboxes"` | Host root of the inter-container mailbox tree (bind-mounted RW into every master/agent) |
 | `agent_max_turns` | int | `30` | Per-message turn cap passed to the repo agent's `claude -p --max-turns` |
 | `agent_kickoff_persona` | string | `"agent"` | Persona used to kick off a new `cld agent` Claude session |
-| `host_broker_key` | string | `""` | Host path to the restricted host-test-broker **private** key. Setting this enables the `host-run` wrapper inside `cld master`. Master-only |
-| `host_broker_endpoint` | string | `"host.docker.internal:2222"` | Broker SSH endpoint, `[user@]host:port` (default login user `zet`) |
-| `host_broker_known_hosts` | string | `""` | Host path to the pinned `known_hosts` for the broker; required for `host-run`'s strict host-key check |
+| `broker_key` | string | `""` | Host path to the restricted broker **private** key. Setting this enables `cld broker <action>` inside `cld master`. Master-only |
+| `broker_endpoint` | string | `"host.docker.internal:2222"` | Broker SSH endpoint, `[user@]host:port` (default login user `zet`) |
+| `broker_known_hosts` | string | `""` | Host path to the pinned `known_hosts` for the broker; required for the client's strict host-key check |
 | `log_level` | string | `"INFO"` | Root level for the `cld` logger hierarchy: `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `log_color` | string | `"auto"` | ANSI color in log output: `auto` (TTY-detect) / `always` / `never` |
 | `debug` | bool | `false` | Diagnostics flag; back-compat alias for `log_level = "DEBUG"` when `log_level` is otherwise unset |

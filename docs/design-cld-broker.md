@@ -1,9 +1,49 @@
-# Host-side test running (`runtests` + SSH broker)
+# The cld broker (`runtests` + host-side actions over SSH)
 
-**Status:** Phases 1–3 implemented (`runtests/`, `host-broker/`, cld plumbing). Phase 4 (setup UX) deferred.
+**Status:** Phases 1–4 implemented (`runtests/`, `broker/`, cld plumbing). The broker now
+serves more than test running: `run-tests`, `list-containers`, `agent`, `task-agent`.
 **Date:** 2026-07-29
 **Related:** Option A (SSH forced command) brainstorm; supersedes the in-container
 `.env`-injection approach for the *test-running* use case.
+
+## 0. Naming (one word: **broker**)
+
+The feature had three names -- `host-broker.sh` on the host, `brokerctl.sh` beside it,
+`host-run` in the container. It has one now:
+
+| | Name |
+|---|---|
+| the dispatcher sshd runs as its `ForceCommand` | `broker/cld-broker.sh` |
+| the operator's control script for that sshd | `broker/cld-brokerctl.sh` |
+| its broker-wide config | `/etc/cld/broker.conf` (`broker/broker.conf.sample`) |
+| the in-container client | `cld broker <action> [args…]` (`cld/broker.py`) |
+| config keys | `broker_key`, `broker_endpoint`, `broker_known_hosts` |
+| container env / mounts | `CLD_BROKER_ENDPOINT`, `/run/secrets/broker-key`, `/run/secrets/broker-known-hosts` |
+
+The client is Python now, not a generated shell wrapper: one implementation of the ssh
+call for both `cld broker` and everything that reaches the host through `cld/broker.py`
+(container enumeration, the `agent` / `task-agent` lifecycles). The action name is a
+positional (`cld broker run-tests -k login`), matching the `action_<name>` functions in
+the dispatcher and the `<action> <session> <base64-argv>` wire format; there is no
+implicit default action anymore.
+
+### Operator migration
+
+A host set up with the old names needs three edits (nothing else moved -- the wire
+format, the action set and the keypair are unchanged):
+
+1. **sshd config:** point `ForceCommand` at the new path, e.g.
+   `ForceCommand /path/to/cld/broker/cld-broker.sh` (sample: `broker/sshd_cld_broker.conf`).
+2. **broker config:** `mv "$CLD_BROKER_DIR/host-broker.conf" "$CLD_BROKER_DIR/broker.conf"`
+   and update `SetEnv CLD_BROKER_CONF=…/broker.conf` in the sshd config.
+3. **cld config:** rename `host_broker_key` / `host_broker_endpoint` /
+   `host_broker_known_hosts` to `broker_key` / `broker_endpoint` / `broker_known_hosts`
+   in `~/.config/cld/config.toml`. The old spellings are a **hard error**, not a
+   warning: ignoring them would leave the broker silently off, which breaks every
+   task-agent launch.
+
+Then `broker/cld-brokerctl.sh restart`, and `cld master restart` so the container picks
+up the new mounts and env.
 
 ## 1. Problem
 
@@ -27,7 +67,7 @@ streamed test output.
 
 | # | Decision |
 |---|---|
-| 1 | The docker socket is **no longer mounted** into any cld container. **Master has no docker socket** — the broker (SSH) is `claude`'s only host channel, so secrets genuinely stay away from `claude`. In-container docker needs (peer enumeration, sibling `cld agent` launches) route through broker actions; see `cld/host_docker.py` and the `list-containers`/`agent` actions in `host-broker/host-broker.sh`. |
+| 1 | The docker socket is **no longer mounted** into any cld container. **Master has no docker socket** — the broker (SSH) is `claude`'s only host channel, so secrets genuinely stay away from `claude`. In-container docker needs (peer enumeration, sibling `cld agent` launches) route through broker actions; see `cld/broker.py` and the `list-containers`/`agent` actions in `broker/cld-broker.sh`. |
 | 2 | The **raw `.env` may be mounted** into the `runtests` container (`claude` cannot reach that container). |
 | 3 | `runtests` accepts an **arbitrary `REVISION`**; when run ad-hoc it **defaults to `@`**. In the brokered path the broker supplies the change. |
 | 4 | The broker passes **the current change of the `cld master` container's jj workspace**. |
@@ -51,7 +91,7 @@ guarantee `cld master`/`agent` already rely on.
 
 ```
 ┌─ STANDALONE PROJECT: runtests/ ───────┐   ┌─ cld-side glue (host) ───────────────┐
-│ own Dockerfile + entrypoint, Debian   │   │ host-broker.sh  (SSH ForceCommand)   │
+│ own Dockerfile + entrypoint, Debian   │   │ cld-broker.sh  (SSH ForceCommand)    │
 │ jj + python + poetry + CA certs       │◀──│ resolves master session → REVISION   │
 │ single job: pytest @ a revision       │   │ (store-reading), then docker run     │
 │ zero cld coupling                     │   │ --rm runtests …                      │
@@ -59,7 +99,7 @@ guarantee `cld master`/`agent` already rely on.
                                                         ▲
                                           ┌─ cld plumbing (in master image) ─┐
                                           │ restricted SSH key + host-gateway │
-                                          │ `host-run` wrapper on PATH        │
+                                          │ `cld broker` client on PATH       │
                                           └───────────────────────────────────┘
 ```
 
@@ -67,7 +107,7 @@ Three units, one coupling point (the broker):
 
 - **`runtests`** — generic tool. Knows a store, a revision, a `.env`, pytest args.
 - **broker** — the only cld-aware piece; translates "master's current change" → a plain `REVISION`.
-- **cld plumbing** — mounts the restricted key, adds host-gateway, installs `host-run`.
+- **cld plumbing** — mounts the restricted key, adds host-gateway, installs the `cld broker` client.
 
 ## 5. Component A — the `runtests` container (standalone)
 
@@ -147,7 +187,7 @@ per-repo.
 The action resolves to a shell function `action_<name>` (adding an action = defining
 a function; unknown ⇒ denied). Shared context is prepared once, then the function runs.
 
-**`host-broker.sh` (sketch):**
+**`cld-broker.sh` (sketch):**
 ```bash
 read -r action session payload <<<"$SSH_ORIGINAL_COMMAND"
 [[ "$action" =~ ^[a-z][a-z0-9-]*$ ]] || exit 2
@@ -171,7 +211,7 @@ mapfile -d '' args < <(printf %s "$payload" | base64 -d)   # no eval, no host in
 #                   -e REVISION=$REV -e PROJECT_SUBDIR=$PROJECT_SUBDIR $RUNTESTS_IMAGE "$@"
 ```
 
-**Safe arbitrary-args over SSH.** The container-side `host-run` wrapper NUL-joins and
+**Safe arbitrary-args over SSH.** The container-side `cld broker` wrapper NUL-joins and
 base64-encodes its argv; the broker decodes into an argv array and never `eval`s it.
 Result: arbitrary pytest args are allowed, but they can only ever be argv to pytest —
 never a new host command.
@@ -180,39 +220,39 @@ never a new host command.
 
 **Config (`cld/config.py`):**
 ```python
-host_broker_key: str = ""                              # host path to dedicated PRIVATE key; empty = off
-host_broker_endpoint: str = "host.docker.internal:2222"
-host_broker_known_hosts: str = ""                      # pinned host key
+broker_key: str = ""                              # host path to dedicated PRIVATE key; empty = off
+broker_endpoint: str = "host.docker.internal:2222"
+broker_known_hosts: str = ""                      # pinned host key
 ```
 
-**`build_container_args` (guarded on `host_broker_key`):**
+**`build_container_args` (guarded on `broker_key`):**
 ```
 --add-host=host.docker.internal:host-gateway          # Linux, Docker 20.10+
--v <key>:/run/secrets/host-broker-key:ro
--v <known_hosts>:/run/secrets/host-broker-known:ro
--e CLD_HOST_BROKER=host.docker.internal:2222
+-v <key>:/run/secrets/broker-key:ro
+-v <known_hosts>:/run/secrets/broker-known-hosts:ro
+-e CLD_BROKER_ENDPOINT=host.docker.internal:2222
 ```
 
-**`host-run` wrapper (installed by `container-init.sh` when `CLD_HOST_BROKER` set):**
+**`cld broker` wrapper (installed by `container-init.sh` when `CLD_BROKER_ENDPOINT` set):**
 ```bash
 payload=$(printf '%s\0' "$@" | base64 -w0)
-exec ssh -i /run/secrets/host-broker-key \
-  -o UserKnownHostsFile=/run/secrets/host-broker-known \
+exec ssh -i /run/secrets/broker-key \
+  -o UserKnownHostsFile=/run/secrets/broker-known-hosts \
   -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
-  -p "${CLD_HOST_BROKER##*:}" broker@"${CLD_HOST_BROKER%%:*}" \
+  -p "${CLD_BROKER_ENDPOINT##*:}" broker@"${CLD_BROKER_ENDPOINT%%:*}" \
   -- "run-tests $SESSION_NAME $payload"
 ```
 
 **Host setup (once, pre-launch):** dedicated hardened `sshd` (own port bound to the
 docker bridge gateway) with `Match User cld-broker` / `ForceCommand
-/opt/cld/host-broker.sh`, plus the dedicated keypair. `cld` only ships the client
+/opt/cld/cld-broker.sh`, plus the dedicated keypair. `cld` only ships the client
 side (key mount + wrapper + image name); the sshd + broker script are host setup.
 
 ## 8. End-to-end workflow
 
 ```
-master> host-run -k login -x tests/                       (claude or user)
-  → ssh (restricted key) → host sshd → ForceCommand host-broker.sh
+master> cld broker run-tests -k login -x tests/                       (claude or user)
+  → ssh (restricted key) → host sshd → ForceCommand cld-broker.sh
       → validate action=run-tests, session=cld_master_…
       → REV = tip of session bookmark   (store-reading; may lag watchman by seconds)
       → docker run --rm runtests  -e REVISION=REV  -v repo  -v .env  -- -k login -x tests/
@@ -228,7 +268,7 @@ master> host-run -k login -x tests/                       (claude or user)
   config + `ForceCommand`. The container can only pass a session id (validated) and
   pytest argv. It cannot change *what* runs or run anything else on the host.
 - **Secret isolation depends on the socket being gone** (decision 1). With no socket,
-  `host-run` is `claude`'s only host channel, and it returns only test output. The
+  `cld broker` is `claude`'s only host channel, and it returns only test output. The
   raw `.env` is mounted into the ephemeral `--rm` runner, which `claude` cannot reach.
 - **VCS isolation:** `jj workspace add` guarantees the host user's `@` is never moved.
 - **Repo scoping (multi-repo, §13):** the target repo comes from the calling master's
@@ -241,7 +281,7 @@ master> host-run -k login -x tests/                       (claude or user)
 |---|---|---|
 | `runtests` | store, revision, `.env`, pytest args | **none** (standalone) |
 | broker | cld session naming, repo label, cld-config secrets key, image | the single bridge |
-| cld plumbing | key/endpoint, `host-run`, image name | client side only |
+| cld plumbing | key/endpoint, `cld broker`, image name | client side only |
 
 ## 10. Caveats
 
@@ -266,17 +306,17 @@ master> host-run -k login -x tests/                       (claude or user)
 - *Implementation note:* the workspace name is derived from the container hostname, not `tr … | head` — the latter trips `set -o pipefail` via SIGPIPE.
 
 **Phase 2 — host broker + sshd. ✅ done.**
-- `host-broker/host-broker.sh`, `host-broker.conf.sample`, `sshd_cld_broker.conf`, `keygen.sh`, `README.md`.
+- `broker/cld-broker.sh`, `broker.conf.sample`, `sshd_cld_broker.conf`, `keygen.sh`, `README.md`.
 - *Verified (with jj/docker shims):* a valid `run-tests <session> <b64>` resolves the revision via `jj -R <repo> log -r <session>` and builds the correct `docker run` with decoded pytest argv; bad action, path-traversal sessions, and shell-metachar sessions all exit non-zero. `keygen.sh` produces the client/host keys, `restrict`-prefixed authorized_keys, and the known_hosts line.
 
 **Phase 3 — cld plumbing. ✅ done.**
-- Config fields `host_broker_key` / `host_broker_endpoint` / `host_broker_known_hosts` (§7), `stage_host_broker()` wired master-only into `build_container_args`, `host-run` wrapper in `container-init.sh` (supports `[user@]host:port`), docs (CLAUDE.md, config template, `.claude/skills/host-run-tests/`), and `TestStageHostBroker` unit tests.
-- *Verified end-to-end, including from a live master:* `stage_host_broker` mounts/gateway/endpoint tests pass; the generated `host-run` wrapper parses endpoints and emits the exact base64(NUL-joined) payload the broker decodes. With the host-side sshd running, `docker exec`'d into a real running `cld_master_<repo>_*` container, `/tmp/bin/host-run -q --collect-only` correctly resolved the repo via the container's `org.cld.repo-root` label, the broker ran `runtests` against that session's current change, and pytest collected the suite with exit 0 -- confirming the label-based multi-repo resolution (not just a single hard-pinned repo) works against a real master container, not just a synthetic session.
+- Config fields `broker_key` / `broker_endpoint` / `broker_known_hosts` (§7), `stage_broker()` wired master-only into `build_container_args`, `cld broker` wrapper in `container-init.sh` (supports `[user@]host:port`), docs (CLAUDE.md, config template, `.claude/skills/cld broker run-tests-tests/`), and `TestStageBroker` unit tests.
+- *Verified end-to-end, including from a live master:* `stage_broker` mounts/gateway/endpoint tests pass; the generated `cld broker` wrapper parses endpoints and emits the exact base64(NUL-joined) payload the broker decodes. With the host-side sshd running, `docker exec`'d into a real running `cld_master_<repo>_*` container, `cld broker -q --collect-only` correctly resolved the repo via the container's `org.cld.repo-root` label, the broker ran `runtests` against that session's current change, and pytest collected the suite with exit 0 -- confirming the label-based multi-repo resolution (not just a single hard-pinned repo) works against a real master container, not just a synthetic session.
 
 **Phase 4 — operation UX. ✅ done (operation); init/test still optional.**
-- `host-broker/brokerctl.sh` drives the daemon: `start` / `restart` / `shutdown` / `status` / `logs`. Starts sshd detached (no `-D`), tracks it by PID file, logs to `$CLD_BROKER_DIR/sshd.log`, idempotent `start`, surfaces the `/run/sshd` privsep hint on failure. First-time setup stays manual (`broker-setup-home.md`); day-to-day is seamless.
+- `broker/cld-cld-brokerctl.sh` drives the daemon: `start` / `restart` / `shutdown` / `status` / `logs`. Starts sshd detached (no `-D`), tracks it by PID file, logs to `$CLD_BROKER_DIR/sshd.log`, idempotent `start`, surfaces the `/run/sshd` privsep hint on failure. First-time setup stays manual (`broker-setup-home.md`); day-to-day is seamless.
 - *Verified:* control logic (status/shutdown/bad-verb/logs) exercised with a fake pidfile; sshd itself not run in this sandbox (not installed).
-- Still optional: `cld host-broker init|test` to scaffold keys/sshd/authorized_keys and smoke-test end to end.
+- Still optional: `cld broker init|test` to scaffold keys/sshd/authorized_keys and smoke-test end to end.
 
 ## 12. Deferred / out of scope
 
@@ -297,7 +337,7 @@ REPO = docker inspect <session> --format '{{index .Config.Labels "org.cld.repo-r
 
 `<session>` == the master container `--name`, and the regex already pins it to
 `cld_master_*`. A session that names no running master resolves to empty → denied.
-This covers *any* repo, because `host-run` only ever runs inside a master, so a
+This covers *any* repo, because `cld broker` only ever runs inside a master, so a
 master (hence the label) always exists.
 
 **Secrets per repo.** Default `<repo>/.env`; overridable by `pyproject_dir` in the

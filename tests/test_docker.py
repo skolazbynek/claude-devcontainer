@@ -23,7 +23,7 @@ from cld.docker import (
     resolve_master_target,
     resolve_task_agent_anchor,
     stage_home_ro,
-    stage_host_broker,
+    stage_broker,
     task_agent_container_name,
     to_host_path,
 )
@@ -247,37 +247,37 @@ class TestInMasterContainer:
         assert in_master_container() is False
 
 
-class TestStageHostBroker:
+class TestStageBroker:
     def test_no_key_is_noop(self):
-        assert stage_host_broker(Config()) == []
+        assert stage_broker(Config()) == []
 
     def test_missing_key_returns_empty(self, tmp_path):
-        cfg = Config(host_broker_key=str(tmp_path / "nope"))
-        assert stage_host_broker(cfg) == []
+        cfg = Config(broker_key=str(tmp_path / "nope"))
+        assert stage_broker(cfg) == []
 
     def test_key_only_wires_gateway_and_endpoint(self, tmp_path):
         key = tmp_path / "broker_key"
         key.write_text("k")
-        cfg = Config(host_broker_key=str(key), host_broker_endpoint="host.docker.internal:2222")
-        args = stage_host_broker(cfg)
+        cfg = Config(broker_key=str(key), broker_endpoint="host.docker.internal:2222")
+        args = stage_broker(cfg)
         assert args[:2] == ["--add-host", "host.docker.internal:host-gateway"]
-        assert "-v" in args and f"{key}:/run/secrets/host-broker-key:ro" in args
-        assert "-e" in args and "CLD_HOST_BROKER=host.docker.internal:2222" in args
+        assert "-v" in args and f"{key}:/run/secrets/broker-key:ro" in args
+        assert "-e" in args and "CLD_BROKER_ENDPOINT=host.docker.internal:2222" in args
         # No known_hosts mount when it isn't configured.
-        assert not any("host-broker-known" in a for a in args)
+        assert not any("broker-known-hosts" in a for a in args)
 
     def test_known_hosts_mounted_when_present(self, tmp_path):
         key = tmp_path / "broker_key"; key.write_text("k")
         known = tmp_path / "known_hosts"; known.write_text("h")
-        cfg = Config(host_broker_key=str(key), host_broker_known_hosts=str(known))
-        args = stage_host_broker(cfg)
-        assert f"{known}:/run/secrets/host-broker-known:ro" in args
+        cfg = Config(broker_key=str(key), broker_known_hosts=str(known))
+        args = stage_broker(cfg)
+        assert f"{known}:/run/secrets/broker-known-hosts:ro" in args
 
     def test_endpoint_override_passed_through(self, tmp_path):
         key = tmp_path / "broker_key"; key.write_text("k")
-        cfg = Config(host_broker_key=str(key), host_broker_endpoint="me@1.2.3.4:2200")
-        args = stage_host_broker(cfg)
-        assert "CLD_HOST_BROKER=me@1.2.3.4:2200" in args
+        cfg = Config(broker_key=str(key), broker_endpoint="me@1.2.3.4:2200")
+        args = stage_broker(cfg)
+        assert "CLD_BROKER_ENDPOINT=me@1.2.3.4:2200" in args
 
 
 class TestDockerKindList:
@@ -427,15 +427,15 @@ class TestBuildContainerArgsTaskAgent:
         args = self._args(tmp_path)
         assert any(a.endswith(f":{MAILBOX_MOUNT}:rw") for a in args)
 
-    def test_no_host_broker_key(self, tmp_path):
+    def test_no_broker_key(self, tmp_path):
         key = tmp_path / "broker_key"
         key.write_text("k")
         args = build_container_args(
             tmp_path, "cld_agent_r_t",
-            Config(mailbox_root=str(tmp_path / "mb"), host_broker_key=str(key)),
+            Config(mailbox_root=str(tmp_path / "mb"), broker_key=str(key)),
             task_agent=TaskAgentSpec(slug="t"),
         )
-        assert not any("host-broker-key" in a for a in args)
+        assert not any("broker-key" in a for a in args)
 
     @pytest.mark.parametrize("kwargs", [
         {"master": True, "agent": True},

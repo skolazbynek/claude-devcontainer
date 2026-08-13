@@ -229,7 +229,7 @@ where there is no Docker socket.
 registered sibling target; the override flag is provably unreachable through the broker;
 the concurrent-agent smoke test is run and its outcome recorded below.
 
-**Touchpoints:** `cld/host_docker.py`, `host-broker/host-broker.sh`,
+**Touchpoints:** `cld/broker.py`, `broker/cld-broker.sh`,
 `prompts/personas/*` (master/control-tower guidance), `CLAUDE.md`,
 `tests/test_host_docker.py`.
 
@@ -574,7 +574,7 @@ can read an archived mailbox with the same helper.
 **`build_container_args` role handling** (`cld/docker.py:348-555`). One `if master and agent:
 raise` guard, then `if master or agent:` gates *three* separate things that a task-agent
 also needs: `--name` + the `org.cld.*` label set + the mode env (l.381-389), and the
-mailbox mount (l.492-514). `stage_host_broker` is `if master:` only — correct, a
+mailbox mount (l.492-514). `stage_broker` is `if master:` only — correct, a
 task-agent gets no host channel. Everything else (task file mount, `-p`, model, persona
 mount, ssh-agent) is added by the *launcher*, not here: see `cld/run.py:76-92` and
 `cli.py:344-367`.
@@ -609,7 +609,7 @@ collide with anything. P4 waits on the same file.
   deliverable bookmark must be created only when absent (reuse the entrypoint's existing
   `jj bookmark list -T 'name ++ "\n"' | grep -qx` idiom).
 - `ssh-keyscan` and `ssh` are present in the image (`/usr/bin`) — pulled in by `git`'s
-  Recommends, not an explicit dependency; `host-run` already relies on the same.
+  Recommends, not an explicit dependency; `cld broker` already relies on the same.
 - The repo's SSH remote is readable as `jj git remote list` → `origin git@host:path`.
 
 **Other constraints:** `_handle_errors` (`cli.py:55-64`) already turns `RuntimeError` /
@@ -808,7 +808,7 @@ supervisor is the PID-1 process; assert the task text was **not** consumed by a 
   right after creation. Worth checking on the first real run; the fix would be to create it
   at B but keep the agent's first change a child of B (already true).
 - **`ssh-keyscan` arrives via `git`'s Recommends.** Adding `--no-install-recommends` to the
-  base image later would break both `seed_known_hosts` and `host-run`.
+  base image later would break both `seed_known_hosts` and `cld broker`.
 - **Labels are host-set and unforgeable from inside a container**, which is what lets the
   cap and the parent check be trusted; keep any future "parent" input on the *launcher*
   side, never read from the container's own env.
@@ -1986,7 +1986,7 @@ The CLI path is gated regardless, which is the second reason the gate sits in th
    template: check `broker_available()`, resolve the target with `find_target_repo(cfg)`
    (which inside master is `resolve_master_target`, config/env only — no jj), then
    `raise typer.Exit(broker_agent_op(target, op, extra))`. It never returns.
-5. **`host-run` ships the whole argv inside the SSH command string**
+5. **`cld broker` ships the whole argv inside the SSH command string**
    (`ssh … -- "$action $SESSION_NAME $payload"`, payload = `base64 -w0` of NUL-joined
    argv). A few KB of task text is ~1.35× that in base64 and well inside any sshd/ARG_MAX
    bound; a multi-hundred-KB task would not be (§G).
@@ -2023,7 +2023,7 @@ The CLI path is gated regardless, which is the second reason the gate sits in th
 
 ## B. Deliverables — exact surface
 
-### B.1 `cld/host_docker.py`
+### B.1 `cld/broker.py`
 
 ```python
 def broker_task_agent_op(target: str, op: str, extra_args: list[str] | None = None) -> int
@@ -2050,7 +2050,7 @@ configured" message. Then per verb:
 Plus: `status` gains a hidden `--parent` that filters the roster; `_known_task_agent_names`
 skips the docker enumeration when `in_master_container()` (§A.9).
 
-### B.3 `host-broker/host-broker.sh` — `action_task_agent`
+### B.3 `broker/cld-broker.sh` — `action_task_agent`
 
 ```sh
 validate_target()      # extracted from action_agent, used by both
@@ -2191,7 +2191,7 @@ Two host-side runs, results recorded in Scratch:
 | `broker_task_agent_op` | forwards `("task-agent", target, op, *extra)`; propagates the exit code (mirrors `TestBrokerAgentOp`) |
 | in-master `start` | dispatches instead of launching; argv carries persona, `-n`, composed `-p`, `--branch`, `-m`, `-r`, each `--peer`; an `@ref` task file is forwarded verbatim; a real path is read and folded into `-p`; **no** `--parent` in the argv |
 | in-master `status`/`logs`/`shutdown` | dispatch with the right op and argv; `shutdown --force` refused locally with a host-only message; `--all` forwarded |
-| in-master `transcript` | works **without** the broker (no `host-run`, no docker) against the mounted mailbox |
+| in-master `transcript` | works **without** the broker (no `cld broker`, no docker) against the mounted mailbox |
 | in-master resolver | `_known_task_agent_names` makes no docker call inside master and resolves a bare slug from mailboxes alone |
 | `status --parent` | roster filtered to that master's fleet; detail view unaffected |
 | broker script | `bash -n`; op allowlist rejects `restart` and garbage; `--force` and a caller-supplied `--parent` denied; persona containing `/` denied; target not in the labels denied; `--parent $session` appended |
@@ -2232,10 +2232,10 @@ only outstanding work in P1–P6 and is listed in Scratch.
 
 - `cld/prompts.py`: `persona_resolve` validates the name against
   `^[A-Za-z0-9][A-Za-z0-9._-]*$`, closing the traversal §A.6 verified.
-- `host-broker/host-broker.sh`: `validate_target` extracted from `action_agent`;
+- `broker/cld-broker.sh`: `validate_target` extracted from `action_agent`;
   `action_task_agent` added (op allowlist, `--force` and caller `--parent` denied,
   persona-must-be-a-bare-name, `--parent "$session"` appended).
-- `cld/host_docker.py`: `broker_task_agent_op`.
+- `cld/broker.py`: `broker_task_agent_op`.
 - `cld/cli.py`: `_dispatch_task_agent_to_broker`, `_task_agent_start_argv`, in-master
   branches on start/status/logs/shutdown, local `transcript`, `status --parent` scoping,
   `_task_agent_rows(cfg, parent)`, and the `_known_task_agent_names` docker skip.
@@ -2243,7 +2243,7 @@ only outstanding work in P1–P6 and is listed in Scratch.
   cross-references from `agent-start` ("wrong skill for one bounded task") and
   `messenger-agents` (the new kind, and full names for task-agents).
 - Docs: CLAUDE.md architecture bullet + broker action list + the in-master note in Key
-  Commands; `host-broker/README.md` action list; `docs/design-task-agents.md` §9 records
+  Commands; `broker/README.md` action list; `docs/design-task-agents.md` §9 records
   that a *separate* action was chosen and why.
 
 **A pre-existing bug P6 tripped over, now fixed:** `typer.Exit` subclasses `RuntimeError`
@@ -2266,7 +2266,7 @@ handler, which also removes the redundant `Command failed: 1` line after every c
    read needs no authority, which is the same reasoning that leaves `status <name>`
    unscoped.
 
-Both were found by exercising `host-broker.sh` directly with a stubbed `docker`/`cld` on
+Both were found by exercising `cld-broker.sh` directly with a stubbed `docker`/`cld` on
 `PATH` (eight cases: happy path, `--all`, `--force`, caller `--parent`, persona traversal,
 bad op, unregistered target, registered sibling) — worth keeping as the way to test this
 script, since none of it is Python.

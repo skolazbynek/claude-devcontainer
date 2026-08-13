@@ -13,7 +13,7 @@ BROKER="$HOME/.cld/broker"
 
 ```bash
 mkdir -p "$BROKER" && chmod 700 "$BROKER"
-host-broker/keygen.sh "$BROKER"
+broker/keygen.sh "$BROKER"
 ```
 
 Writes into `$BROKER/`: `broker_key(.pub)`, `broker_authorized_keys`,
@@ -30,16 +30,16 @@ printf '[host.docker.internal]:2222 %s\n' \
 ## 3. Broker script + config + control script
 
 ```bash
-cp host-broker/host-broker.sh "$BROKER/host-broker.sh" && chmod +x "$BROKER/host-broker.sh"
-cp host-broker/host-broker.conf.sample "$BROKER/host-broker.conf"
-${EDITOR:-nano} "$BROKER/host-broker.conf"
+cp broker/cld-broker.sh "$BROKER/cld-broker.sh" && chmod +x "$BROKER/cld-broker.sh"
+cp broker/broker.conf.sample "$BROKER/broker.conf"
+${EDITOR:-nano} "$BROKER/broker.conf"
 
 # Put brokerctl on PATH so operation is just `brokerctl start|restart|shutdown`.
 mkdir -p ~/.local/bin
-ln -sf "$PWD/host-broker/brokerctl.sh" ~/.local/bin/brokerctl
+ln -sf "$PWD/broker/cld-cld-brokerctl.sh" ~/.local/bin/brokerctl
 ```
 
-Set in `host-broker.conf` (broker-wide only — the repo and its `.env` are
+Set in `broker.conf` (broker-wide only — the repo and its `.env` are
 resolved per request from the calling master, so nothing per-repo goes here):
 
 ```sh
@@ -61,8 +61,8 @@ AuthorizedKeysFile $BROKER/broker_authorized_keys
 PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
-ForceCommand $BROKER/host-broker.sh
-SetEnv CLD_BROKER_CONF=$BROKER/host-broker.conf
+ForceCommand $BROKER/cld-broker.sh
+SetEnv CLD_BROKER_CONF=$BROKER/broker.conf
 PermitTTY no
 AllowTcpForwarding no
 AllowAgentForwarding no
@@ -74,7 +74,7 @@ EOF
 ```
 
 `SetEnv CLD_BROKER_CONF=…` is what lets the broker find its config in home
-(its built-in default is `/etc/cld/host-broker.conf`).
+(its built-in default is `/etc/cld/broker.conf`).
 
 ## 5. Operate it with `brokerctl`
 
@@ -126,11 +126,11 @@ docker rm -f cld_master_smoke; jj -R "$REPO" bookmark delete cld_master_smoke   
 In your project `.cld/config.toml` (or `~/.config/cld/config.toml`):
 
 ```toml
-host_broker_key = "~/.cld/broker/broker_key"
-host_broker_endpoint = "host.docker.internal:2222"
-host_broker_known_hosts = "~/.cld/broker/known_hosts"
+broker_key = "~/.cld/broker/broker_key"
+broker_endpoint = "host.docker.internal:2222"
+broker_known_hosts = "~/.cld/broker/known_hosts"
 ```
 
-The `host-run` wrapper lives in `container-init.sh` (baked into the base image),
-so rebuild it once — `cld build` — for `host-run` to appear in master. Then from
-inside master: `host-run -k login -x tests/` (or `host-run --action <name> …`).
+The `cld broker` wrapper lives in `container-init.sh` (baked into the base image),
+so rebuild it once — `cld build` — for `cld broker` to appear in master. Then from
+inside master: `cld broker run-tests -k login -x tests/` (or `cld broker <name> …`).

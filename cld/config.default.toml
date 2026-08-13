@@ -60,10 +60,10 @@ home_mounts_devcontainer = [
 # peer_absolute_limit = 10  # hop budget for a peer edge whose --peer spec omits one
 # root_ask_limit = 3        # asks allowed on a peer edge while one stays unanswered
 
-# Host test broker (master only). Set host_broker_key to enable a `host-run`
+# The cld broker (master only). Set broker_key to enable `cld broker <action>`
 # wrapper inside master that runs the repo's tests on the host via the standalone
 # `runtests` container, keeping secrets off the container. Requires host-side
-# setup (see host-broker/README.md). Off until host_broker_key is set.
-# host_broker_key = "~/.cld/broker/broker_key"
-# host_broker_endpoint = "host.docker.internal:2222"   # [user@]host:port
-# host_broker_known_hosts = "~/.cld/broker/known_hosts"
+# setup (see broker/README.md). Off until broker_key is set.
+# broker_key = "~/.cld/broker/broker_key"
+# broker_endpoint = "host.docker.internal:2222"   # [user@]host:port
+# broker_known_hosts = "~/.cld/broker/known_hosts"
