@@ -33,7 +33,7 @@ All commands must be run from within a VCS repository (jj or git).
 cld --help
 
 # Ephemeral interactive devcontainer (neovim, jj/git, poetry, claude with --dangerously-skip-permissions)
-cld [-n name] [-m model] [-r revision] [-p prompt] [task.md]
+cld [-n name] [-m model] [-r revision] [-p prompt]   # -p only; prompt refs go to `cld run`
 
 # Persistent per-repo interactive devcontainer (start-or-attach; idempotent per repo)
 cld master                                # start or re-attach

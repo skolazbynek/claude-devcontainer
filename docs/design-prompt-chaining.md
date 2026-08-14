@@ -141,12 +141,18 @@ rule to N refs:
 ### 5. Resulting surfaces
 
 ```bash
-cld [refs…] [-p TEXT]                          # ephemeral devcontainer
+cld [-p TEXT]                                  # ephemeral devcontainer
+cld master [-p TEXT]
 cld run [refs…] [-p TEXT]
 cld task-agent start [refs…] -n <slug> [-p TEXT] [--branch …] [-m …] [-r …] [--peer …]
+cld chain run <file> [refs…] [-p TEXT]
 ```
 
 - At least one of (refs, `-p`) is required — today's rule, unchanged.
+- Bare `cld` and `cld master` take `-p` only. Both are Typer *group callbacks*, and
+  click resolves a group's first positional as a subcommand name, so a ref there can
+  only ever be `No such command '@personas/architect'`. Refs stay on the real
+  commands; nothing else routes positionals past a group without a custom group class.
 - The persona stops being a **required** positional for `task-agent start`: the
   lifecycle preamble is always present, so a role-less task-agent is coherent. The
   roster shows the first persona-kind ref, or `-`.

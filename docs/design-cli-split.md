@@ -63,7 +63,7 @@ mailbox, no fleet and no broker key, so it has nothing to run.
 | `task-agent transcript` | mailbox mount | no host channel needed |
 | `agent [start]/restart/shutdown/status/logs` | host broker | |
 | `repos` | `MASTER_TARGETS` env | was `master repos`; see `design-master-target-selection.md` |
-| `msg send/inbox/read/archive/agents` | mailbox mount | replaces `python3 -m cld.messenger.*` |
+| `msg send/inbox/read/archive/agents` | mailbox mount | replaces `python3 -m cld.messenger.*`; shared with the host app (`cld/cli_msg.py`), since `resolve_self()` also resolves a host caller |
 | `broker <action> …` | ssh to the host broker | **lands with the broker-naming change**, not this one; until then the `host-run` wrapper stays as it is |
 | `prompts` | prompts trees | lists the `@refs` a task or persona argument accepts |
 
@@ -86,6 +86,9 @@ message, which is the accurate diagnosis.
   refuses and points at `cld`.
 - `cld/cli_container.py` — container app: broker dispatch, mailbox reads, the
   `--repo`-free cwd-independent verbs, the hidden host-only stubs.
+- `cld/cli_msg.py` — the `msg` sub-app and the shared `handle_errors` decorator, both
+  apps `add_typer` it: the mailbox verbs are the one surface that works unchanged on
+  either side, and duplicating them means the host skills that say `cld msg …` break.
 - `cld/task_agent.py` (new) — the pieces both apps need, moved out of `cli.py` as
   plain functions with no typer coupling: `_mailbox_root`, `_parse_peer_specs`,
   `_format_peers`, `_known_task_agent_names`, `_resolve_task_agent`,
@@ -101,8 +104,9 @@ because that translation exists only for the container→host hop.
 - `cld --help` in a container lists what that container can do, and nothing else.
 - Host code paths lose their container branches; `in_master_container()` survives
   only in the one guard above and in `docker.py`'s launch-time plumbing.
-- The messenger gets a first-class CLI (`cld msg …`); `python3 -m cld.messenger.*`
-  stays as the module-level implementation the MCP server and the CLI both call.
+- The messenger gets a first-class CLI (`cld msg …`) on both sides;
+  `python3 -m cld.messenger.*` stays as the module-level implementation the MCP server
+  and the CLI both call.
 
 ## Tests
 

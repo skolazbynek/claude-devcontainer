@@ -132,6 +132,23 @@ class TestStripFrontmatter:
         text = "---\nname: x\nno closing marker\n"
         assert strip_frontmatter(text) == text
 
+    def test_leading_markdown_rule_unchanged(self):
+        """A user task file may open with a rule; a rule is not a fence."""
+        text = "---\n\nStep one\n\n---\n\nStep two\n"
+        assert strip_frontmatter(text) == text
+
+    def test_task_file_without_frontmatter_unchanged(self):
+        text = "Fix the bug in cld/prompts.py\n\n- read it first\n"
+        assert strip_frontmatter(text) == text
+
+    def test_fence_looking_marker_mid_line_unchanged(self):
+        text = "--- name: x ---\n\nbody\n"
+        assert strip_frontmatter(text) == text
+
+    def test_closing_fence_must_be_alone_on_its_line(self):
+        text = "---\nname: x\n--- still frontmatter?\n\nbody\n"
+        assert strip_frontmatter(text) == text
+
 
 class TestRefIsAPathUnderPrompts:
     """`@personas/architect` -- the ref form the interface documents."""
@@ -243,6 +260,10 @@ class TestComposeBrief:
         brief = compose_brief(paths)
         assert "name:" not in brief
         assert brief == "# One\n\n# Two\n"
+
+    def test_task_file_opening_with_a_rule_is_not_truncated(self, tmp_path):
+        paths = self._files(tmp_path, "---\n\nStep one\n\n---\n\nStep two\n")
+        assert compose_brief(paths) == "---\n\nStep one\n\n---\n\nStep two\n"
 
     def test_inline_is_verbatim(self, tmp_path):
         """User text, not a template: a $VAR has to survive into the container."""

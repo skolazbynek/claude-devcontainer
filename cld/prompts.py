@@ -4,8 +4,13 @@ Every command that takes a persona or a task file takes an ordered list of **pro
 refs** instead -- `@<path-under-prompts>` or a filesystem path, personas and task files
 interchangeable -- plus one inline description. The refs are composed host-side, in
 argument order, into a single brief. See docs/design-prompt-chaining.md.
+
+That is `cld run`, `cld task-agent start` and `cld chain run`. Bare `cld` and
+`cld master` take `-p` only: they are group callbacks, whose first positional click
+resolves as a subcommand name.
 """
 
+import re
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -135,6 +140,11 @@ def resolve_prompt_args(
     return [resolve_prompt_arg(a, repo_root, cld_root) for a in args]
 
 
+# A `---` opening line, then the block, then a closing `---` on its own line.
+_FRONTMATTER_BLOCK = re.compile(r"---[ \t]*\r?\n(.*?\r?\n)?---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
+_YAML_KEY = re.compile(r"[A-Za-z_][\w.-]*[ \t]*:")
+
+
 def strip_frontmatter(text: str) -> str:
     """Drop a leading YAML frontmatter block, if there is one.
 
@@ -142,14 +152,21 @@ def strip_frontmatter(text: str) -> str:
     content: claude rejects a *system* prompt starting with `---`, and inside a
     composed brief the block is noise. Text with no leading block, or an unterminated
     one, comes back unchanged.
+
+    The fence test is structural because a markdown horizontal rule is spelled the
+    same as an opening fence: user task files legitimately open with a rule, and
+    treating that as frontmatter silently truncates the task down to the next rule.
+    A leading `---` only counts when the block's first non-empty line is `key:`-shaped.
     """
-    if not text.lstrip().startswith("---"):
-        return text
     stripped = text.lstrip()
-    end = stripped.find("---", 3)
-    if end == -1:
+    match = _FRONTMATTER_BLOCK.match(stripped)
+    if not match:
         return text
-    return stripped[end + 3:].lstrip()
+    inner = next((ln for ln in (match.group(1) or "").splitlines() if ln.strip()), "")
+    if not _YAML_KEY.match(inner):
+        return text
+    log.debug("stripped frontmatter block (%d chars)", match.end())
+    return stripped[match.end():].lstrip()
 
 
 def compose_brief(paths: Sequence[Path], inline: str = "") -> str:

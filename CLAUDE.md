@@ -21,24 +21,34 @@ cld/                             -- Python package (host-side CLI + shared logic
   cli.py                         -- host typer app (needs a docker daemon)
   cli_container.py               -- container typer app, installed as `cld` in the
                                     devcontainer image (docs/design-cli-split.md)
+  cli_msg.py                     -- the `msg` sub-app + the shared error decorator,
+                                    registered on both apps (host and container)
   task_agent.py                  -- task-agent helpers both apps use (name resolution,
                                     roster/detail rendering, peer specs, mailbox root)
+  prompts.py                     -- prompt-ref interface: `@ref` resolution (escape-checked),
+                                    frontmatter stripping, brief composition, listing
   docker.py                      -- container setup: arg building, image management, path translation
   broker.py                      -- host-vs-broker seam: local docker on host, SSH broker actions inside a container (no docker socket in containers)
   run.py                         -- one-shot run launch logic (`cld run`)
   agent_runtime.py               -- shared agent lifecycle helpers (wait, cost, formatting)
   chain.py                       -- declarative multi-step chain orchestrator
+  chain_state.py                 -- chain run state serialisation for detached execution
   vcs/                           -- VCS abstraction layer
     base.py                      -- abstract VcsBackend interface
     jj.py                        -- jujutsu backend implementation
     git.py                       -- git backend implementation (fallback)
     detect.py                    -- auto-detection: jj preferred, git fallback
+    anchor.py                    -- anchor resolution + descendant guard
+    scratch.py                   -- `.cld-run/` scratch staging + envelope encode/decode
   mcp/
     orchestrator.py              -- (deprecated) MCP server for orchestrating Docker agents. Not wired into any image or host claude; kept for reference.
     messenger.py                 -- MCP server for the mailbox transport (send/list_inbox/read_message/archive/list_agents)
+    graphql.py                   -- MCP server for GraphQL API testing (server lifecycle + queries)
   messenger/
     mailbox.py                   -- Filesystem mailbox transport (pure, unit-testable with tmpdirs)
     agent_loop.py                -- Repo agent supervisor daemon (`python -m cld.messenger.agent_loop`)
+    identity.py                  -- who the caller is: own session in a container, cwd repo's master on the host
+    send/inbox/read/archive/agents.py -- one thin module per `msg` verb, wrapping mailbox.py
 scripts/
   mcp/run-orchestrator.sh        -- (deprecated) thin venv wrapper; kept for reference
   mcp/run-messenger.sh           -- Thin venv wrapper for the messenger MCP server
@@ -72,7 +82,9 @@ devcontainer image (`~/.local/bin/cld` → `python3 -P -m cld.cli_container`) wh
 surface is only what a container can reach: `task-agent` (broker; `transcript` off the
 mailbox), `agent` (broker), `repos`, `msg send|inbox|read|archive|agents` (mailbox),
 `prompts`. Host-only verbs are hidden stubs that say "host-only". `python3 -m cld`
-inside a container refuses and points at `cld`.
+inside a container refuses and points at `cld`. `msg` is the one surface both apps
+share: it lives in `cld/cli_msg.py` and is registered on each, so `cld msg …` also
+works on the host, acting as the cwd repo's master (`cld.messenger.identity.resolve_self`).
 
 **Shared logic lives in three places:**
 - Host side: `cld/docker.py` -- imported by all commands. Provides `build_container_args`, `find_repo_root`, `ensure_image`, `build_session_name`, logging.
@@ -98,8 +110,10 @@ docker build -f imgs/claude-base/Dockerfile.claude-base -t claude-base:latest .
 docker build -f imgs/claude-devcontainer/Dockerfile.claude-devcontainer -t claude-devcontainer:latest .
 docker build -f imgs/claude-run/Dockerfile.claude-run -t claude-run:latest imgs/claude-run
 
-# Ephemeral interactive devcontainer
-cld [refs...] [-n name] [-m model] [-r revision] [-p prompt]
+# Ephemeral interactive devcontainer (-p only; prompt refs live on `run`/`task-agent
+# start`/`chain run`, since click reads a group callback's first positional as a
+# subcommand name)
+cld [-n name] [-m model] [-r revision] [-p prompt]
 
 # Persistent master devcontainer (per-repo, start-or-attach; idempotent)
 cld master                             # start or re-attach
@@ -142,7 +156,7 @@ All Python-side runtime tunables live in `cld/config.py:Config` (frozen dataclas
 
 **Resolution order (lowest → highest priority):** dataclass defaults < user TOML (`~/.config/cld/config.toml`) < project TOML (`<repo_root>/.cld/config.toml`, walked up from cwd) < `.env` in cwd < `CLD_*` env vars.
 
-TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `devcontainer_image`, `run_image`, `mysql_config`, `ssl_certs_path`, `agent_timeout`, `poll_interval`, `debug`, `home_mounts_always`, `home_mounts_devcontainer`, `master_targets`, `chain_max_parallel`, `chain_default_model`, `log_level`, `log_color`, `ignore_gitignore`, `mailbox_root`, `agent_max_turns`, `agent_kickoff_persona`, `broker_key`, `broker_endpoint`, `broker_known_hosts`). Array fields accept TOML arrays of strings. Unknown keys are warned about on stderr and ignored. `host_project_dir` / `host_home` are container-internal and not configurable via TOML. One exception to the field-mirroring rule: `pyproject_dir` is accepted (silently, not warned on) but has no `Config` field -- it's consumed only by `cld-broker.sh`'s own TOML parser, not by Python, for the host test broker's `PROJECT_SUBDIR` (see "Host-side test running" below).
+TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `devcontainer_image`, `run_image`, `mysql_config`, `ssl_certs_path`, `agent_timeout`, `poll_interval`, `debug`, `home_mounts_always`, `home_mounts_devcontainer`, `master_targets`, `chain_max_parallel`, `chain_default_model`, `log_level`, `log_color`, `ignore_gitignore`, `ssh_auth_sock`, `mailbox_root`, `agent_max_turns`, `agent_kickoff_persona`, `max_task_agents`, `peer_absolute_limit`, `root_ask_limit`, `broker_key`, `broker_endpoint`, `broker_known_hosts`). Array fields accept TOML arrays of strings. Unknown keys are warned about on stderr and ignored. `host_project_dir` / `host_home` are container-internal and not configurable via TOML. One exception to the field-mirroring rule: `pyproject_dir` is accepted (silently, not warned on) but has no `Config` field -- it's consumed only by `cld-broker.sh`'s own TOML parser, not by Python, for the host test broker's `PROJECT_SUBDIR` (see "Host-side test running" below).
 
 `CLD_*` env vars (read by `Config.from_env`):
 
@@ -162,7 +176,7 @@ TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `de
 | `CLD_LOG_LEVEL` | `INFO` | Root level for the `cld` logger hierarchy. Accepts DEBUG/INFO/WARNING/ERROR (case-insensitive; WARN aliased to WARNING). |
 | `CLD_LOG_COLOR` | `auto` | ANSI color in log output: `auto` (TTY-detect), `always`, or `never`. |
 | `CLD_DEBUG` | `false` | Diagnostics flag. Back-compat alias: when truthy and `CLD_LOG_LEVEL` is unset, equivalent to `CLD_LOG_LEVEL=DEBUG`. |
-| `CLD_IGNORE_GITIGNORE` | `""` | Colon-separated list of gitignored files to symlink from origin into workspace (e.g. `.env:.envrc`). Set in `.cld/config.toml` as array: `ignore_gitignore = [".env"]`. |
+| (no env var) | `()` | `ignore_gitignore` is TOML-only -- gitignored files to symlink from origin into workspace. Set in `.cld/config.toml` as array: `ignore_gitignore = [".env"]`. |
 | `CLD_SSH_AUTH_SOCK` | unset | SSH agent forwarding. Tri-state: **unset** = auto-detect from host `$SSH_AUTH_SOCK`; **empty** (`""`) = explicitly disable; **path** = use that socket. Forwarded to `/run/host-ssh-agent.sock` inside the container. Applies to every devcontainer-image launch the CLI makes -- bare `cld`, `cld master`, and the headless agents too (they need it to push a deliverable branch); `stage_ssh_agent` itself is role-agnostic. |
 | `CLD_MAILBOX_ROOT` | `~/.cld/mailboxes` | Host root of the inter-container mailbox tree; bind-mounted RW into every master and agent container. |
 | `CLD_AGENT_MAX_TURNS` | `120` | Per-message turn cap passed to the agent supervisor's `claude -p --max-turns`. Passed into agent/task-agent containers by `build_container_args` (in-container `Config.from_env()` sees no host TOML). Hitting it is **not** fatal: the session is kept and the next message gets a fresh budget. |
@@ -240,6 +254,7 @@ Inspect with git: `git log <name>`, `git diff <name>~1..<name>`. Merge: `git mer
 - All commands require a **VCS repository** (jj or git). They walk up from cwd to find `.jj/` or `.git/`.
 - Containers run as host UID/GID with security hardening (cap-drop ALL, no-new-privileges, resource limits).
 - The agent entrypoint merges global MCP server config from `~/.claude.json` into project scope.
+- **The baked-in skills reach claude through a PATH wrapper, not through claude's own config.** The entrypoint writes `/tmp/bin/claude` (adding `--dangerously-skip-permissions --add-dir /opt/cld`, which is what auto-loads `/opt/cld/.claude/skills/`; `permissions.additionalDirectories` grants file access only and does *not* load skills). `container-init.sh` exports `/tmp/bin` onto the PATH of the entrypoint's own process tree -- the headless supervisor -- while `/etc/profile.d/cld-path.sh` (baked into `claude-base`) does the same for the `docker exec -it … bash -l` shell a `cld master` attach lands in. Without that second hook an interactive session runs the raw binary and sees neither the skills nor the credentialed `mysql` wrapper.
 - Install with `poetry install` to get the `cld` command.
 - Logging is centralised in `cld/log.py`; each module obtains a logger via `get_logger(__name__)`.
 
@@ -251,8 +266,8 @@ Inspect with git: `git log <name>`, `git diff <name>~1..<name>`. Merge: `git mer
 
 Full design: `docs/design-agent-messaging.md`. One-line summary: one repo agent per repo, `send()`/`list_inbox()`/`read_message()`/`archive()` via the `messenger` MCP server, replies come back on your next turn, the agent remembers everything across messages (one persistent `claude -p --resume` session).
 
-- `cld/messenger/mailbox.py` -- pure filesystem transport (atomic `tmp/` write + `rename()` into `inbox/`; `archive/`; append-only `outbox.log`, whose lines carry the full subject+body so one mailbox is a complete transcript). No MCP/Docker coupling: `list_containers()` delegates to `cld/broker.py` (local docker on host, broker inside a container) and `resolve_recipient()` short-circuits to filesystem delivery when the recipient names an existing mailbox dir (the reply path -- so agents message back with no host channel). Unit-testable with `tmp_path`. Also owns the task-agent registry surface (`meta.json` spawn facts via `ensure_meta`/`list_fleet`, `state.json` reads, `transcript()`, `_archive/<name>/` on teardown, and the `_edges/` hop counters plus obligation ledger) -- see `docs/design-task-agents.md`. Root entries starting with `_` are reserved, not mailboxes.
-- `cld/messenger/agent_loop.py` -- the supervisor daemon (`python -m cld.messenger.agent_loop`, execed as PID 1 by the entrypoint's `AGENT_MODE` branch). State machine: `KICKOFF` (once, via `prompts/personas/<agent_kickoff_persona>.md`, default `agent.md`) -> `IDLE` (poll `inbox/` every 1 s) -> `PROCESSING` (one message, strict FIFO via oldest mtime) -> `IDLE`, until `SIGTERM`. Writes `state.json` into its own mailbox dir after every transition. Hitting `--max-turns` is claude exiting 1 with a complete JSON envelope (`subtype: error_max_turns`); the supervisor treats that as a **soft** stop -- it keeps the session, logs a warning, and the next message gets a fresh budget (raising there used to kill the container mid-kickoff, so any task needing more turns died with it). The kickoff prompt goes to claude on **stdin**, not in argv -- a persona's leading `---` frontmatter was otherwise parsed as an unknown option; frontmatter is stripped either way (`cld.prompts.strip_frontmatter`). Under `TASK_AGENT_MODE` the same state machine runs in **task mode** (`TaskMode.from_env()`): kickoff is `compose_kickoff()`'s two layers -- the lifecycle preamble (`prompts/personas/task-agent.md`, placeholders substituted), then the brief the launcher composed (`.cld-run/brief.md`, verbatim, role persona already inside it) -- and `meta.json` is written once at boot. No extra phase; see `docs/design-task-agents.md` §5, §11.
+- `cld/messenger/mailbox.py` -- pure filesystem transport (atomic `tmp/` write + `rename()` into `inbox/`; `archive/`; append-only `outbox.log`, whose lines carry the full subject+body so one mailbox is a complete transcript). No MCP/Docker coupling: `list_containers()` lazily delegates to `cld/broker.py`'s `list_cld_containers()` (local docker on host, `list-containers` broker action inside master) and `resolve_recipient()` short-circuits to filesystem delivery when the recipient names an existing mailbox dir (the reply path -- so agents message back with no host channel). Unit-testable with `tmp_path`. Also owns the task-agent registry surface (`meta.json` spawn facts via `ensure_meta`/`list_fleet`, `state.json` reads, `transcript()`, `_archive/<name>/` on teardown, and the `_edges/` hop counters plus obligation ledger) -- see `docs/design-task-agents.md`. Root entries starting with `_` are reserved, not mailboxes.
+- `cld/messenger/agent_loop.py` -- the supervisor daemon (`python -m cld.messenger.agent_loop`, execed as PID 1 by the entrypoint's `AGENT_MODE` branch). State machine: `KICKOFF` (once, via `prompts/personas/<agent_kickoff_persona>.md`, default `agent.md`) -> `IDLE` (poll `inbox/` every 1 s) -> `PROCESSING` (one message, strict FIFO via oldest mtime) -> `IDLE`, until `SIGTERM`. Writes `state.json` into its own mailbox dir after every transition. The kickoff prompt goes to claude on **stdin**, not in argv -- a persona's leading `---` frontmatter was otherwise parsed as an unknown option; frontmatter is stripped either way (`cld.prompts.strip_frontmatter`). Under `TASK_AGENT_MODE` the same state machine runs in **task mode** (`TaskMode.from_env()`): kickoff is `compose_kickoff()`'s two layers -- the lifecycle preamble (`prompts/personas/task-agent.md`, placeholders substituted), then the brief the launcher composed (`.cld-run/brief.md`, verbatim, role persona already inside it) -- and `meta.json` is written once at boot. No extra phase; see `docs/design-task-agents.md` §5, §11.
 - `cld/mcp/messenger.py` -- FastMCP server wrapping `mailbox.py`. `send`/`list_inbox`/`read_message`/`archive` operate on the calling container's own mailbox, identified by `SESSION_NAME`. Two additive **fleet** tools are master surfaces instead, scoped to mailboxes whose `meta.json` records the caller as parent: `fleet_digest()` (one cheap row per task-agent -- task, phase, msg_count, cost, unread, last_activity, plus `open_asks`/`open_with`/`oldest_open`; no bodies) and `read_mailbox(name, since="")` (the full exchange, `inbox/` + `archive/` received and `outbox.log` sent, `since` exclusive, archived mailboxes included). The digest is what makes the master's per-turn crank affordable; sweeping inboxes would find nothing, since an agent archives each message within ~1 s.
 - **Hop gate (agent-to-agent only).** A message between two task-agents counts against that edge's absolute budget in `_edges/<sorted>.json`; past the limit the send is refused and **nothing more is ever delivered over that edge** -- not a retry, not a supervisor-synthesized reply, no cap notice (docs/design-task-agents.md D29: exempting the messages that announce the end is what loops). The blocked side escalates to its master, whose channel is a *different* edge and never budgeted. The gate lives in `mailbox.gated_send` and the closure rule one level down in `write_message`, because **two** instructed paths reach the transport -- the MCP `send()` tool and `cld msg send`, which the baked-in `messenger-send` skill documents. `edge_spent` is asked *before* a delivery and `bump_edge` counts *after* it, so the limit-th message is the last one that lands rather than the first one refused.
 - **Reply obligation is declared, not implied.** Every message carries `expects_reply` (does this open an obligation on the recipient) and `answers` (which message id does it discharge), both set by the sender and defaulted to "no". Arrival alone obliges nothing: an unconditional "every message gets a reply" makes each acknowledgment oblige another one, which in testing had two agents trading courtesies until the hop budget ran out. There is no special case for the master channel -- the master sets `expects_reply` like anyone else. A reply *may* also ask (`answers` + `expects_reply` together), which is what makes a clarification sub-dialogue work: the root obligation survives it and is discharged separately.

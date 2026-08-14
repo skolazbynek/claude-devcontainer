@@ -1,4 +1,4 @@
-"""List cld containers (masters + agents) via Docker labels."""
+"""List cld containers (masters, repo agents, task-agents) via Docker labels."""
 
 import argparse
 
@@ -17,7 +17,9 @@ def show(kind: str | None = None) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="python -m cld.messenger.agents")
-    ap.add_argument("--kind", choices=("agent", "master"), help="Restrict to one kind")
+    ap.add_argument(
+        "--kind", choices=("agent", "master", "task-agent"), help="Restrict to one kind"
+    )
     show(ap.parse_args().kind)
 
 

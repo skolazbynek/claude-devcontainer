@@ -1,6 +1,5 @@
 """CLI entry point for cld."""
 
-import functools
 import json
 import os
 import shutil
@@ -43,6 +42,7 @@ from cld.docker import (
     to_host_path,
 )
 from cld.agent_runtime import format_age
+from cld.cli_msg import handle_errors as _handle_errors, msg_app
 from cld.messenger import mailbox
 from cld.run import launch_run
 from cld.log import get_logger, setup_logging
@@ -65,27 +65,7 @@ from cld.vcs.anchor import resolve_anchor
 
 log = get_logger(__name__)
 
-app = typer.Typer(
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-)
-
-
-def _handle_errors(func):
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except typer.Exit:
-            # click's Exit subclasses RuntimeError, so without this it lands in the
-            # handler below and every deliberate exit code becomes 1 -- including the 0
-            # an in-master broker dispatch raises on success, and including the clean
-            # `Error: ...` paths, which also gained a redundant "Command failed: 1" line.
-            raise
-        except (RuntimeError, ValueError, subprocess.CalledProcessError, FileNotFoundError) as e:
-            log.error("Command failed: %s", e)
-            log.debug("traceback:", exc_info=True)
-            raise typer.Exit(1)
-    return wrapper
+app = typer.Typer()
 
 
 def _reject_in_container() -> None:
@@ -118,16 +98,18 @@ def main(
     name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
     model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
     revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change -- @ for jj, HEAD for git)"),
-    prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt (appended to task file if both given)"),
+    prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt for the session"),
 ):
-    """Launch an ephemeral interactive Claude devcontainer (default; no subcommand)."""
+    """Launch an ephemeral interactive Claude devcontainer (default; no subcommand).
+
+    Takes `-p` only, no prompt refs: click resolves a group callback's first positional
+    as a subcommand name, so `cld @personas/x` can only ever be "No such command".
+    Refs live on the real commands -- `cld run`, `cld task-agent start`, `cld chain run`.
+    """
     _reject_in_container()
     if ctx.invoked_subcommand is not None:
         return
-    # Positionals are prompt refs until the first one that is neither an @ref nor an
-    # existing file; the rest are passed through to the container's claude invocation.
-    refs, extra_args = _split_prompt_refs(list(ctx.args))
-    _run_devcontainer(refs, name, model, revision, prompt, extra_args)
+    _run_devcontainer(name, model, revision, prompt)
 
 
 @app.command()
@@ -140,11 +122,11 @@ def run(
     prompt: str = typer.Option("", "-p", "--prompt", help="Inline task description, appended after the refs"),
 ):
     """Launch a one-shot autonomous Claude agent (headless, --rm, commits to a branch)."""
-    cld_root = Path(__file__).resolve().parent.parent
-    brief = _compose_from_args(refs or [], prompt, find_repo_root(), cld_root)
-
     cfg = Config.from_env()
     setup_logging(cfg)
+    cld_root = Path(__file__).resolve().parent.parent
+    brief, _ = _compose_from_args(refs or [], prompt, find_repo_root(), cld_root)
+
     log.info(
         "run: name=%s, model=%s, revision=%s, refs=%s, prompt=%s",
         name or "<auto>",
@@ -157,19 +139,14 @@ def run(
     launch_run(cfg, brief, name=name, model=model, revision=revision)
 
 
-def _split_prompt_refs(args: list[str]) -> tuple[list[str], list[str] | None]:
-    """Split leading prompt refs from trailing pass-through args (bare `cld` only)."""
-    refs: list[str] = []
-    for i, arg in enumerate(args):
-        if arg.startswith("@") or Path(arg).is_file():
-            refs.append(arg)
-        else:
-            return refs, args[i:]
-    return refs, None
+def _compose_from_args(
+    refs: list[str], prompt: str, repo_root: Path, cld_root: Path
+) -> tuple[str, list[tuple[Path, str]]]:
+    """Resolve refs and compose the brief, turning input errors into clean exits.
 
-
-def _compose_from_args(refs: list[str], prompt: str, repo_root: Path, cld_root: Path) -> str:
-    """Resolve refs and compose the brief, turning input errors into clean exits."""
+    Returns the brief and the resolved `(path, kind)` refs, so a caller that needs the
+    kinds (the persona a task-agent displays) does not resolve the same list twice.
+    """
     try:
         resolved = resolve_prompt_args(refs, repo_root, cld_root)
     except (FileNotFoundError, ValueError) as e:
@@ -180,16 +157,14 @@ def _compose_from_args(refs: list[str], prompt: str, repo_root: Path, cld_root: 
     if not resolved and not prompt:
         typer.echo("Error: Provide at least one prompt ref, --prompt, or both", err=True)
         raise typer.Exit(1)
-    return compose_brief([p for p, _ in resolved], prompt)
+    return compose_brief([p for p, _ in resolved], prompt), resolved
 
 
 def _run_devcontainer(
-    refs: list[str],
     name: str,
     model: str,
     revision: str,
     prompt: str,
-    extra_args: list[str] | None,
 ) -> None:
     """Ephemeral interactive devcontainer launch. Persistent master/agent live in their own sub-apps."""
     require_docker()
@@ -197,11 +172,10 @@ def _run_devcontainer(
     setup_logging(cfg)
 
     log.info(
-        "devcontainer: name=%s, model=%s, revision=%s, refs=%s, prompt=%s",
+        "devcontainer: name=%s, model=%s, revision=%s, prompt=%s",
         name or "<auto>",
         model or "<default>",
         revision or "<default>",
-        ", ".join(refs) or "<none>",
         "<provided>" if prompt else "<none>",
     )
 
@@ -222,7 +196,7 @@ def _run_devcontainer(
     session = build_session_name("cld", name)
     repo_root = find_target_repo(cfg)
 
-    brief = _compose_from_args(refs, prompt, repo_root, cld_root) if (refs or prompt) else ""
+    brief = compose_brief([], prompt) if prompt else ""
 
     args = build_container_args(repo_root, session, cfg, interactive=True)
     args += anchor_env_args(cfg, session, revision, brief=brief)
@@ -243,8 +217,6 @@ def _run_devcontainer(
     args += stage_ssh_agent(cfg)
 
     args += [cfg.devcontainer_image]
-    if extra_args:
-        args += extra_args
 
     log.info("Starting Claude Code in container...")
     print()
@@ -480,7 +452,6 @@ def _docker_logs(name: str, tail: int) -> None:
 master_app = typer.Typer(
     help="Persistent per-repo interactive devcontainer (start-or-attach).",
     invoke_without_command=True,
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 app.add_typer(master_app, name="master")
 
@@ -491,16 +462,17 @@ def master(
     ctx: typer.Context,
     model: str = typer.Option("", "-m", "--model", help="Claude model (first launch only)"),
     revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (first launch only)"),
-    prompt: str = typer.Option("", "-p", "--prompt", help="First-launch prompt (ignored on re-attach)"),
+    prompt: str = typer.Option("", "-p", "--prompt", help="First-launch prompt (refused on re-attach)"),
 ):
-    """Start (or attach to) the persistent master devcontainer for this repo."""
+    """Start (or attach to) the persistent master devcontainer for this repo.
+
+    Like bare `cld`, this takes `-p` only -- a group callback never sees positionals.
+    """
     if ctx.invoked_subcommand is not None:
         return
     cfg = Config.from_env()
     setup_logging(cfg)
-    refs, _ = _split_prompt_refs(list(ctx.args))
-    cld_root = Path(__file__).resolve().parent.parent
-    brief = _compose_from_args(refs, prompt, find_repo_root(), cld_root) if (refs or prompt) else ""
+    brief = compose_brief([], prompt) if prompt else ""
     _run_persistent_devcontainer("master", brief, "", model, revision, cfg)
 
 
@@ -701,8 +673,7 @@ def task_agent_start(
 
     cld_root = Path(__file__).resolve().parent.parent
     repo_root = find_target_repo(cfg)
-    resolved = resolve_prompt_args(refs or [], repo_root, cld_root)
-    brief = _compose_from_args(refs or [], prompt, repo_root, cld_root)
+    brief, resolved = _compose_from_args(refs or [], prompt, repo_root, cld_root)
     # Display only: the roster's Persona column and the launch banner. A task-agent with
     # no persona ref is coherent -- the lifecycle preamble is always layered in.
     role = next((p.stem for p, kind in resolved if kind == "persona"), "")
@@ -1014,6 +985,10 @@ def task_agent_shutdown(
     _reap_all_task_agents(cfg, parent=parent, force=force)
 
 
+# --- Mailbox messaging (shared with the container CLI) ------------------------
+app.add_typer(msg_app, name="msg")
+
+
 @app.command()
 @_handle_errors
 def build(no_cache: bool = typer.Option(False, "--no-cache", help="Force rebuild without cache")):
@@ -1102,11 +1077,11 @@ def chain_run(
     if not chain_path.is_file():
         typer.echo(f"Error: chain file not found: {chain_file}", err=True)
         raise typer.Exit(1)
-    cld_root = Path(__file__).resolve().parent.parent
-    brief = _compose_from_args(refs or [], prompt, find_repo_root(), cld_root)
-
     cfg = Config.from_env()
     setup_logging(cfg)
+    cld_root = Path(__file__).resolve().parent.parent
+    brief, _ = _compose_from_args(refs or [], prompt, find_repo_root(), cld_root)
+
     log.info(
         "chain run: file=%s, name=%s, model=%s, no_detach=%s",
         chain_file, name or "<auto>", model or "<default>", no_detach,

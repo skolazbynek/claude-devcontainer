@@ -88,7 +88,9 @@ else
     VCS_NOTE="Your working directory is isolated in a git worktree. All changes will be committed when you're done."
 fi
 
-# Image-owned frame; the user's layer is the brief, appended below.
+# Image-owned frame; the user's layer is the brief, appended below. The header stays:
+# it separates the frame from the brief, unlike the inter-ref glue the ordered-blocks
+# composition dropped (docs/design-prompt-chaining.md).
 SYSTEM_PROMPT_FILE="/opt/cld/run-system-prompt.md"
 SYSTEM_PROMPT="$(cat "$SYSTEM_PROMPT_FILE")
 
@@ -106,6 +108,10 @@ PROGRESS_PID=$!
 AGENT_MODEL="${AGENT_MODEL:-sonnet}"
 log "Using model: $AGENT_MODEL"
 
+# No `--add-dir /opt/cld` here, unlike the devcontainer: the base image's baked skills
+# are all master/agent surfaces (broker, mailbox, task-agent fleet) and a one-shot run
+# has neither a mailbox mount nor a broker key, so loading them would only offer tools
+# that cannot work.
 if claude -p "$SYSTEM_PROMPT" \
     --model "$AGENT_MODEL" \
     --dangerously-skip-permissions \

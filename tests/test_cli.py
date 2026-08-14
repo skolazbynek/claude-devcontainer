@@ -107,10 +107,9 @@ class TestBareDevcontainer:
             result = runner.invoke(app, [])
         assert result.exit_code == 0, result.output
         assert rd.called
-        # Signature: (refs, name, model, revision, prompt, extra_args)
+        # Signature: (name, model, revision, prompt)
         args = rd.call_args.args
-        assert args[0] == []     # refs
-        assert args[1] == ""     # name
+        assert args[0] == ""     # name
 
     def test_bare_with_options(self):
         with patch("cld.cli._run_devcontainer") as rd:
@@ -118,8 +117,17 @@ class TestBareDevcontainer:
         assert result.exit_code == 0, result.output
         assert rd.called
         args = rd.call_args.args
-        assert args[1] == "foo"   # name
-        assert args[2] == "opus"  # model
+        assert args[0] == "foo"   # name
+        assert args[1] == "opus"  # model
+
+    # Prompt refs are a `cld run` / `cld task-agent start` surface: click reads a group
+    # callback's first positional as a subcommand name, so bare `cld` and `cld master`
+    # take -p only and anything positional is a usage error (exit 2), not a dropped arg.
+    @pytest.mark.parametrize("argv", [["@personas/x"], ["tsak.md"], ["master", "shutdwn"]])
+    def test_positionals_are_a_usage_error(self, argv):
+        with patch("cld.cli._run_devcontainer"), patch("cld.cli._run_persistent_devcontainer"):
+            result = runner.invoke(app, argv)
+        assert result.exit_code == 2
 
 
 class TestPersistentContainerHelpers:

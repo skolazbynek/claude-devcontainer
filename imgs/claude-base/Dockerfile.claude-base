@@ -129,4 +129,12 @@ ENV PYTHONPATH=/opt/cld
 # container-only symlinks onto the host.
 COPY --chown=claude:claude .claude/skills/ /opt/cld/.claude/skills/
 
+# ...and that `--add-dir` only reaches claude through the /tmp/bin/claude wrapper the
+# entrypoint writes, which lives on the PATH container-init.sh exports *in the
+# entrypoint's own process*. A user shell arrives by `docker exec -it … bash -l`, which
+# inherits none of it, so without this hook an interactive session runs the raw binary:
+# no skills, no --dangerously-skip-permissions, and no credentialed mysql wrapper
+# either. A login shell sources /etc/profile.d/*.sh, so put the PATH entry there.
+RUN printf 'export PATH="/tmp/bin:$PATH"\n' > /etc/profile.d/cld-path.sh
+
 USER claude

@@ -128,8 +128,12 @@ host-set `org.cld.repo-root` + `org.cld.targets` labels through the shared
 `task-agent` is the only action that creates a container with a caller-chosen file
 mounted inside it, so it also polices its argv: `--force` is denied (overriding a
 reap-readiness refusal stays a human act), a caller-supplied `--parent` is denied and
-the validated `$session` appended instead, and `start`'s persona positional must be a
-bare name -- a path there would let a container read any host file you can.
+the validated `$session` appended instead -- both in either spelling, `--opt` and
+`--opt=value` -- and `start`'s persona positional must be a bare name (an `@ref`) -- a
+path there would let a container read any host file you can. The positional check
+knows which `start` options take a *separate* value (`-n`/`-p`/`--branch`/`-m`/`-r`/
+`--peer`) rather than assuming every `-*` token consumes the next one, which would
+let the token after an `--opt=value` slip by unchecked.
 
 ## Security notes
 

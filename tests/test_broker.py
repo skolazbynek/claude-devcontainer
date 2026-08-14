@@ -66,12 +66,19 @@ class TestListCldContainers:
 
 
 class TestBrokerAvailable:
-    def test_true_with_endpoint_and_key(self, configured):
+    def test_true_with_endpoint_key_and_known_hosts(self, configured):
         assert broker.broker_available() is True
 
     def test_false_without_a_key(self, monkeypatch):
         monkeypatch.setenv("CLD_BROKER_ENDPOINT", "host.docker.internal:2222")
         with patch("cld.broker.Path.exists", return_value=False):
+            assert broker.broker_available() is False
+
+    def test_false_without_known_hosts(self, monkeypatch):
+        """run_action always pins the host key, so a missing known_hosts is unusable."""
+        monkeypatch.setenv("CLD_BROKER_ENDPOINT", "host.docker.internal:2222")
+        with patch("cld.broker.Path.exists", autospec=True,
+                   side_effect=lambda self: str(self) == broker.KEY_MOUNT):
             assert broker.broker_available() is False
 
     def test_false_without_an_endpoint(self, monkeypatch):

@@ -143,24 +143,31 @@ action_task_agent() {
     esac
     validate_target "$target"
 
+    # Both spellings of each denial: click accepts `--opt=value`, so matching the bare
+    # token alone would let `--parent=<other-master>` through and forge an owner.
     local a
     for a in "$@"; do
         case "$a" in
-            --force)  echo "denied: --force is host-only" >&2; exit 2 ;;
-            --parent) echo "denied: --parent is set by the broker" >&2; exit 2 ;;
+            --force|--force=*)   echo "denied: --force is host-only" >&2; exit 2 ;;
+            --parent|--parent=*) echo "denied: --parent is set by the broker" >&2; exit 2 ;;
         esac
     done
 
     # start's positionals are prompt refs, and only `@refs` may cross: they name files
     # in the *target repo's* prompts tree, which the host resolves. Option values are
-    # skipped -- task text legitimately contains slashes, so checking them would deny
-    # ordinary work like -p "fix cld/cli.py".
+    # still not ref-checked -- task text legitimately contains slashes, so checking them
+    # would deny ordinary work like -p "fix cld/cli.py" -- but arity is enumerated, not
+    # guessed: only these options of `cld task-agent start` take a *separate* value, so
+    # only they swallow the next token. Every other `-*` token (a flag, or the
+    # `--opt=value` form, which carries its value inside the token) consumes nothing;
+    # assuming it did skipped the positional after it, letting a bare path cross.
     if [ "$op" = start ]; then
         local skip_value=0
         for a in "$@"; do
             if [ "$skip_value" = 1 ]; then skip_value=0; continue; fi
             case "$a" in
-                -*)  skip_value=1 ;;
+                -n|--name|-p|--prompt|--branch|-m|--model|-r|--revision|--peer) skip_value=1 ;;
+                -*)  ;;
                 @*)  ;;
                 *)   echo "denied: prompt ref '$a' must be an @ref, not a path" >&2; exit 2 ;;
             esac

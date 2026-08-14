@@ -26,6 +26,11 @@ cd "$WORKSPACE_ORIGIN"
 # --name` fail with "Workspace named X already exists" -- silently, since
 # there's no set -e -- and leave /workspace/current an empty dir. No-op when
 # absent (first-ever launch).
+#
+# FIRST_LAUNCH records which of the three branches below we took. The brief
+# lives in anchor B, so every descendant carries it and file presence can no
+# longer tell a first launch from a restart -- only this flag can.
+FIRST_LAUNCH=0
 if [ -e /workspace/current/.jj ]; then
     # Warm restart: `docker start` of a stopped container (not `docker rm &&
     # docker run`). The ephemeral /workspace/current and its jj workspace
@@ -67,6 +72,7 @@ else
         echo "Error: AGENT_SCRATCH is required on first launch" >&2
         exit 1
     fi
+    FIRST_LAUNCH=1
     BASE_REV="${AGENT_REVISION_HINT:-@}"
     if ! A_HASH=$(jj log --no-graph -n 1 -r "$BASE_REV" -T commit_id 2>/dev/null); then
         echo "Error: could not resolve AGENT_REVISION_HINT='$BASE_REV'" >&2
@@ -145,6 +151,8 @@ chmod +x /tmp/bin/claude
 
 # The launcher composed the prompt refs and -p into one brief and shipped it in the
 # anchor scratch, so it is committed in anchor B (docs/design-prompt-chaining.md).
+# It therefore stays readable here for the whole session -- which is the point --
+# so its presence says nothing about whether it has already been consumed.
 BRIEF_FILE="$WORKSPACE_CURRENT/.cld-run/brief.md"
 COMPOSED_PROMPT=""
 [ -f "$BRIEF_FILE" ] && COMPOSED_PROMPT="$(cat "$BRIEF_FILE")"
@@ -179,9 +187,14 @@ fi
 # A task-agent's task belongs to the supervisor's composed kickoff prompt (see
 # docs/design-task-agents.md §11), so it must NOT be consumed by a one-shot
 # pre-run here -- the supervisor reads the same inputs itself.
-if [ -n "$COMPOSED_PROMPT" ] && [ -z "${TASK_AGENT_MODE:-}" ]; then
+#
+# Gated on FIRST_LAUNCH: a warm restart or bookmark reattach lands on a
+# workspace descending from B, so a presence-only check would re-run the user's
+# original prompt unattended on top of finished work, once per restart. The
+# host agrees -- it passes an empty brief and refuses -p on re-attach.
+if [ -n "$COMPOSED_PROMPT" ] && [ "$FIRST_LAUNCH" = 1 ] && [ -z "${TASK_AGENT_MODE:-}" ]; then
     [ -n "${MASTER_MODE:-}" ] && \
-        echo "[INFO] Running first-launch prompt; attach anytime with 'cld devcontainer --master'."
+        echo "[INFO] Running first-launch prompt; attach anytime with 'cld master'."
     claude -- "$COMPOSED_PROMPT" || true
 fi
 

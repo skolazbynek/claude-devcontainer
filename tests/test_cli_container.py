@@ -106,6 +106,15 @@ class TestTaskAgentDispatch:
         body = argv[argv.index("-p") + 1]
         assert body == "# First\n\n# Second\n\nand this"
 
+    def test_start_on_a_directory_exits_cleanly(self, tmp_path, monkeypatch):
+        """A directory positional used to traceback out of read_text()."""
+        with ExitStack() as stack:
+            op = self._broker(stack, tmp_path, monkeypatch)
+            result = runner.invoke(app, ["task-agent", "start", str(tmp_path), "-n", "s"])
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert not op.called
+
     def test_start_forwards_an_at_ref_verbatim(self, tmp_path, monkeypatch):
         """The host must resolve it against the *target* repo, not master's own."""
         with ExitStack() as stack:
@@ -239,7 +248,7 @@ class TestMsg:
     def test_send_reads_the_body_file(self, tmp_path):
         body = tmp_path / "body.md"
         body.write_text("the body\n")
-        with patch("cld.cli_container.send_cmd.deliver") as deliver:
+        with patch("cld.cli_msg.send_cmd.deliver") as deliver:
             result = runner.invoke(app, [
                 "msg", "send", "--to", "cld_agent_x_y", "--subject", "hi",
                 "--body-file", str(body), "--expects-reply", "--answers", "m3",
@@ -249,22 +258,22 @@ class TestMsg:
         assert deliver.call_args.kwargs == {"expects_reply": True, "answers": "m3"}
 
     def test_inbox_all_flag(self):
-        with patch("cld.cli_container.inbox_cmd.show") as show:
+        with patch("cld.cli_msg.inbox_cmd.show") as show:
             assert runner.invoke(app, ["msg", "inbox", "--all"]).exit_code == 0
         assert show.call_args.args == (True,)
 
     def test_read_takes_an_id(self):
-        with patch("cld.cli_container.read_cmd.show") as show:
+        with patch("cld.cli_msg.read_cmd.show") as show:
             assert runner.invoke(app, ["msg", "read", "m1"]).exit_code == 0
         assert show.call_args.args == ("m1",)
 
     def test_archive_takes_an_id(self):
-        with patch("cld.cli_container.archive_cmd.move") as move:
+        with patch("cld.cli_msg.archive_cmd.move") as move:
             assert runner.invoke(app, ["msg", "archive", "m1"]).exit_code == 0
         assert move.call_args.args == ("m1",)
 
     def test_agents_kind_filter_defaults_to_none(self):
-        with patch("cld.cli_container.agents_cmd.show") as show:
+        with patch("cld.cli_msg.agents_cmd.show") as show:
             assert runner.invoke(app, ["msg", "agents"]).exit_code == 0
             assert show.call_args.args == (None,)
             assert runner.invoke(app, ["msg", "agents", "--kind", "master"]).exit_code == 0

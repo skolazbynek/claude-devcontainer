@@ -31,8 +31,19 @@ _DEFAULT_USER = "zet"
 
 
 def broker_available() -> bool:
-    """True when this container has both an endpoint and the restricted key."""
-    return bool(os.environ.get("CLD_BROKER_ENDPOINT")) and Path(KEY_MOUNT).exists()
+    """True when this container has an endpoint, the restricted key AND the known_hosts.
+
+    All three, because ``run_action`` always ssh's with ``StrictHostKeyChecking=yes``
+    against ``KNOWN_HOSTS_MOUNT``: without that mount the connection can only fail on
+    the host-key check. ``stage_broker`` merely warns host-side when
+    ``broker_known_hosts`` is unset or missing, so counting it here is what turns a raw
+    ssh error into the callers' actionable "set broker_key (and broker_known_hosts)".
+    """
+    return (
+        bool(os.environ.get("CLD_BROKER_ENDPOINT"))
+        and Path(KEY_MOUNT).exists()
+        and Path(KNOWN_HOSTS_MOUNT).exists()
+    )
 
 
 def _endpoint() -> tuple[str, str, str]:
@@ -132,7 +143,8 @@ def list_cld_containers(kind: str | None = None) -> list[dict]:
     """Enumerate cld containers, returning ``{name, kind, repo, status}`` records.
 
     Host: reads the local daemon. Inside a container: the broker's
-    ``list-containers`` action. *kind* filters to ``"agent"``/``"master"``.
+    ``list-containers`` action. *kind* filters to one ``org.cld.kind`` label value:
+    ``"master"``, ``"agent"`` or ``"task-agent"``.
     """
     if not in_master_container():
         return _list_via_local_docker(kind)

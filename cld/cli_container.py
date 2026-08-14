@@ -6,23 +6,17 @@ tree for anything needing a conversation. Host-only verbs are hidden stubs that
 say so instead of failing obscurely. See docs/design-cli-split.md.
 """
 
-import functools
 import os
-import subprocess
 from pathlib import Path
 from typing import Optional
 
 import typer
 
+from cld.cli_msg import handle_errors as _handle_errors, msg_app
 from cld.config import Config
 from cld.docker import find_target_repo
 from cld.broker import broker_agent_op, broker_available, broker_task_agent_op, run_action
 from cld.log import get_logger, setup_logging
-from cld.messenger import agents as agents_cmd
-from cld.messenger import archive as archive_cmd
-from cld.messenger import inbox as inbox_cmd
-from cld.messenger import read as read_cmd
-from cld.messenger import send as send_cmd
 from cld.prompts import list_prompt_items
 from cld.task_agent import print_task_agent_transcript, resolve_task_agent
 
@@ -31,22 +25,6 @@ log = get_logger(__name__)
 _ANY_ARGS = {"allow_extra_args": True, "ignore_unknown_options": True}
 
 app = typer.Typer(context_settings=_ANY_ARGS)
-
-
-def _handle_errors(func):
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except typer.Exit:
-            # click's Exit subclasses RuntimeError; without this every deliberate
-            # exit code (including a broker's 0) would become 1.
-            raise
-        except (RuntimeError, ValueError, subprocess.CalledProcessError, FileNotFoundError) as e:
-            log.error("Command failed: %s", e)
-            log.debug("traceback:", exc_info=True)
-            raise typer.Exit(1)
-    return wrapper
 
 
 def _host_only(verb: str) -> None:
@@ -138,9 +116,11 @@ def _task_agent_start_argv(
     resolves here resolves to nothing (or to the wrong file) there. An `@ref` is
     forwarded verbatim precisely so the host resolves it against the *target* repo;
     a real path is read here -- reading its own files is exactly what this container is
-    entitled to do -- and folded into the inline text, in order, which reproduces the
-    brief the host would have composed. The broker refuses a bare path for the same
-    reason (docs/design-prompt-chaining.md §4).
+    entitled to do -- and folded into the inline text. Typed order is only preserved
+    among the folded files: host-side the positionals compose first and `-p` is
+    appended last, so every local file lands after every `@ref` no matter where it was
+    typed. The broker refuses a bare path for the same reason
+    (docs/design-prompt-chaining.md §4).
     """
     argv: list[str] = []
     bodies: list[str] = []
@@ -319,57 +299,7 @@ def agent_logs(
 
 
 # --- Mailbox messaging --------------------------------------------------------
-msg_app = typer.Typer(help="Mailbox messaging with other cld containers.")
 app.add_typer(msg_app, name="msg")
-
-
-@msg_app.command("send")
-@_handle_errors
-def msg_send(
-    to: str = typer.Option(..., "--to", help="Recipient shortname or full container name"),
-    subject: str = typer.Option(..., "--subject"),
-    body_file: str = typer.Option(..., "--body-file", help="Path to a file containing the message body"),
-    expects_reply: bool = typer.Option(
-        False, "--expects-reply",
-        help="Oblige the recipient to reply; only for a question you cannot proceed without",
-    ),
-    answers: str = typer.Option("", "--answers", help="Id of the message this one answers"),
-):
-    """Deliver a message to another container's mailbox."""
-    send_cmd.deliver(to, subject, Path(body_file).read_text(),
-                     expects_reply=expects_reply, answers=answers)
-
-
-@msg_app.command("inbox")
-@_handle_errors
-def msg_inbox(
-    all_: bool = typer.Option(False, "--all", help="Include archived messages"),
-):
-    """List this container's unread messages."""
-    inbox_cmd.show(all_)
-
-
-@msg_app.command("read")
-@_handle_errors
-def msg_read(msg_id: str = typer.Argument(..., metavar="ID")):
-    """Print one message in full (inbox first, then archive)."""
-    read_cmd.show(msg_id)
-
-
-@msg_app.command("archive")
-@_handle_errors
-def msg_archive(msg_id: str = typer.Argument(..., metavar="ID")):
-    """Move a message from this container's inbox to its archive."""
-    archive_cmd.move(msg_id)
-
-
-@msg_app.command("agents")
-@_handle_errors
-def msg_agents(
-    kind: str = typer.Option("", "--kind", help="Restrict to one kind: agent or master"),
-):
-    """List cld containers that can be messaged."""
-    agents_cmd.show(kind or None)
 
 
 # --- The broker ---------------------------------------------------------------

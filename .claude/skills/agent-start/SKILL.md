@@ -83,7 +83,11 @@ step 2 said `absent`):
 
 - `-r <revision>` -- anchor revision (default: current change).
 - `-m <model>` -- Claude model.
-- `-p "<prompt>"` -- one-shot kickoff prompt handed to the supervisor.
+
+There is no `-p` here: a repo agent's kickoff is its persona
+(`agent_kickoff_persona`, default `@personas/agent`), and everything after that
+arrives as a message. Send the first task with the `messenger-send` skill once
+step 4 reports `idle`.
 
 `cld agent` runs in the foreground on master's side only long enough to
 stage the anchor and start the container; then it prints how to message the

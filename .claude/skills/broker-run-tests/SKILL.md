@@ -29,15 +29,16 @@ become pytest arguments.
 ## Step 1: Confirm you're inside a master with the broker wired
 
 This only exists for `cld master` sessions (never `cld agent`, `cld run`, or
-bare `cld`). Check for the wrapper:
+bare `cld`). Check for the client:
 
 ```bash
 cld broker --help >/dev/null 2>&1 && echo broker-ok
 ```
 
-If neither is found, this repo's master isn't configured with a host test
-broker (`broker_key` unset in its `.cld/config.toml`). Don't try to set
-one up yourself -- that's host-side infrastructure the user configures
+If that fails, this repo's master isn't configured with a host test
+broker (`broker_key`, and `broker_known_hosts`, unset in its
+`.cld/config.toml`); a failing `cld broker` run names what to set. Don't try
+to set one up yourself -- that's host-side infrastructure the user configures
 out-of-band. Don't fall back to running the plain test command in-container
 either: without the broker there is no other way to get real DB/Redis/etc.
 secrets into this container, and a suite run without them is not a
@@ -45,10 +46,6 @@ meaningful test result -- it'll look like it ran while actually testing
 nothing real (or erroring on missing config in a way that's easy to
 misread as a code bug). Tell the user the broker isn't configured for this
 repo and stop.
-
-If that fails the broker is not configured for this container; the message names what to set. Otherwise use
-the full path for the rest of this skill -- PATH may not include `/tmp/bin`
-in every attached shell.
 
 ## Step 2: Run the tests
 
@@ -64,10 +61,11 @@ cld broker run-tests -k login -x tests/  # filtered, stop on first failure
 cld broker run-tests tests/unit/test_foo.py
 ```
 
-There's no need to pass `--action`; it defaults to `run-tests`. (A repo's
-broker admin may have defined extra actions -- `cld broker <name>
-<args>` -- but `run-tests` is the only one that exists unless you were told
-otherwise.)
+The action name is required -- `run-tests` here. (A repo's broker admin may have
+defined extra actions, `cld broker <name> <args>`; the ones that always exist
+are `run-tests`, `list-containers`, `agent` and `task-agent`, and the last three
+are what the `agent-start` / `task-agent-*` skills go through rather than
+something you call directly.)
 
 The command runs synchronously and streams pytest's own stdout/stderr; its
 exit code is pytest's exit code (0 = passed, 1 = failures, etc.) in the
