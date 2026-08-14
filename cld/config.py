@@ -244,9 +244,9 @@ class Config:
     # running task-agents per master; peer_absolute_limit is the hop budget a
     # peer edge gets when its `--peer <name>[:<hops>]` spec omits one;
     # root_ask_limit bounds the asks outstanding under one unanswered question.
-    max_task_agents: int = 4
+    max_task_agents: int = 5
     peer_absolute_limit: int = 10
-    root_ask_limit: int = 3
+    root_ask_limit: int = 5
 
     # The cld broker (master only): if broker_key is set, master mounts
     # the restricted private key and gets a `cld broker` wrapper that ships pytest
