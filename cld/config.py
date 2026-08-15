@@ -68,6 +68,14 @@ _TOML_KEYS = {
     "broker_key",
     "broker_endpoint",
     "broker_known_hosts",
+    "mattermost_url",
+    "mattermost_token_file",
+    "mattermost_channel_id",
+    "mattermost_allowed_user_ids",
+    "mattermost_poll_interval",
+    "mattermost_reply_timeout",
+    "mattermost_max_post_chars",
+    "mattermost_state_file",
     # Not a Config field -- no Python code reads this. Recognized here only so
     # _load_toml() doesn't warn "unknown key" on repos that set it; the value
     # is read directly out of .cld/config.toml by cld-broker.sh's own parser
@@ -256,6 +264,19 @@ class Config:
     broker_endpoint: str = "host.docker.internal:2222"
     broker_known_hosts: str = ""
 
+    # Mattermost bridge (host-only; docs/impl-mattermost-bridge-plan.md).
+    # mattermost_url empty = the bridge is not configured. The token is given as a
+    # file path, never a value: it must not sit in a TOML file or an env var, and
+    # the bridge refuses to start if the file is group- or world-readable.
+    mattermost_url: str = ""
+    mattermost_token_file: str = ""
+    mattermost_channel_id: str = ""
+    mattermost_allowed_user_ids: tuple[str, ...] = ()
+    mattermost_poll_interval: int = 3
+    mattermost_reply_timeout: int = 900
+    mattermost_max_post_chars: int = 15000
+    mattermost_state_file: str = "~/.cld/mattermost-bridge.json"
+
     # Diagnostics
     debug: bool = False
     log_level: str = "INFO"
@@ -311,4 +332,12 @@ class Config:
             broker_key=_env_str("CLD_BROKER_KEY", layered.get("broker_key", "")),
             broker_endpoint=_env_str("CLD_BROKER_ENDPOINT", layered.get("broker_endpoint", "host.docker.internal:2222")),
             broker_known_hosts=_env_str("CLD_BROKER_KNOWN_HOSTS", layered.get("broker_known_hosts", "")),
+            mattermost_url=_env_str("CLD_MATTERMOST_URL", layered.get("mattermost_url", "")),
+            mattermost_token_file=_env_str("CLD_MATTERMOST_TOKEN_FILE", layered.get("mattermost_token_file", "")),
+            mattermost_channel_id=_env_str("CLD_MATTERMOST_CHANNEL_ID", layered.get("mattermost_channel_id", "")),
+            mattermost_allowed_user_ids=tuple(layered.get("mattermost_allowed_user_ids", ())),
+            mattermost_poll_interval=_env_int("CLD_MATTERMOST_POLL_INTERVAL", int(layered.get("mattermost_poll_interval", 3))),
+            mattermost_reply_timeout=_env_int("CLD_MATTERMOST_REPLY_TIMEOUT", int(layered.get("mattermost_reply_timeout", 900))),
+            mattermost_max_post_chars=_env_int("CLD_MATTERMOST_MAX_POST_CHARS", int(layered.get("mattermost_max_post_chars", 15000))),
+            mattermost_state_file=_env_str("CLD_MATTERMOST_STATE_FILE", layered.get("mattermost_state_file", "~/.cld/mattermost-bridge.json")),
         )

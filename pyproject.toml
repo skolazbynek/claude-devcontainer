@@ -10,6 +10,7 @@ cld = "cld.cli:app"
 
 [tool.poetry.dependencies]
 python = "^3.11"
+httpx = "^0.28"
 mcp = {version = "^1.0", extras = ["cli"]}
 pyyaml = "^6.0"
 typer = "^0.24.1"

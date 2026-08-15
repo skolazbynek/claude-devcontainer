@@ -42,6 +42,8 @@ from cld.docker import (
     to_host_path,
 )
 from cld.agent_runtime import format_age
+from cld.bridge import daemon as bridge_daemon
+from cld.bridge.mattermost import build_bridge, run_bridge
 from cld.cli_msg import handle_errors as _handle_errors, msg_app
 from cld.messenger import mailbox
 from cld.run import launch_run
@@ -987,6 +989,75 @@ def task_agent_shutdown(
 
 # --- Mailbox messaging (shared with the container CLI) ------------------------
 app.add_typer(msg_app, name="msg")
+
+
+# --- Chat bridges -------------------------------------------------------------
+bridge_app = typer.Typer(
+    help="Chat bridges over the mailbox transport (host-only).",
+    no_args_is_help=True,
+)
+app.add_typer(bridge_app, name="bridge")
+
+
+@bridge_app.command("mattermost")
+@_handle_errors
+def bridge_mattermost(
+    once: bool = typer.Option(False, "--once", help="Run a single tick and exit"),
+):
+    """Carry a private Mattermost channel to and from the fleet's mailboxes (foreground)."""
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    run_bridge(cfg, once=once)
+
+
+@bridge_app.command("start")
+@_handle_errors
+def bridge_start():
+    """Start the bridge detached, logging to ~/.cld/bridge/mattermost.log."""
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    # Validate here, in the caller's terminal: a bad token or channel should not
+    # be something you discover later by reading a log file.
+    build_bridge(cfg)
+    typer.echo(f"started (pid {bridge_daemon.start()}), logging to {bridge_daemon.log_file()}")
+
+
+@bridge_app.command("stop")
+@_handle_errors
+def bridge_stop():
+    """Stop the detached bridge."""
+    pid = bridge_daemon.stop()
+    typer.echo(f"stopped (pid {pid})" if pid else "not running")
+
+
+@bridge_app.command("restart")
+@_handle_errors
+def bridge_restart():
+    """Stop and start the detached bridge."""
+    bridge_daemon.stop()
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    build_bridge(cfg)
+    typer.echo(f"started (pid {bridge_daemon.start()})")
+
+
+@bridge_app.command("status")
+@_handle_errors
+def bridge_status():
+    """Whether the bridge is up, and where its channel and mailbox are."""
+    cfg = Config.from_env()
+    pid = bridge_daemon.running_pid()
+    typer.echo(f"running (pid {pid})" if pid else "stopped")
+    typer.echo(f"  channel: {cfg.mattermost_channel_id or '<unset>'}")
+    typer.echo(f"  mailbox: {Path(cfg.mailbox_root).expanduser() / 'mattermost'}")
+    typer.echo(f"  log:     {bridge_daemon.log_file()}")
+
+
+@bridge_app.command("logs")
+@_handle_errors
+def bridge_logs(tail: int = typer.Option(40, "-n", "--tail", help="Number of lines to show")):
+    """Tail the detached bridge's log."""
+    typer.echo(bridge_daemon.tail_log(tail))
 
 
 @app.command()

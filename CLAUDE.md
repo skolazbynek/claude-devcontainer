@@ -49,6 +49,15 @@ cld/                             -- Python package (host-side CLI + shared logic
     agent_loop.py                -- Repo agent supervisor daemon (`python -m cld.messenger.agent_loop`)
     identity.py                  -- who the caller is: own session in a container, cwd repo's master on the host
     send/inbox/read/archive/agents.py -- one thin module per `msg` verb, wrapping mailbox.py
+  bridge/                        -- chat bridges: edge adapters over the mailbox transport
+    mattermost.py                -- the daemon (`cld bridge mattermost`); one tick = drain
+                                    own inbox, poll channel, check what we are still owed
+    daemon.py                    -- detached start/stop/status/logs, PID file + log under
+                                    ~/.cld/bridge (same shape as broker/cld-brokerctl.sh)
+    client.py                    -- Mattermost REST over httpx (the only network code)
+    routing.py                   -- pure: rejection filters, @name resolution, chunking
+    fleet.py                     -- classify_target: who can answer and who cannot
+    state.py                     -- durable cursor / seen posts / thread map
 scripts/
   mcp/run-orchestrator.sh        -- (deprecated) thin venv wrapper; kept for reference
   mcp/run-messenger.sh           -- Thin venv wrapper for the messenger MCP server
@@ -187,6 +196,15 @@ TOML uses flat snake_case keys mirroring `Config` field names (`base_image`, `de
 | `CLD_BROKER_KEY` | `""` | Host path to the restricted broker **private** key. When set, `cld master` mounts it RO and makes `cld broker <action>` work (host-side test running via the `runtests` container). Empty = off. Master-only. |
 | `CLD_BROKER_ENDPOINT` | `host.docker.internal:2222` | Broker SSH endpoint `[user@]host:port` (default login user `zet`). |
 | `CLD_BROKER_KNOWN_HOSTS` | `""` | Host path to the pinned `known_hosts` for the broker; mounted RO. Required for the client's strict host-key check. |
+| `CLD_MATTERMOST_URL` | `""` | Mattermost server base URL. Empty = the bridge is not configured. Host-only. |
+| `CLD_MATTERMOST_TOKEN_FILE` | `""` | Path to the bot's personal access token. A **path**, never a value; the bridge refuses to start if the file is group- or world-readable. |
+| `CLD_MATTERMOST_CHANNEL_ID` | `""` | The one channel the bridge reads and writes. |
+| (no env var) | `()` | `mattermost_allowed_user_ids` is TOML-only -- the allowlist of Mattermost **user ids** (not usernames, which are mutable). Empty = the bridge refuses to start. |
+| `CLD_MATTERMOST_POLL_INTERVAL` | `3` | Seconds between channel polls (one tick). |
+| `CLD_MATTERMOST_REPLY_TIMEOUT` | `900` | Seconds before the bridge reports an agent that accepted a message but never answered. |
+| `CLD_MATTERMOST_MAX_POST_CHARS` | `15000` | Chunk threshold; verify against the server's `MaxPostSize`. |
+| `CLD_MATTERMOST_STATE_FILE` | `~/.cld/mattermost-bridge.json` | Durable cursor, seen post ids and thread map. |
+| `CLD_BRIDGE_DIR` | `~/.cld/bridge` | Where `cld bridge start` keeps the daemon's PID file and log. Read directly by `cld/bridge/daemon.py`, not a `Config` field. |
 
 Container-side env vars consumed by shell entrypoints (NOT read by Python `Config`; left unprefixed because shell scripts read them by name):
 
@@ -278,6 +296,49 @@ Full design: `docs/design-agent-messaging.md`. One-line summary: one repo agent 
 - **Naming to keep straight:** the persistent repo agent lives under `cld agent` (uses the `claude-devcontainer` image with `AGENT_MODE=1`); the one-shot autonomous agent lives under `cld run` (uses the `claude-run` image, `--rm`). They share no code path except `build_container_args`/`session_workspace_path`.
 - **Deviation from the design doc, verified empirically:** readiness sentinels live at `/tmp/cld-{master,agent}-ready`, not `/run/...` as originally specced -- `/run` is root-owned `755` in the base image, so a non-root container (`--user <uid>:<gid>`) can never `touch` a file there (pre-existing bug shared with `--master`, fixed for both here).
 - **Nested mailbox root is the user's problem, by design.** When `cld` itself runs nested inside another container (its own `CLD_HOST_PROJECT_DIR`/`CLD_HOST_HOME` set), `build_container_args` cannot create the mailbox root on the real host. (No docker socket is mounted into any container anymore, so there is no cross-socket shortcut to reach the host filesystem even if one were wanted -- container launches from inside master go through the host broker, which runs host-native `cld` where this nested branch does not apply.) `build_container_args` only `mkdir`s when it can verify its own filesystem view *is* the host view (`to_host_path` is a no-op); otherwise it logs a warning with the exact `mkdir -p && chown` command to run on the real host and proceeds to mount the (possibly not-yet-existing) path as-is. `container-init.sh`'s `ensure_own_mailbox` fails loudly in-container (and aborts `AGENT_MODE` startup) if that path turns out to be missing or wrong-owned, rather than silently degrading.
+
+## Mattermost bridge (chat with the fleet)
+
+Full design + plan: `docs/impl-mattermost-bridge-plan.md`. Run it on the host:
+`cld bridge start|stop|restart|status|logs` for the detached daemon (PID file + log
+under `~/.cld/bridge`, no init system -- same shape as `cld-brokerctl`), or
+`cld bridge mattermost [--once]` in the foreground to debug. One responsibility:
+**deliver messages from a private
+Mattermost channel to an agent's mailbox and its replies back.** Its whole contract
+is that every message you send either produces a reply in the thread, or a notice
+saying why it never will.
+
+- **Not a tool claude holds.** The bridge is a host process with a mailbox identity
+  of its own (`mattermost`, a normal mailbox dir under `cfg.mailbox_root`). No token
+  enters a container, no MCP server is added, and no agent gains a capability. It
+  sends with `expects_reply=True`, so the supervisor's reply guarantee and synthesized
+  fallback (`agent_loop.py`) land in the channel rather than nowhere.
+- **No controller agent.** Posts route straight to a named agent: `@<name> …` at
+  channel root opens a thread, replies in that thread continue it with no prefix, and
+  `!fleet` lists the **live** agents on every repo so you can always name one. `!fleet`
+  is the one deliberate exception to the single responsibility -- you cannot address an
+  agent you cannot name. Live-only is a *display* filter: `fleet_rows` stays complete
+  because it is also the name-resolution list, so a crashed or reaped agent remains
+  addressable and answers with the reason it cannot reply.
+- **Strict pre-flight** (`bridge/fleet.py:classify_target`). A mailbox directory is not
+  an agent: masters write no `state.json` (only `AgentSupervisor` does) so they never
+  answer, a crashed container leaves its mailbox behind, and a reaped agent lives under
+  `_archive/`. The bridge classifies before sending and refuses in-channel with the
+  reason. `running_containers()` returns `None` when docker is unreachable, and a `None`
+  liveness view never concludes "crashed" -- otherwise a daemon restart floods the
+  channel with refusals.
+- **Three ways a delivery fails**, one post each, no progress reporting in between:
+  refused pre-flight; the container dies after accepting (detected from `docker ps` on
+  the next tick, not a timer -- `state.json` is written only on transitions and is *not*
+  a heartbeat); or the supervisor wedges while alive (`mattermost_reply_timeout`).
+- **The bridge's edges are unbudgeted** because it writes no `meta.json`, so `peer_edge`
+  is False in `write_message`. Giving it one would silently make every fleet
+  conversation hop-budgeted; `tests/test_bridge.py::test_bridge_edges_are_unbudgeted`
+  is the tripwire.
+- **Any container can post to the channel** by sending to `mattermost` --
+  `resolve_recipient` short-circuits to filesystem delivery for anyone with the mailbox
+  mounted. That is deliberate (an agent can flag a blocker directly), which is why every
+  post names `msg["from"]`.
 
 ## Chain Orchestrator
 

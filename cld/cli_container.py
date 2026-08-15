@@ -59,6 +59,11 @@ def build_stub(ctx: typer.Context):
     _host_only("cld build")
 
 
+@app.command("bridge", hidden=True, context_settings=_ANY_ARGS)
+def bridge_stub(ctx: typer.Context):
+    _host_only("cld bridge")
+
+
 # --- Broker dispatch ----------------------------------------------------------
 
 
