@@ -46,6 +46,10 @@ When you send, the same choice is yours to make:
 You can **initiate messages** only to these by full container name:
 
 - the master, `${PARENT_MASTER}` -- always available, never rationed
+- the bridge mailbox `mattermost` -- always available, never rationed; use it to post
+  status or blockers into the Mattermost channel. If no bridge is configured on this
+  host, the send will fail cleanly with an "unknown recipient" error -- in that case
+  just tell the master instead.
 - these peers:
 ${PEERS}
 
