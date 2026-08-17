@@ -257,6 +257,32 @@ class TestMsg:
         assert deliver.call_args.args == ("cld_agent_x_y", "hi", "the body\n")
         assert deliver.call_args.kwargs == {"expects_reply": True, "answers": "m3"}
 
+    def test_send_accepts_inline_body(self):
+        with patch("cld.cli_msg.send_cmd.deliver") as deliver:
+            result = runner.invoke(app, [
+                "msg", "send", "--to", "cld_agent_x_y", "--subject", "hi",
+                "--body", "quick note",
+            ])
+        assert result.exit_code == 0, result.output
+        assert deliver.call_args.args == ("cld_agent_x_y", "hi", "quick note")
+
+    def test_send_rejects_body_and_body_file_together(self, tmp_path):
+        body = tmp_path / "body.md"
+        body.write_text("the body\n")
+        result = runner.invoke(app, [
+            "msg", "send", "--to", "cld_agent_x_y", "--subject", "hi",
+            "--body", "quick note", "--body-file", str(body),
+        ])
+        assert result.exit_code == 1
+        assert "exactly one of --body or --body-file" in result.output
+
+    def test_send_rejects_neither_body_nor_body_file(self):
+        result = runner.invoke(app, [
+            "msg", "send", "--to", "cld_agent_x_y", "--subject", "hi",
+        ])
+        assert result.exit_code == 1
+        assert "exactly one of --body or --body-file" in result.output
+
     def test_inbox_all_flag(self):
         with patch("cld.cli_msg.inbox_cmd.show") as show:
             assert runner.invoke(app, ["msg", "inbox", "--all"]).exit_code == 0

@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from cld.messenger import send as send_cli
-from cld.messenger.mailbox import ensure_mailbox, ensure_meta, list_inbox
+from cld.messenger.mailbox import ensure_mailbox, ensure_meta, list_inbox, read_message
 
 _SPAWN = {
     "parent": "cld_master_repoA_abcd1234",
@@ -66,3 +66,26 @@ class TestSendCli:
         with patch("cld.messenger.mailbox.list_containers", side_effect=AssertionError("enumerated")):
             _invoke(monkeypatch, tmp_path, "agent-b")
         assert len(list_inbox(tmp_path, "agent-b")) == 1
+
+    def test_inline_body_is_delivered(self, monkeypatch, tmp_path):
+        ensure_meta(tmp_path, "agent-a", **_SPAWN)
+        ensure_meta(tmp_path, "agent-b", **_SPAWN)
+        monkeypatch.setattr(sys, "argv", [
+            "send", "--to", "agent-b", "--subject", "hi", "--body", "hello inline",
+        ])
+        monkeypatch.setattr(send_cli, "resolve_self", lambda: ("agent-a", tmp_path))
+        send_cli.main()
+        [msg] = list_inbox(tmp_path, "agent-b")
+        assert read_message(tmp_path, "agent-b", msg["id"])["body"] == "hello inline"
+
+    def test_body_and_body_file_are_mutually_exclusive(self, monkeypatch, tmp_path):
+        body_file = tmp_path / "body.md"
+        body_file.write_text("hello\n")
+        monkeypatch.setattr(sys, "argv", [
+            "send", "--to", "agent-b", "--subject", "hi",
+            "--body", "hello inline", "--body-file", str(body_file),
+        ])
+        monkeypatch.setattr(send_cli, "resolve_self", lambda: ("agent-a", tmp_path))
+        with pytest.raises(SystemExit) as exc:
+            send_cli.main()
+        assert exc.value.code == 2

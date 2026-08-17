@@ -38,13 +38,16 @@ def main() -> None:
     ap = argparse.ArgumentParser(prog="python -m cld.messenger.send")
     ap.add_argument("--to", required=True, help="Recipient shortname or full container name")
     ap.add_argument("--subject", required=True)
-    ap.add_argument("--body-file", required=True, help="Path to file containing the message body")
+    body_group = ap.add_mutually_exclusive_group(required=True)
+    body_group.add_argument("--body", help="Message body, inline")
+    body_group.add_argument("--body-file", help="Path to file containing the message body")
     ap.add_argument("--expects-reply", action="store_true",
                     help="Oblige the recipient to reply; only for a question you cannot proceed without")
     ap.add_argument("--answers", default="", help="Id of the message this one answers")
     args = ap.parse_args()
 
-    deliver(args.to, args.subject, Path(args.body_file).read_text(),
+    body = args.body if args.body is not None else Path(args.body_file).read_text()
+    deliver(args.to, args.subject, body,
             expects_reply=args.expects_reply, answers=args.answers)
 
 

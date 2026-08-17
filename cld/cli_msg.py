@@ -50,7 +50,8 @@ msg_app = typer.Typer(help="Mailbox messaging with other cld containers.")
 def msg_send(
     to: str = typer.Option(..., "--to", help="Recipient shortname or full container name"),
     subject: str = typer.Option(..., "--subject"),
-    body_file: str = typer.Option(..., "--body-file", help="Path to a file containing the message body"),
+    body: str = typer.Option("", "--body", help="Message body, inline (mutually exclusive with --body-file)"),
+    body_file: str = typer.Option("", "--body-file", help="Path to a file containing the message body"),
     expects_reply: bool = typer.Option(
         False, "--expects-reply",
         help="Oblige the recipient to reply; only for a question you cannot proceed without",
@@ -58,7 +59,10 @@ def msg_send(
     answers: str = typer.Option("", "--answers", help="Id of the message this one answers"),
 ):
     """Deliver a message to another container's mailbox."""
-    send_cmd.deliver(to, subject, Path(body_file).read_text(),
+    if bool(body) == bool(body_file):
+        typer.echo("Error: provide exactly one of --body or --body-file", err=True)
+        raise typer.Exit(1)
+    send_cmd.deliver(to, subject, body or Path(body_file).read_text(),
                      expects_reply=expects_reply, answers=answers)
 
 
