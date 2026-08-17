@@ -315,18 +315,24 @@ saying why it never will.
   fallback (`agent_loop.py`) land in the channel rather than nowhere.
 - **No controller agent.** Posts route straight to a named agent: `@<name> …` at
   channel root opens a thread, replies in that thread continue it with no prefix, and
-  `!fleet` lists the **live** agents on every repo so you can always name one. `!fleet`
-  is the one deliberate exception to the single responsibility -- you cannot address an
-  agent you cannot name. Live-only is a *display* filter: `fleet_rows` stays complete
-  because it is also the name-resolution list, so a crashed or reaped agent remains
-  addressable and answers with the reason it cannot reply.
+  `!fleet` lists the **live agents and attended masters** on every repo so you can
+  always name one. `!fleet` is the one deliberate exception to the single
+  responsibility -- you cannot address an agent you cannot name. The filter is a
+  *display* filter: `fleet_rows` stays complete because it is also the name-resolution
+  list, so a crashed or reaped agent remains addressable and answers with the reason
+  it cannot reply.
 - **Strict pre-flight** (`bridge/fleet.py:classify_target`). A mailbox directory is not
-  an agent: masters write no `state.json` (only `AgentSupervisor` does) so they never
-  answer, a crashed container leaves its mailbox behind, and a reaped agent lives under
-  `_archive/`. The bridge classifies before sending and refuses in-channel with the
-  reason. `running_containers()` returns `None` when docker is unreachable, and a `None`
-  liveness view never concludes "crashed" -- otherwise a daemon restart floods the
-  channel with refusals.
+  an agent: a crashed container leaves its mailbox behind, and a reaped agent lives
+  under `_archive/`. The bridge classifies before sending and refuses in-channel with
+  the reason. Masters write no `state.json` (only `AgentSupervisor` does -- a master
+  deliberately gets no supervisor of its own, since a headless loop running `claude -p`
+  in the same workspace a human attaches to interactively would race with them) but are
+  classified `attended` rather than refused: delivery still queues in their mailbox,
+  and a person answers via the `messenger-*` skills the next time they attach --
+  `write_message` doesn't care who replies, so it posts back into the thread exactly
+  like an agent's reply would. `running_containers()` returns `None` when docker is
+  unreachable, and a `None` liveness view never concludes "crashed" -- otherwise a
+  daemon restart floods the channel with refusals.
 - **Three ways a delivery fails**, one post each, no progress reporting in between:
   refused pre-flight; the container dies after accepting (detected from `docker ps` on
   the next tick, not a timer -- `state.json` is written only on transitions and is *not*

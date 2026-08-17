@@ -231,11 +231,18 @@ def test_classify_crashed_when_container_gone(root):
     assert t.status == fleet.CRASHED and "processing" in t.detail
 
 
-def test_classify_master_is_unattended(root):
-    # A master writes no state.json -- only AgentSupervisor does.
+def test_classify_master_is_attended(root):
+    # A master writes no state.json -- only AgentSupervisor does -- but it is
+    # still a real place to deliver a message: a human answers when they attach.
     mailbox.ensure_mailbox(root, "cld_master_api")
     t = fleet.classify_target(root, "cld_master_api", {"cld_master_api"})
-    assert t.status == fleet.UNATTENDED and "attach" in t.detail
+    assert t.status == fleet.ATTENDED and t.ready and "attach" in t.detail
+
+
+def test_classify_master_crashed_when_container_gone(root):
+    mailbox.ensure_mailbox(root, "cld_master_api")
+    t = fleet.classify_target(root, "cld_master_api", set())
+    assert t.status == fleet.CRASHED and not t.ready
 
 
 def test_classify_stopped(root):
@@ -335,11 +342,15 @@ def test_dead_agent_is_refused_immediately_and_nothing_is_delivered(cfg, root):
     assert "cannot deliver" in client.messages[0] and "container is gone" in client.messages[0]
 
 
-def test_master_is_refused_with_the_attach_note(cfg, root):
+def test_master_delivery_queues_for_a_human_to_answer(cfg, root):
     mailbox.ensure_mailbox(root, "cld_master_api")
     client = FakeClient([post("@cld_master_api hello")])
     make_bridge(cfg, root, client).poll_channel({"cld_master_api"})
-    assert "attach" in client.messages[0]
+
+    inbox = mailbox.list_inbox(root, "cld_master_api")
+    assert len(inbox) == 1
+    assert mailbox.read_message(root, "cld_master_api", inbox[0]["id"])["body"] == "hello"
+    assert "cld_master_api" in client.messages[0]
 
 
 def test_reply_lands_in_the_original_thread(cfg, root):
@@ -395,7 +406,7 @@ def test_fleet_command_does_not_message_any_agent(cfg, root):
     assert "cld_agent_api_idem" in client.messages[0]
 
 
-def test_fleet_lists_only_live_agents(cfg, root):
+def test_fleet_lists_live_agents_and_attended_masters(cfg, root):
     make_agent(root, "cld_agent_api_live")
     make_agent(root, "cld_agent_api_dead", phase="processing")
     make_agent(root, "cld_agent_api_done", phase="stopped")
@@ -408,7 +419,8 @@ def test_fleet_lists_only_live_agents(cfg, root):
 
     listed = client.messages[0]
     assert "cld_agent_api_live" in listed
-    for absent in ("cld_agent_api_dead", "cld_agent_api_done", "cld_master_api", "cld_agent_api_gone"):
+    assert "cld_master_api" in listed and "attended" in listed
+    for absent in ("cld_agent_api_dead", "cld_agent_api_done", "cld_agent_api_gone"):
         assert absent not in listed, f"{absent} should not be in the roster"
 
 
@@ -488,6 +500,22 @@ def test_unknown_liveness_produces_no_crash_notice(cfg, root):
     before = len(client.posted)
     bridge.check_outstanding(None)
     assert len(client.posted) == before
+
+
+def test_master_timeout_notice_names_the_missing_supervisor(cfg, root):
+    """A master's silence means no one has attached, not a hung supervisor."""
+    mailbox.ensure_mailbox(root, "cld_master_api")
+    client = FakeClient([post("@cld_master_api hello")])
+    bridge = make_bridge(cfg, root, client)
+    bridge.poll_channel({"cld_master_api"})
+
+    msg_id = next(iter(bridge.state.outstanding))
+    bridge.state.outstanding[msg_id]["sent_at"] = "2000-01-01T00:00:00Z"
+
+    bridge.check_outstanding({"cld_master_api"})
+
+    assert "no autonomous supervisor" in client.messages[-1]
+    assert bridge.state.outstanding == {}
 
 
 # --- the tripwire (plan §13) --------------------------------------------------

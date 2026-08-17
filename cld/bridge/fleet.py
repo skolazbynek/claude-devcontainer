@@ -1,10 +1,11 @@
 """Who can answer, and who cannot -- the bridge's pre-flight check (plan §5).
 
-A mailbox directory is not an agent. The root holds masters (no supervisor, so
-they never reply), crashed containers (mailbox intact, container gone), reaped
-agents (moved under ``_archive/``) and the bridge's own mailbox. Delivering into
-any of those is a message that will never be answered, so the bridge classifies
-before it sends and refuses in-channel with the reason.
+A mailbox directory is not an agent. The root holds masters (no supervisor --
+human-attended, so delivery queues and a person answers when they check in),
+crashed containers (mailbox intact, container gone), reaped agents (moved
+under ``_archive/``) and the bridge's own mailbox. Delivering into a dead one
+is a message that will never be answered, so the bridge classifies before it
+sends and refuses in-channel with the reason.
 """
 
 import subprocess
@@ -18,6 +19,7 @@ from cld.messenger import mailbox
 log = get_logger(__name__)
 
 READY = "ready"
+ATTENDED = "attended"
 REAPED = "reaped"
 UNKNOWN = "unknown"
 UNATTENDED = "unattended"
@@ -37,7 +39,10 @@ class Target:
 
     @property
     def ready(self) -> bool:
-        return self.status == READY
+        # ATTENDED (a master) has no supervisor to answer immediately, but a
+        # human will -- unlike a genuinely unattended/crashed/reaped mailbox,
+        # it is a real place to deliver a message.
+        return self.status in (READY, ATTENDED)
 
 
 def running_containers() -> set[str] | None:
@@ -69,12 +74,20 @@ def classify_target(root: Path, name: str, running: set[str] | None) -> Target:
     meta = mailbox.read_meta(root, name)
 
     if state is None:
-        detail = (
-            "a master has no supervisor -- it will read this the next time you attach"
-            if name.startswith("cld_master_")
-            else "supervisor never wrote its state -- check `cld agent logs`"
-        )
-        return Target(name, UNATTENDED, detail, meta, state)
+        if name.startswith("cld_master_"):
+            if running is not None and name not in running:
+                return Target(
+                    name, CRASHED,
+                    "container is gone. Work may be recoverable from the origin store",
+                    meta, state,
+                )
+            return Target(
+                name, ATTENDED,
+                "a master has no supervisor -- delivered to its mailbox; a person "
+                "answers it the next time they attach",
+                meta, state,
+            )
+        return Target(name, UNATTENDED, "supervisor never wrote its state -- check `cld agent logs`", meta, state)
 
     if state.get("phase") == "stopped":
         return Target(name, STOPPED, "supervisor exited cleanly", meta, state)
@@ -119,33 +132,38 @@ def fleet_rows(root: Path, running: set[str] | None, exclude: str = "") -> list[
 
 
 def render_fleet(root: Path, rows: list[Target]) -> str:
-    """`!fleet`: the agents you can actually talk to, one block each.
+    """`!fleet`: the targets you can actually talk to, one block each.
 
-    Live-only. Listing crashed, stopped, reaped and unattended mailboxes turned the
-    roster into a graveyard you had to read past to find the two agents that could
-    answer -- and `!fleet` exists to let you name one. Addressing a dead agent still
-    reports exactly why it cannot answer (``classify_target``), so nothing is hidden
-    that you would otherwise have to guess at.
+    Ready agents and attended masters only. Listing crashed, stopped, reaped and
+    unattended mailboxes turned the roster into a graveyard you had to read past to
+    find the targets that could answer -- and `!fleet` exists to let you name one.
+    Addressing a dead agent still reports exactly why it cannot answer
+    (``classify_target``), so nothing is hidden that you would otherwise have to
+    guess at.
 
     One block per agent rather than a markdown table: tables wrap badly on mobile.
     """
     live = [t for t in rows if t.ready]
     if not live:
         return (
-            "No live agents. Start one with `cld task-agent start` or `cld agent`"
+            "No live agents or attended masters. Start one with `cld task-agent start`, "
+            "`cld agent`, or `cld master`"
             f"{f' ({len(rows)} mailbox(es) present but none can answer)' if rows else ''}."
         )
 
     lines = []
     for t in sorted(live, key=lambda r: r.name):
-        state = t.state or {}
         inbox = mailbox.mailbox_dir(root, t.name) / "inbox"
         unread = len(list(inbox.glob("*.json"))) if inbox.is_dir() else 0
-        head = (
-            f"**{t.name}** -- {state.get('phase', '?')}"
-            f" -- {state.get('msg_count', 0)} msgs"
-            f" -- ${state.get('cost_usd_total', 0.0):.2f}"
-        )
+        if t.status == ATTENDED:
+            head = f"**{t.name}** -- attended (no supervisor; a person replies when they attach)"
+        else:
+            state = t.state or {}
+            head = (
+                f"**{t.name}** -- {state.get('phase', '?')}"
+                f" -- {state.get('msg_count', 0)} msgs"
+                f" -- ${state.get('cost_usd_total', 0.0):.2f}"
+            )
         if unread:
             head += f" -- {unread} unread"
         lines.append(head)

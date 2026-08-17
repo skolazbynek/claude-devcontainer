@@ -172,6 +172,19 @@ class Bridge:
             if _elapsed_seconds(entry["sent_at"]) < self.cfg.mattermost_reply_timeout:
                 continue
 
+            if agent.startswith("cld_master_"):
+                # No supervisor, so neither "still working" nor "archived without
+                # replying" (an anomaly for a supervisor's reply guarantee) applies --
+                # a human simply hasn't checked in yet, and may not reply at all.
+                self._post(
+                    f"**`{agent}` has not replied** in "
+                    f"{int(self.cfg.mattermost_reply_timeout / 60)}m. It has no autonomous "
+                    "supervisor -- someone needs to attach (`cld master`) and check messages.",
+                    root_id,
+                )
+                self._notified(msg_id)
+                continue
+
             state = mailbox.read_state(self.root, agent) or {}
             # Specifically the inbox, not read_message -- that searches the archive
             # too, and "archived without replying" is the anomaly we are looking for.

@@ -45,7 +45,7 @@ over the mailbox transport that already exists.
 | D8 | Polling, not webhooks | Outbound-only; a laptop behind NAT/VPN cannot receive an inbound webhook |
 | D9 | The bridge is **stateful and durable** | Cursor, seen-post ids and the thread map must survive restart or you re-run yesterday's tasks and orphan replies |
 | D10 | **One responsibility** (§1). Every feature must serve the delivery contract or be cut | A message router that also reports progress, tracks queues and mirrors traffic is three things badly. `!fleet` is the one deliberate exception, and only because addressing requires naming |
-| D11 | `!fleet` spans **every repo on the host**, unscoped, but lists **live agents only** | Unscoped needs no config and matches the use case. Live-only because the roster exists to let you name an agent that can answer -- crashed, stopped, reaped and unattended mailboxes accumulate and turn it into a graveyard you read past. Nothing is hidden: addressing a dead agent still reports why it cannot answer. Accepted cost: a channel compromise enumerates every live task across all repos |
+| D11 | `!fleet` spans **every repo on the host**, unscoped, but lists **live agents and attended masters only** | Unscoped needs no config and matches the use case. Filtered to what can actually answer, because the roster exists to let you name a target that will -- crashed, stopped, reaped and genuinely unattended (never-booted) mailboxes accumulate and turn it into a graveyard you read past. Masters count as answerable even with no supervisor: a human answers when they attach, and delivery to one queues rather than refuses. Nothing is hidden: addressing a dead agent still reports why it cannot answer. Accepted cost: a channel compromise enumerates every live task and master across all repos |
 
 ## 3. Architecture
 
@@ -99,7 +99,7 @@ class MattermostClient(Protocol):
 @dataclass(frozen=True)
 class Target:
     name: str
-    status: str          # ready | reaped | unattended | stopped | crashed | unknown
+    status: str          # ready | attended | reaped | unattended | stopped | crashed | unknown
     detail: str          # human sentence for the refusal / fleet row
     meta: dict | None
     state: dict | None
@@ -123,7 +123,9 @@ the safety-critical part of the bridge.
 |---|---|---|---|
 | 1 | `mailbox.mailbox_reaped(root, name)` | `reaped` | "reaped — transcript: `cld task-agent transcript <slug>`" |
 | 2 | no live mailbox dir | `unknown` | "no such agent" + fleet list |
-| 3 | `read_state()` is None | `unattended` | masters: "no supervisor; it will see this when you attach". Others: "supervisor never booted — check `cld agent logs`" |
+| 3a | `read_state()` is None, name is a master, not running | `crashed` | "container is gone. Work may be recoverable from the origin store" |
+| 3b | `read_state()` is None, name is a master, running | `attended` (deliverable) | delivers; queues for a human to answer when they attach |
+| 3c | `read_state()` is None, not a master | `unattended` | "supervisor never booted — check `cld agent logs`" |
 | 4 | `state["phase"] == "stopped"` | `stopped` | "supervisor exited cleanly" |
 | 5 | `name not in running` | `crashed` | "container is gone; mailbox last said `<phase>` at `<ts>`. Work may be recoverable from the origin store" |
 | 6 | — | `ready` | deliver |
@@ -132,7 +134,16 @@ Notes:
 
 - Step 3 is what separates masters from agents on disk: only
   `AgentSupervisor._write_state` writes `state.json`, and master's entrypoint
-  just `sleep infinity` (`entrypoint-claude-devcontainer.sh:201-221`).
+  just `sleep infinity` (`entrypoint-claude-devcontainer.sh:201-221`). A master
+  never gets its own supervisor -- that was a deliberate choice, kept even after
+  masters became addressable, because a headless loop running `claude -p`
+  against the same `/workspace/current` a human attaches to interactively would
+  race with whatever they are doing by hand. `attended` accepts that a master
+  answers on human time instead: delivery still succeeds (`Target.ready` is
+  true for `ready` *and* `attended`), the message queues in its mailbox, and a
+  person replies via the `messenger-*` skills when they next attach --
+  `mailbox.gated_send`/`write_message` don't care who or what writes the reply,
+  so it posts back into the thread exactly like an agent's would.
 - Step 1 matches what the transport would do anyway — `write_message` refuses a
   reaped recipient (`mailbox.py:138-140`) — but silently returns `None`. We
   want the reason in the channel, not a warning in a log.
@@ -299,16 +310,17 @@ channel within one tick and is archived.
 **P1 — inbound with strict pre-flight.** Filters, routing, `classify_target`,
 delivery, ack, thread mapping.
 *Acceptance:* `@<agent> hello` reaches the agent and its reply lands in-thread;
-`@<crashed-agent>` is refused **immediately** naming the reason; `@<master>` is
-refused with the attach note; `@<reaped>` names the transcript command; an
-unknown or ambiguous name returns candidates.
+`@<crashed-agent>` is refused **immediately** naming the reason; `@<master>`
+delivers and queues, acking that it will be answered when someone attaches;
+`@<reaped>` names the transcript command; an unknown or ambiguous name returns
+candidates.
 
 **P2 — close the contract.** `!fleet`, `!help`, failures 2 and 3 (§8), the detached
 lifecycle verbs, VPN/backoff handling with a visible "disconnected" state.
 *Acceptance:* killing an agent's container mid-turn produces an in-thread crash
-warning within one tick; `!fleet` correctly separates ready / crashed /
-unattended / reaped across every repo; the daemon survives a VPN drop and
-reconnects without replaying posts.
+warning within one tick; `!fleet` correctly separates ready / attended /
+crashed / unattended / reaped across every repo; the daemon survives a VPN drop
+and reconnects without replaying posts.
 
 Then stop. Anything further is a second responsibility (D10).
 
@@ -317,7 +329,9 @@ Then stop. Anything further is a second responsibility (D10).
 Pure modules with `tmp_path` and a fake client; no network, no docker.
 
 - `classify_target`: one case per row of §5, including the master case (no
-  `state.json`) and the crashed case (state present, name absent from `running`).
+  `state.json`, running -> `attended`, deliverable), the master-crashed case
+  (no `state.json`, absent from `running` -> `crashed`), and the ordinary
+  crashed case (state present, name absent from `running`).
 - `resolve_name`: exact, bare slug, unique prefix, ambiguous, unknown.
 - `route_post`: thread reply, `@name` at root, bang-command, bare post.
 - Filters: each rejection in §7, especially the edited-post case.
