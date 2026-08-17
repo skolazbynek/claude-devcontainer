@@ -180,8 +180,13 @@ to a repo: it serves any repo that has a running master, resolving the target fr
 that master container's host-set `org.cld.repo-root` label (Option A of §13). The
 scoping boundary is the fixed `ForceCommand` + action set, not a repo pin.
 
-**Broker config (host-side):** `RUNTESTS_IMAGE`, `PATH` — broker-wide only, nothing
-per-repo.
+**Broker config (host-side):** `RUNTESTS_IMAGE`, `PATH`, `SSH_AUTH_SOCK` — broker-wide
+only, nothing per-repo. `SSH_AUTH_SOCK` is opt-in and only the two launcher actions
+export it (`stage_agent_socket`): a container spawned on a master's behalf otherwise
+gets no ssh-agent, because sshd builds a fresh environment for the forced command.
+It must name a socket that outlives one ssh session, which is also why connection
+agent-forwarding cannot serve here — the container outlives the connection that
+launched it.
 
 **Dispatch model.** `$SSH_ORIGINAL_COMMAND` is `<action> <session> <base64-argv>`.
 The action resolves to a shell function `action_<name>` (adding an action = defining

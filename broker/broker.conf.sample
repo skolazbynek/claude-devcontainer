@@ -12,3 +12,12 @@ RUNTESTS_IMAGE=runtests:latest
 # `agent` action runs host-side `cld agent`) -- plus any other tools your
 # actions call -- reachable:
 # PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+# Your ssh-agent socket, forwarded into the agents and task-agents the broker
+# launches so they can push their deliverable branch. sshd gives the forced
+# command no $SSH_AUTH_SOCK of its own, so without this they run keyless.
+# It must be a path that stays valid across logins, because the broker reads it
+# per request -- a login-shell agent's /tmp/ssh-XXXX/agent.NNN does not qualify.
+# A systemd user unit gives you one:
+#     systemctl --user enable --now ssh-agent.service   # with %t/ssh-agent.socket
+# SSH_AUTH_SOCK=/run/user/1000/ssh-agent.socket

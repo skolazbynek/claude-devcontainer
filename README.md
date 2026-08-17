@@ -327,7 +327,7 @@ Full set of keys:
 | `poll_interval` | int (seconds) | `30` | Chain orchestrator's docker-ps poll interval |
 | `chain_max_parallel` | int | `4` | Max agents launched concurrently in a chain's parallel group |
 | `chain_default_model` | string | `""` | Model override for chain agents; empty = each step's own default |
-| `ssh_auth_sock` | string | unset (auto-detect) | SSH agent forwarding into `cld`/`cld master`. Unset = auto-detect host `$SSH_AUTH_SOCK`; `""` = explicitly disable; a path = use that socket |
+| `ssh_auth_sock` | string | unset (auto-detect) | SSH agent forwarding into every devcontainer-image launch (`cld`, `master`, `agent`, `task-agent`). Unset = auto-detect host `$SSH_AUTH_SOCK`; `""` = explicitly disable; a path = use that socket. Launches the broker makes on a master's behalf need `SSH_AUTH_SOCK` in `broker.conf` -- see `broker/README.md` |
 | `mailbox_root` | string | `"~/.cld/mailboxes"` | Host root of the inter-container mailbox tree (bind-mounted RW into every master/agent) |
 | `agent_max_turns` | int | `120` | Per-message turn cap passed to the repo agent's `claude -p --max-turns` |
 | `agent_kickoff_persona` | string | `"agent"` | Persona used to kick off a new `cld agent` Claude session |

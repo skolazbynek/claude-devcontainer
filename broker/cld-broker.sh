@@ -82,6 +82,25 @@ action_list_containers() {
         done
 }
 
+# Shared by both launcher actions: a container that pushes a deliverable branch
+# needs the host user's ssh-agent, and `stage_ssh_agent` (cld/docker.py) forwards
+# whatever socket $SSH_AUTH_SOCK names. sshd builds a fresh session environment,
+# so that variable only exists here if broker.conf sets it -- and a conf
+# assignment is not exported, hence this. Agent *forwarding* over the broker
+# connection is not an alternative: that socket dies with the ssh session, while
+# the container outlives it. Never fatal, matching stage_ssh_agent: a dead path
+# is warned about and the launch proceeds without a key, as it did before.
+stage_agent_socket() {
+    [ -n "${SSH_AUTH_SOCK:-}" ] || return 0
+    if [ -S "$SSH_AUTH_SOCK" ]; then
+        export SSH_AUTH_SOCK
+    else
+        echo "[cld-broker] SSH_AUTH_SOCK=$SSH_AUTH_SOCK is not a live socket --" \
+             "launching without agent forwarding" >&2
+        unset SSH_AUTH_SOCK
+    fi
+}
+
 # Shared by both launcher actions: <target> is validated against the master's
 # host-set labels (org.cld.repo-root + org.cld.targets), never trusted from the
 # caller alone -- so an action can only ever run for a repo the host sanctioned.
@@ -108,6 +127,7 @@ action_agent() {
         *) echo "denied: bad agent op '$op'" >&2; exit 2 ;;
     esac
     validate_target "$target"
+    stage_agent_socket
 
     # `cld agent` (no subcommand) starts; the rest are subcommands.
     cd "$target" || { echo "cannot cd to $target" >&2; exit 3; }
@@ -142,6 +162,7 @@ action_task_agent() {
         *) echo "denied: bad task-agent op '$op'" >&2; exit 2 ;;
     esac
     validate_target "$target"
+    stage_agent_socket
 
     # Both spellings of each denial: click accepts `--opt=value`, so matching the bare
     # token alone would let `--parent=<other-master>` through and forge an owner.

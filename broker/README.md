@@ -29,7 +29,7 @@ container: cld broker run-tests -k login -x tests/
 | File | Role |
 |---|---|
 | `cld-broker.sh` | the `ForceCommand` target; the only thing the key can run |
-| `broker.conf.sample` | broker-wide config (image, PATH); copy to `/etc/cld/broker.conf` |
+| `broker.conf.sample` | broker-wide config (image, PATH, ssh-agent socket); copy to `/etc/cld/broker.conf` |
 | `sshd_cld_broker.conf` | sample config for the dedicated `sshd` instance |
 | `keygen.sh` | generate the broker keypair, host key, and `authorized_keys` |
 | `cld-cld-brokerctl.sh` | operate the sshd: `start` / `restart` / `shutdown` / `status` / `logs` |
@@ -59,7 +59,9 @@ claude's only host channel).
    set `RUNTESTS_IMAGE` + `PATH`. `PATH` must include both `docker` and `cld`
    (the `agent` action runs host-side `cld agent` for sibling launches). There
    is nothing per-repo to set -- the repo and its secrets path are resolved per
-   request.
+   request. Set `SSH_AUTH_SOCK` too if the agents and task-agents launched
+   through the broker should be able to push (see the sample for why a
+   login-shell agent's socket path will not do).
 3. **Broker script.** Install `cld-broker.sh` at `/opt/cld/cld-broker.sh`
    (path referenced by `ForceCommand`), `chmod +x`.
 4. **sshd.** Edit `sshd_cld_broker.conf` (`AllowUsers`, `ListenAddress` for your
@@ -145,6 +147,10 @@ let the token after an `--opt=value` slip by unchecked.
 - **No injection.** argv arrives base64(NUL-joined) and is decoded into an argv
   array, never `eval`'d -- it can only become arguments to the action's command.
 - **Blast radius.** A leaked broker key unlocks the defined actions for any repo
-  that has a running master (no per-master key isolation in this design).
+  that has a running master (no per-master key isolation in this design). With
+  `SSH_AUTH_SOCK` configured that includes launching an agent that holds your
+  forwarded ssh-agent, so the key buys signing inside a container it spawns and
+  not only `run-tests`. Leave it unset to keep every broker-launched agent
+  structurally unable to push.
 - **Network scope.** Bind the instance to the docker bridge gateway so only
   containers on the bridge can reach it.
