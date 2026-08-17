@@ -230,15 +230,29 @@ class TestBrokerExitCodes:
 
 
 class TestRepos:
-    def test_lists_own_and_targets(self):
-        cfg = Config(host_project_dir="/host/side/cld",
-                     master_targets=("/host/side/foo", "/host/side/bar"))
+    def test_lists_own_and_targets(self, monkeypatch):
+        # master_targets deliberately empty here: the real channel into a
+        # container is the MASTER_TARGETS env var (host-resolved, see
+        # build_container_args in cld/docker.py), not TOML re-read in-container.
+        monkeypatch.setenv("MASTER_TARGETS", "/host/side/foo:/host/side/bar")
+        cfg = Config(host_project_dir="/host/side/cld")
         with patch("cld.cli_container.Config.from_env", return_value=cfg):
             result = runner.invoke(app, ["repos"])
         assert result.exit_code == 0, result.output
         assert "/host/side/cld\town" in result.output
         assert "/host/side/foo\ttarget" in result.output
         assert "/host/side/bar\ttarget" in result.output
+
+    def test_ignores_stale_toml_master_targets(self, monkeypatch):
+        # Even if cfg.master_targets is (wrongly) populated in-container, e.g.
+        # by a stray .cld/config.toml, MASTER_TARGETS is authoritative.
+        monkeypatch.delenv("MASTER_TARGETS", raising=False)
+        cfg = Config(host_project_dir="/host/side/cld", master_targets=("/stale/toml/path",))
+        with patch("cld.cli_container.Config.from_env", return_value=cfg):
+            result = runner.invoke(app, ["repos"])
+        assert result.exit_code == 0, result.output
+        assert "/host/side/cld\town" in result.output
+        assert "/stale/toml/path" not in result.output
 
 
 class TestMsg:

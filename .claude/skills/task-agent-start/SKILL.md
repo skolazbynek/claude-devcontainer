@@ -35,6 +35,8 @@ cld repos          # <path> own | <path> target
 registered sibling are spawned exactly the same way; you have no filesystem view of a
 sibling, which is what makes the *pushed branch* rule in `task-agent-wrapup` matter.
 
+If repos mention a home directory ("//home//<user>"), check your own home directory as well. It might be mounted there.
+
 ## Step 2: Choose the slug, the prompt refs and the branch
 
 - **Slug** (`-n`): short, kebab-case, describes the task — `add-oauth`, not `task-1`.
@@ -72,6 +74,12 @@ Two rules that follow from how edges work:
 
 Peers are addressed by full container name; a repo basename is ambiguous with several
 task-agents per repo.
+
+## Step 5: Decide on a model
+
+- `haiku`: For a quick, straightforward, small and well-scoped tasks. Not very useful for task-agents.
+- `sonnet`: Good for well-scoped task-agents: implementation, advice on another repo, first-pass reviews. Use often, with well-prepared prompts.
+- `opus`: Good for hard thinking - research, making important decisions, working open tasks, open-ended designing. Use when needed.
 
 ## Step 5: Spawn
 

@@ -341,14 +341,22 @@ def repos():
     """List host repos this master can launch peer containers against.
 
     Prints one path per line, tagged 'own' for master's own repo (from
-    CLD_HOST_PROJECT_DIR) and 'target' for each entry in `master_targets`.
+    CLD_HOST_PROJECT_DIR) and 'target' for each entry in `MASTER_TARGETS`.
+
+    Reads the `MASTER_TARGETS` env var, not `cfg.master_targets` -- the host
+    already resolved, validated and expanded `master_targets` from its own
+    config into that env var at launch (see `build_container_args` in
+    cld/docker.py). Re-reading TOML in-container would look at a different
+    (usually absent, since `.cld/` is gitignored) config and disagree with
+    `resolve_master_target`, which is what actually launches peers.
     """
     cfg = Config.from_env()
     setup_logging(cfg)
     if cfg.host_project_dir:
         typer.echo(f"{cfg.host_project_dir}\town")
-    for entry in cfg.master_targets:
-        typer.echo(f"{os.path.expanduser(entry)}\ttarget")
+    for entry in os.environ.get("MASTER_TARGETS", "").split(":"):
+        if entry:
+            typer.echo(f"{entry}\ttarget")
 
 
 @app.command()
