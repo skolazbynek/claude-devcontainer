@@ -533,8 +533,11 @@ def build_container_args(
     # No docker socket is mounted into any container (it was equivalent to host
     # root). In-container docker needs -- peer enumeration and sibling `cld
     # agent` launches from inside master -- go through the host broker over SSH
-    # (see cld/broker.py, broker/cld-broker.sh). The broker key is
-    # mounted master-only by stage_broker below.
+    # (see cld/broker.py, broker/cld-broker.sh). The broker key is mounted for
+    # persistent roles (master, agent, task-agent) by stage_broker below; the
+    # `agent`/`task-agent` launcher actions stay master-only regardless, gated
+    # by the org.cld.targets label (only master carries it, see master_targets
+    # below), not by broker reachability.
 
     # MySQL (conditional)
     if cfg.mysql_config:
@@ -551,9 +554,13 @@ def build_container_args(
         else:
             log.warning(f"CLD_MYSQL_CONFIG set but file not found: {cfg.mysql_config}")
 
-    # Host test broker (master only): mount the restricted key + known_hosts and
-    # make the broker reachable. No-op unless broker_key is set.
-    if master:
+    # Host test broker (persistent roles): mount the restricted key + known_hosts
+    # and make the broker reachable. No-op unless broker_key is set. Agents and
+    # task-agents get this too so they can run `cld broker run-tests`, but their
+    # personas instruct them to only invoke it with explicit per-run
+    # authorization from their master -- see prompts/personas/agent.md and
+    # prompts/personas/task-agent.md.
+    if master or agent or task_agent:
         args += stage_broker(cfg)
 
     # Mailbox tree (persistent roles only) -- shared RW mount so every master,
@@ -875,14 +882,16 @@ def stage_ssh_agent(cfg: Config) -> list[str]:
 
 
 def stage_broker(cfg: Config) -> list[str]:
-    """Return docker args wiring a master container to the cld broker.
+    """Return docker args wiring a container to the cld broker.
 
     Mounts the restricted broker private key (and, if given, the pinned
     known_hosts) RO, adds a host-gateway alias so the container can reach the
     host-side sshd, and sets ``CLD_BROKER_ENDPOINT`` so the in-container client
-    (``cld broker <action>``) can reach it. No-op unless ``cfg.broker_key`` is set. The
-    broker only accepts ``cld_master_*`` sessions, so this is master-only.
-    See docs/design-cld-broker.md.
+    (``cld broker <action>``) can reach it. No-op unless ``cfg.broker_key`` is set.
+    Called for master, agent and task-agent containers (see the call site in
+    ``build_container_args``); the broker's sshd accepts ``cld_master_*`` and
+    ``cld_agent_*`` sessions (the latter covers both the standing repo agent and
+    task-agents -- see ``broker/cld-broker.sh``). See docs/design-cld-broker.md.
     """
     if not cfg.broker_key:
         return []

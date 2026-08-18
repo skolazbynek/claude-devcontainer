@@ -325,7 +325,7 @@ def broker(
     if not broker_available():
         typer.echo(
             "Error: the cld broker is not configured for this container. Set `broker_key` "
-            "(and `broker_known_hosts`) in cld config and restart master.",
+            "(and `broker_known_hosts`) in cld config and restart this container.",
             err=True,
         )
         raise typer.Exit(1)

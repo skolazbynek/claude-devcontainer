@@ -256,10 +256,12 @@ class Config:
     peer_absolute_limit: int = 10
     root_ask_limit: int = 5
 
-    # The cld broker (master only): if broker_key is set, master mounts
-    # the restricted private key and gets a `cld broker` wrapper that ships pytest
-    # args to a host-side SSH broker running the `runtests` container. Empty =
-    # off. See docs/design-cld-broker.md.
+    # The cld broker: if broker_key is set, master/agent/task-agent containers
+    # mount the restricted private key and get a `cld broker` wrapper that ships
+    # pytest args to a host-side SSH broker running the `runtests` container.
+    # Empty = off. Agents and task-agents are instructed (via their personas)
+    # to only invoke it with explicit per-run authorization from their master.
+    # See docs/design-cld-broker.md.
     broker_key: str = ""
     broker_endpoint: str = "host.docker.internal:2222"
     broker_known_hosts: str = ""

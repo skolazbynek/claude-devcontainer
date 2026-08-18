@@ -436,7 +436,9 @@ class TestBuildContainerArgsTaskAgent:
         args = self._args(tmp_path)
         assert any(a.endswith(f":{MAILBOX_MOUNT}:rw") for a in args)
 
-    def test_no_broker_key(self, tmp_path):
+    def test_broker_key_wired(self, tmp_path):
+        """Task-agents get the broker too now -- gated by policy in their
+        persona prompt (must ask master first), not by wiring."""
         key = tmp_path / "broker_key"
         key.write_text("k")
         args = build_container_args(
@@ -444,7 +446,7 @@ class TestBuildContainerArgsTaskAgent:
             Config(mailbox_root=str(tmp_path / "mb"), broker_key=str(key)),
             task_agent=TaskAgentSpec(slug="t"),
         )
-        assert not any("broker-key" in a for a in args)
+        assert any("broker-key" in a for a in args)
 
     @pytest.mark.parametrize("kwargs", [
         {"master": True, "agent": True},
@@ -454,6 +456,36 @@ class TestBuildContainerArgsTaskAgent:
     def test_roles_mutually_exclusive(self, tmp_path, kwargs):
         with pytest.raises(ValueError, match="mutually exclusive"):
             build_container_args(tmp_path, "s", Config(), **kwargs)
+
+
+class TestBuildContainerArgsBrokerWiring:
+    """Broker key reaches every persistent role -- master, agent, task-agent --
+    not just master. Access-time policy (master authorization) lives in the
+    agent/task-agent persona prompts, not in this wiring."""
+
+    def _cfg(self, tmp_path):
+        key = tmp_path / "broker_key"
+        key.write_text("k")
+        return Config(mailbox_root=str(tmp_path / "mb"), broker_key=str(key))
+
+    def test_master_role_gets_broker(self, tmp_path):
+        args = build_container_args(tmp_path, "cld_master_r", self._cfg(tmp_path), master=True)
+        assert any("broker-key" in a for a in args)
+
+    def test_agent_role_gets_broker(self, tmp_path):
+        args = build_container_args(tmp_path, "cld_agent_r", self._cfg(tmp_path), agent=True)
+        assert any("broker-key" in a for a in args)
+
+    def test_task_agent_role_gets_broker(self, tmp_path):
+        args = build_container_args(
+            tmp_path, "cld_agent_r_t", self._cfg(tmp_path), task_agent=TaskAgentSpec(slug="t"),
+        )
+        assert any("broker-key" in a for a in args)
+
+    def test_ephemeral_role_gets_no_broker(self, tmp_path):
+        """Bare `cld` (no role) never gets the broker -- interactive-only, unrelated to this change."""
+        args = build_container_args(tmp_path, "cld_x", self._cfg(tmp_path))
+        assert not any("broker-key" in a for a in args)
 
 
 def _tasks(*specs):

@@ -2,6 +2,8 @@
 
 **Status:** Phases 1–4 implemented (`runtests/`, `broker/`, cld plumbing). The broker now
 serves more than test running: `run-tests`, `list-containers`, `agent`, `task-agent`.
+Amended 2026-08-18 (§15) to also wire `cld agent` and `cld task-agent`, not just
+`cld master`.
 **Date:** 2026-07-29
 **Related:** Option A (SSH forced command) brainstorm; supersedes the in-container
 `.env`-injection approach for the *test-running* use case.
@@ -340,10 +342,11 @@ The broker is not pinned to a repo. Per request it learns the target from the
 REPO = docker inspect <session> --format '{{index .Config.Labels "org.cld.repo-root"}}'
 ```
 
-`<session>` == the master container `--name`, and the regex already pins it to
-`cld_master_*`. A session that names no running master resolves to empty → denied.
-This covers *any* repo, because `cld broker` only ever runs inside a master, so a
-master (hence the label) always exists.
+`<session>` == the calling container's `--name`, and the regex pins it to
+`cld_master_*` or `cld_agent_*` (the latter covers both the standing repo agent and
+task-agents; see §14). A session that names no running master/agent/task-agent
+resolves to empty → denied. This covers *any* repo, because the label is set at
+launch for every one of those roles, so it always exists once the container is up.
 
 **Secrets per repo.** Default `<repo>/.env`; overridable by `pyproject_dir` in the
 repo's own `<repo>/.cld/config.toml` (the broker reads that one flat key directly — no
@@ -379,3 +382,43 @@ both overridable:
 
 Rejected for now: structured junit digest and full-log-on-demand (design §5 option 5) —
 the flag defaults + cap were judged sufficient. Revisit if digests still get large.
+
+## 15. Amendment (2026-08-18): agent and task-agent access
+
+Originally the broker was wired only into `cld master` (`stage_broker` called only
+`if master:`, session regex `^cld_master_…$`). Extended to also cover the standing
+repo agent (`cld agent`) and task-agents (`cld task-agent`) at the user's request, so
+they can run `cld broker run-tests` too instead of only master.
+
+**What changed:**
+- `stage_broker` is now called for `master`, `agent`, and `task_agent` roles in
+  `build_container_args` (`cld/docker.py`) — all three get the key/known_hosts mount
+  and `CLD_BROKER_ENDPOINT`.
+- The dispatcher's session regex (`broker/cld-broker.sh`) now accepts `cld_agent_*`
+  in addition to `cld_master_*` — this one prefix covers both the standing repo agent
+  and task-agents, since kind is a label (`org.cld.kind`), not part of the name.
+
+**What did not change:** the `agent` / `task-agent` launcher actions (spawning
+siblings) stay master-only in practice, unaffected by the regex broadening — they
+gate on the `org.cld.targets` label via `validate_target`, and that label is only
+ever set on a `cld master` container (from `master_targets`, master-only in
+`build_container_args`). An agent or task-agent session always fails
+`validate_target` for lack of any registered target. Only `run-tests` and
+`list-containers` are actually reachable from those roles — the broadening is scoped
+to those two by construction, not by an added check.
+
+**The new authorization boundary is a prompt, not a mechanism.** The broker itself
+cannot distinguish an agent invoking `cld broker run-tests` on its own initiative
+from one relaying an explicit instruction from its master — both look identical on
+the wire (a validated `cld_agent_*` session running the `run-tests` action). The
+constraint that agents/task-agents may only invoke it with master's explicit
+per-run authorization is instructed in their persona prompts
+(`prompts/personas/agent.md`, `prompts/personas/task-agent.md`) and the
+`broker-run-tests` skill (Step 0), not enforced by the broker, sshd, or
+`build_container_args`. This trades a larger blast radius (every agent and
+task-agent container — potentially several per master, per `max_task_agents` —
+now holds a broker-key mount, versus one master) for the ability to run tests from
+those contexts, accepted on the same single-user-host basis as the rest of §9's
+security model (a leaked key already unlocked the broker's actions for any repo
+with a running master; it now does the same for any repo with a running master,
+agent, or task-agent).

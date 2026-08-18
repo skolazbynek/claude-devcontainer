@@ -1,22 +1,29 @@
 # cld host broker
 
-The host-side glue that lets a `cld master` container trigger a fixed set of
-host-side actions -- run the target repo's tests, enumerate cld containers,
-launch/manage sibling agents -- without ever seeing the secrets.
+The host-side glue that lets a `cld master`, `cld agent`, or `cld task-agent`
+container trigger a fixed set of host-side actions -- run the target repo's
+tests, enumerate cld containers, launch/manage sibling agents -- without ever
+seeing the secrets. `agent`/`task-agent` launcher actions stay effectively
+master-only regardless (they gate on a label only master carries -- see
+`../docs/design-cld-broker.md` §15); `run-tests` and `list-containers` are the
+two actions all three roles can actually reach. Agents and task-agents are
+instructed (persona prompts, not enforced here) to only run `run-tests` with
+their master's explicit per-invocation authorization.
 
 A container asks over SSH; a dedicated, single-purpose `sshd` answers with a
 forced command (`cld-broker.sh`). It serves **any repo that has a running
-master** -- no whitelist: it resolves the target repo from the calling master
-container's `org.cld.repo-root` label, resolves which change that session is on
-(reading the jj store, never touching the working copy), and for `run-tests`
-runs the standalone [`runtests`](../runtests/) container against it, mounting
-the repo's raw `.env` into that ephemeral runner. `claude` only ever sees the
-streamed output. See `../docs/design-cld-broker.md` for the full design.
+master, agent, or task-agent** -- no whitelist: it resolves the target repo
+from the calling container's `org.cld.repo-root` label, resolves which change
+that session is on (reading the jj store, never touching the working copy),
+and for `run-tests` runs the standalone [`runtests`](../runtests/) container
+against it, mounting the repo's raw `.env` into that ephemeral runner.
+`claude` only ever sees the streamed output. See `../docs/design-cld-broker.md`
+for the full design.
 
 ```
 container: cld broker run-tests -k login -x tests/
    └─ssh (restricted key)─▶ dedicated sshd ─ForceCommand▶ cld-broker.sh
-        ├─ validate: action=run-tests, session=cld_master_…
+        ├─ validate: action=run-tests, session=cld_master_… or cld_agent_…
         ├─ REPO = docker inspect <session> -> org.cld.repo-root label
         ├─ REV  = jj -R <repo> log -r <session>     (store-reading only)
         ├─ .env = <repo>/.env  (or under pyproject_dir from <repo>/.cld/config.toml)
@@ -91,7 +98,7 @@ ssh -i /etc/cld/broker_key \
 # rejected: anything but a defined action, or a malformed/unknown session
 ssh ... -- "deploy cld_master_demo $payload"        # -> denied (bad action)
 ssh ... -- "run-tests ../../etc/passwd $payload"    # -> denied (bad session)
-ssh ... -- "run-tests cld_master_nope $payload"     # -> denied (no such master)
+ssh ... -- "run-tests cld_master_nope $payload"     # -> denied (no such container)
 
 docker rm -f cld_master_demo; jj -R "$REPO" bookmark delete cld_master_demo
 ```
@@ -110,8 +117,9 @@ action_lint() {
 ```
 
 It receives the decoded argv as `"$@"` and the shared context the dispatcher
-prepared: `$session` (validated master session id) and `$REPO` (resolved from
-the session label). Per-action context is resolved lazily inside the action --
+prepared: `$session` (validated session id -- master or agent/task-agent) and
+`$REPO` (resolved from the session label). Per-action context is resolved
+lazily inside the action --
 `run-tests` calls `resolve_test_context` for `$REV` / `$SECRETS_ENV_FILE` /
 `$PROJECT_SUBDIR` -- so read-only actions don't depend on the session bookmark
 being resolvable. Call it from a container with `cld broker lint <args>`
@@ -142,12 +150,16 @@ let the token after an `--opt=value` slip by unchecked.
 - **Scoped, not dynamic.** The action set and `ForceCommand` are fixed host-side.
   The caller controls only the action (must map to a defined function), a
   validated session id, and the argv. The target repo is taken from the calling
-  master's host-set label, not caller input -- so the caller can only reach a
-  repo that already has a master, never an arbitrary host path.
+  container's host-set label, not caller input -- so the caller can only reach a
+  repo that already has a master, agent, or task-agent, never an arbitrary host path.
 - **No injection.** argv arrives base64(NUL-joined) and is decoded into an argv
   array, never `eval`'d -- it can only become arguments to the action's command.
-- **Blast radius.** A leaked broker key unlocks the defined actions for any repo
-  that has a running master (no per-master key isolation in this design). With
+- **Blast radius.** A leaked broker key unlocks `run-tests`/`list-containers` for
+  any repo that has a running master, agent, or task-agent (no per-container key
+  isolation in this design) -- more surface than before this key reached
+  agent/task-agent containers too. `agent`/`task-agent` (the launcher actions)
+  stay reachable only from a real master, gated by a label the key alone can't
+  forge. With
   `SSH_AUTH_SOCK` configured that includes launching an agent that holds your
   forwarded ssh-agent, so the key buys signing inside a container it spawns and
   not only `run-tests`. Leave it unset to keep every broker-launched agent

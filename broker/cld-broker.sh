@@ -5,16 +5,27 @@
 #
 #     <action> <session> <base64-argv>
 #
-# The broker serves ANY repo that has a running master -- no per-repo config,
-# no whitelist. It resolves the target repo from the calling master container's
-# host-set `org.cld.repo-root` label (established at launch, not caller input),
-# so the caller controls only: the action, a validated master session id, and
-# the decoded argv. Nothing is ever eval'd.
+# The broker serves ANY repo that has a running master, agent, or task-agent --
+# no per-repo config, no whitelist. It resolves the target repo from the
+# calling container's host-set `org.cld.repo-root` label (established at
+# launch, not caller input), so the caller controls only: the action, a
+# validated session id, and the decoded argv. Nothing is ever eval'd.
+#
+# Sessions come in two shapes: `cld_master_*` (a `cld master`) and
+# `cld_agent_*` (both the standing repo agent and task-agents -- kind is a
+# label, not a name, see cld/docker.py:task_agent_container_name). Any of the
+# three may call `run-tests` / `list-containers`. The `agent` / `task-agent`
+# launcher actions (spawning siblings) stay master-only in practice even
+# though the session regex admits agent/task-agent callers too: they gate on
+# the `org.cld.targets` label via validate_target, and only master containers
+# ever carry that label (set from `master_targets`, master-only in
+# build_container_args) -- an agent or task-agent session always fails
+# validate_target for lack of any registered target.
 #
 # ADD AN ACTION: define a function named `action_<name>` (hyphens in <name>
 # become underscores, so `run-tests` -> `action_run_tests`). It receives the
 # decoded argv as "$@" and may use the shared context prepared by the
-# dispatcher: $session (validated master session id) and $REPO (its host repo
+# dispatcher: $session (validated session id) and $REPO (its host repo
 # path). Revision/secrets are per-action -- run-tests resolves them via
 # `resolve_test_context`; add your own helper if your action needs more.
 set -euo pipefail
@@ -222,14 +233,15 @@ read -r action session payload <<<"${SSH_ORIGINAL_COMMAND:-}"
 fn="action_${action//-/_}"
 declare -F "$fn" >/dev/null || { echo "denied: unknown action '$action'" >&2; exit 2; }
 
-[[ "$session" =~ ^cld_master_[A-Za-z0-9_-]+$ ]] || { echo "denied: bad session id" >&2; exit 2; }
+[[ "$session" =~ ^cld_(master|agent)_[A-Za-z0-9_-]+$ ]] || { echo "denied: bad session id" >&2; exit 2; }
 
-# Resolve the target repo from the calling master container's host-set label.
-# The container name == session, and the label is set at launch (trusted), so
-# the caller cannot point at an arbitrary host path -- only a real master's repo.
+# Resolve the target repo from the calling container's host-set label. The
+# container name == session, and the label is set at launch (trusted), so the
+# caller cannot point at an arbitrary host path -- only a real master's, an
+# agent's, or a task-agent's own repo.
 REPO=$(docker inspect "$session" --format '{{index .Config.Labels "org.cld.repo-root"}}' 2>/dev/null) || true
 [ -n "$REPO" ] && { [ -d "$REPO/.jj" ] || [ -d "$REPO/.git" ]; } \
-    || { echo "no master/repo for session $session" >&2; exit 3; }
+    || { echo "no master/agent/task-agent container for session $session" >&2; exit 3; }
 
 # Per-action context (REV, secrets, target validation) is resolved inside each
 # action_* function now, so read-only actions don't pay for -- or fail on --
