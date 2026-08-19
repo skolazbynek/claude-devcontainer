@@ -26,8 +26,9 @@ copy_host_configs
 
 # Anchor: base revision arrives as AGENT_REVISION_HINT (resolved commit hash
 # from the host, or unresolved revset when a `cld master` delegated to us).
-# The anchor commit B is created INSIDE /workspace/current by
-# `python3 -m cld.vcs.scratch` -- the origin working copy is never touched.
+# Scratch commit B (child of anchor A, carrying `.cld-run/*`) is created
+# INSIDE /workspace/current by `python3 -m cld.vcs.scratch` -- the origin
+# working copy is never touched.
 if [ -z "${AGENT_SCRATCH:-}" ]; then
     echo "Error: AGENT_SCRATCH is required" >&2
     exit 1
@@ -43,12 +44,15 @@ if ! A_HASH=$(jj log --no-graph -n 1 -r "$BASE_REV" -T commit_id 2>/dev/null); t
 fi
 echo "[cld] base=${A_HASH:0:12}"
 jj workspace add --name "$BOOKMARK" -r "$A_HASH" /workspace/current
-if ! AGENT_ANCHOR_HASH=$(cd /workspace/current && python3 -m cld.vcs.scratch); then
+if ! B_HASH=$(cd /workspace/current && python3 -m cld.vcs.scratch); then
     echo "Error: peer-side anchor staging failed" >&2
     exit 1
 fi
+# AGENT_ANCHOR_HASH is A itself, not scratch commit B -- so any pre-existing
+# descendant of A (not just of B) is in the container's editable tree.
+AGENT_ANCHOR_HASH="$A_HASH"
 export AGENT_ANCHOR_HASH
-echo "[cld] anchor=${AGENT_ANCHOR_HASH:0:12}"
+echo "[cld] anchor=${AGENT_ANCHOR_HASH:0:12} (scratch=${B_HASH:0:12})"
 (cd /workspace/current && jj bookmark set "$BOOKMARK" -r @ --allow-backwards)
 
 (cd /workspace/current && \

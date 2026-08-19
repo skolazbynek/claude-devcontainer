@@ -28,8 +28,9 @@ cd "$WORKSPACE_ORIGIN"
 # absent (first-ever launch).
 #
 # FIRST_LAUNCH records which of the three branches below we took. The brief
-# lives in anchor B, so every descendant carries it and file presence can no
-# longer tell a first launch from a restart -- only this flag can.
+# lives in scratch commit B (a child of anchor A), so every descendant
+# carries it and file presence can no longer tell a first launch from a
+# restart -- only this flag can.
 FIRST_LAUNCH=0
 if [ -e /workspace/current/.jj ]; then
     # Warm restart: `docker start` of a stopped container (not `docker rm &&
@@ -42,8 +43,14 @@ if [ -e /workspace/current/.jj ]; then
     # may have advanced it), and recover the anchor for downstream consumers.
     echo "[cld] warm restart: reusing existing workspace at /workspace/current"
     (cd /workspace/current && jj workspace update-stale 2>/dev/null || true)
+    # AGENT_ANCHOR_HASH is A, the resolved -r revision -- the parent of scratch
+    # commit B (found below by its 'cld anchor: <session>' description; glob,
+    # not exact -- `jj commit -m` appends a trailing newline to single-line
+    # descriptions, so an exact match against the bare text never hits). Any
+    # pre-existing descendant of A, not just of B, is in the container's
+    # editable tree (anchor descendant-tree contract).
     AGENT_ANCHOR_HASH=$(jj log --no-graph -n 1 \
-        -r "heads(ancestors(${BOOKMARK}) & description(exact:'cld anchor: ${SESSION_NAME}'))" \
+        -r "parents(heads(ancestors(${BOOKMARK}) & description(glob:'cld anchor: ${SESSION_NAME}*')))" \
         -T commit_id 2>/dev/null || true)
     export AGENT_ANCHOR_HASH
 else
@@ -56,18 +63,21 @@ if jj bookmark list -T 'name ++ "\n"' | grep -qx "$BOOKMARK"; then
         exit 1
     fi
     # Recover the anchor: the ancestor of the bookmark with our own
-    # 'cld anchor: <session>' description is B.
+    # 'cld anchor: <session>' description (glob-matched, see warm-restart
+    # branch above) is scratch commit B; its parent is A, the value
+    # AGENT_ANCHOR_HASH must carry (not B itself).
     AGENT_ANCHOR_HASH=$(jj log --no-graph -n 1 \
-        -r "heads(ancestors(${BOOKMARK}) & description(exact:'cld anchor: ${SESSION_NAME}'))" \
+        -r "parents(heads(ancestors(${BOOKMARK}) & description(glob:'cld anchor: ${SESSION_NAME}*')))" \
         -T commit_id 2>/dev/null || true)
     export AGENT_ANCHOR_HASH
 else
     # First launch. Base revision comes from AGENT_REVISION_HINT (a resolved
     # hash from the host, or an unresolved revset when a `cld master`
     # delegated to this peer; see docs/design-master-sibling-launch.md).
-    # The anchor commit B is staged INSIDE /workspace/current by
-    # `python3 -m cld.vcs.scratch`, so the origin working copy is never touched
-    # -- crucial for the common jj case where the user's @ is A itself.
+    # Scratch commit B (child of anchor A, carrying `.cld-run/*`) is staged
+    # INSIDE /workspace/current by `python3 -m cld.vcs.scratch`, so the
+    # origin working copy is never touched -- crucial for the common jj case
+    # where the user's @ is A itself.
     if [ -z "${AGENT_SCRATCH:-}" ]; then
         echo "Error: AGENT_SCRATCH is required on first launch" >&2
         exit 1
@@ -83,12 +93,16 @@ else
         echo "Error: jj workspace add failed (first launch)" >&2
         exit 1
     fi
-    if ! AGENT_ANCHOR_HASH=$(cd /workspace/current && python3 -m cld.vcs.scratch); then
+    if ! B_HASH=$(cd /workspace/current && python3 -m cld.vcs.scratch); then
         echo "Error: peer-side anchor staging failed" >&2
         exit 1
     fi
+    # AGENT_ANCHOR_HASH is A itself, not scratch commit B -- so any
+    # pre-existing descendant of A (not just of B) is in the container's
+    # editable tree, per the anchor descendant-tree contract.
+    AGENT_ANCHOR_HASH="$A_HASH"
     export AGENT_ANCHOR_HASH
-    echo "[cld] anchor=${AGENT_ANCHOR_HASH:0:12}"
+    echo "[cld] anchor=${AGENT_ANCHOR_HASH:0:12} (scratch=${B_HASH:0:12})"
     (cd /workspace/current && jj bookmark set "$BOOKMARK" -r @ --allow-backwards)
 fi
 fi

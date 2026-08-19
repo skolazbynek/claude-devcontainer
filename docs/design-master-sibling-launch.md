@@ -126,9 +126,10 @@ host / master:
 peer container entrypoint:
   A = jj log -r "$AGENT_REVISION_HINT" -T commit_id       # in /workspace/origin
   jj workspace add --name "$SESSION_NAME" -r "$A" /workspace/current
-  AGENT_ANCHOR_HASH = $(cd /workspace/current && python3 -m cld.vcs.scratch)
+  B_HASH = $(cd /workspace/current && python3 -m cld.vcs.scratch)
       # ↳ writes AGENT_SCRATCH files into .cld-run/*, `jj commit -m "cld anchor: $SESSION_NAME" .cld-run`,
-      #   prints B (== the just-created commit's id) to stdout.
+      #   prints B (== the just-created scratch commit's id) to stdout.
+  AGENT_ANCHOR_HASH = A   # not B -- see CLAUDE.md § Anchor change contract
   jj bookmark set "$SESSION_NAME" -r @
 ```
 

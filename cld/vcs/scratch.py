@@ -1,11 +1,15 @@
 """Anchor scratch staging (peer-side).
 
-The anchor commit B is created *inside the peer container's ephemeral workspace
+A scratch commit B is created *inside the peer container's ephemeral workspace
 at* ``/workspace/current`` — after ``jj workspace add -r <A> /workspace/current``.
 The container writes ``.cld-run/*`` into that workspace and runs ``jj commit``,
 which produces B as a child of A. Change A in the origin store is never
 rewritten, and the user's origin working copy is never touched — even in the
 common case where the user's ``@`` is A itself.
+
+B only carries the scratch payload (task brief, session marker) — it is not
+the enforced anchor. ``AGENT_ANCHOR_HASH`` is A itself, so any pre-existing
+descendant of A, not just of B, is inside the container's editable tree.
 
 The host (or a master delegating to a peer) passes:
 - ``AGENT_REVISION_HINT``: the revision to anchor on (resolved commit hash from
@@ -15,8 +19,8 @@ The host (or a master delegating to a peer) passes:
 
 ``stage_from_env()`` is the peer-side entry point. It's invoked from inside the
 already-created workspace (cwd = ``/workspace/current``), writes the payload,
-commits, and prints B's commit id to stdout for the entrypoint to capture into
-``AGENT_ANCHOR_HASH``.
+commits, and prints B's commit id to stdout; the entrypoint uses A (already
+resolved before staging) as ``AGENT_ANCHOR_HASH``, not B.
 """
 
 import base64
@@ -48,8 +52,9 @@ def stage_in_workspace(
         scratch_files: mapping of ``relative-path-under-.cld-run/`` -> bytes.
 
     Returns:
-        Commit id of B (the parent of ``@`` after the commit), i.e. the anchor
-        commit whose only diff vs. A is ``.cld-run/*``.
+        Commit id of B (the parent of ``@`` after the commit), the scratch
+        commit whose only diff vs. A is ``.cld-run/*``. B is not the enforced
+        anchor -- the caller uses A (B's parent) as ``AGENT_ANCHOR_HASH``.
     """
     scratch_dir = workspace_path / SCRATCH_DIR
     scratch_dir.mkdir(parents=True, exist_ok=True)

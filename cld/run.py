@@ -38,10 +38,11 @@ def launch_run(
     ships inside the anchor scratch envelope and the entrypoint reads it from
     ``.cld-run/brief.md``.
 
-    The container entrypoint stages anchor B inside its own ephemeral workspace
-    after ``jj workspace add -r <A>``; ``anchor_env_args`` carries the resolved base
-    revision + that envelope. The final ``AGENT_ANCHOR_HASH`` (== B) is computed
-    peer-side and surfaces in the agent's ``summary.json``.
+    The container entrypoint stages scratch commit B inside its own ephemeral
+    workspace after ``jj workspace add -r <A>``; ``anchor_env_args`` carries the
+    resolved base revision + that envelope. The final ``AGENT_ANCHOR_HASH``
+    (== A, B's parent) is computed peer-side and surfaces in the agent's
+    ``summary.json``.
     """
     if in_master_container():
         log.error(
