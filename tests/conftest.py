@@ -20,6 +20,7 @@ _LEAKY_VARS = (
     "CLD_MYSQL_CONFIG",
     "MASTER_MODE",
     "AGENT_MODE",
+    "HUB_MODE",
     "MASTER_TARGETS",
 ) + (
     "CLD_LOG_LEVEL",

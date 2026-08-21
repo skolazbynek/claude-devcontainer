@@ -170,12 +170,12 @@ class TestStageHomeRo:
 
 class TestResolveMasterTarget:
     def test_errors_when_not_in_master(self, tmp_path):
-        # clean_env fixture already unsets MASTER_MODE
+        # clean_env fixture already unsets HUB_MODE
         with pytest.raises(RuntimeError, match="not running inside a cld master"):
             resolve_master_target(tmp_path, Config())
 
     def test_own_repo_via_workspace_origin(self, monkeypatch):
-        monkeypatch.setenv("MASTER_MODE", "1")
+        monkeypatch.setenv("HUB_MODE", "1")
         cfg = Config(host_project_dir="/host/side/cld")
         # /workspace/current is master's ephemeral workspace path. Path.resolve
         # is lenient about non-existent paths so this works even on the host.
@@ -184,13 +184,13 @@ class TestResolveMasterTarget:
         assert resolve_master_target(Path("/workspace/origin/sub"), cfg) == "/host/side/cld"
 
     def test_own_repo_errors_without_host_project_dir(self, monkeypatch):
-        monkeypatch.setenv("MASTER_MODE", "1")
+        monkeypatch.setenv("HUB_MODE", "1")
         from pathlib import Path
         with pytest.raises(RuntimeError, match="CLD_HOST_PROJECT_DIR is unset"):
             resolve_master_target(Path("/workspace/current"), Config())
 
     def test_matches_master_targets_entry(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("MASTER_MODE", "1")
+        monkeypatch.setenv("HUB_MODE", "1")
         target = tmp_path / "projects" / "foo"
         (target / "subdir").mkdir(parents=True)
         monkeypatch.setenv("MASTER_TARGETS", f"{target}:{tmp_path}/other")
@@ -200,7 +200,7 @@ class TestResolveMasterTarget:
     def test_matches_via_container_mirror(self, monkeypatch):
         # Placeholder dirs live at the container mirror ($HOME/...) of a host
         # target; resolve translates cwd back to the host path before matching.
-        monkeypatch.setenv("MASTER_MODE", "1")
+        monkeypatch.setenv("HUB_MODE", "1")
         host_target = "/home/host/projects/foo"
         monkeypatch.setenv("MASTER_TARGETS", host_target)
         cfg = Config(host_home="/home/host")
@@ -211,7 +211,7 @@ class TestResolveMasterTarget:
         assert resolve_master_target(mirror / "subdir", cfg) == host_target
 
     def test_unknown_cwd_errors(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("MASTER_MODE", "1")
+        monkeypatch.setenv("HUB_MODE", "1")
         monkeypatch.setenv("MASTER_TARGETS", "")
         elsewhere = tmp_path / "unrelated"
         elsewhere.mkdir()
@@ -224,7 +224,7 @@ class TestEnsureImageNested:
         # Inside master there is no docker daemon (socket removed) and container
         # launches are delegated to the host broker, so ensure_image must never
         # be reached; if it is, it fails clearly rather than touching docker.
-        monkeypatch.setenv("MASTER_MODE", "1")
+        monkeypatch.setenv("HUB_MODE", "1")
         import cld.docker as docker_mod
         from pathlib import Path
         from unittest.mock import patch
@@ -239,9 +239,16 @@ class TestEnsureImageNested:
 
 
 class TestInMasterContainer:
-    def test_true_when_env_set(self, monkeypatch):
-        monkeypatch.setenv("MASTER_MODE", "1")
+    def test_true_when_hub_mode_set(self, monkeypatch):
+        monkeypatch.setenv("HUB_MODE", "1")
         assert in_master_container() is True
+
+    def test_false_when_only_master_mode_set(self, monkeypatch):
+        # MASTER_MODE alone (without HUB_MODE) should not happen in practice --
+        # build_container_args always sets both for master -- but this pins the
+        # actual check to HUB_MODE, not MASTER_MODE.
+        monkeypatch.setenv("MASTER_MODE", "1")
+        assert in_master_container() is False
 
     def test_false_when_unset(self):
         assert in_master_container() is False
@@ -402,6 +409,7 @@ class TestBuildContainerArgsTaskAgent:
         assert "AGENT_MODE=1" in args
         assert "TASK_AGENT_MODE=1" in args
         assert "MASTER_MODE=1" not in args
+        assert "HUB_MODE=1" not in args
 
     def test_spawn_facts_in_env(self, tmp_path):
         args = self._args(tmp_path)
@@ -482,10 +490,25 @@ class TestBuildContainerArgsBrokerWiring:
         )
         assert any("broker-key" in a for a in args)
 
-    def test_ephemeral_role_gets_no_broker(self, tmp_path):
-        """Bare `cld` (no role) never gets the broker -- interactive-only, unrelated to this change."""
-        args = build_container_args(tmp_path, "cld_x", self._cfg(tmp_path))
+    def test_run_role_gets_no_broker(self, tmp_path):
+        """`cld run` (no role, non-interactive) never gets the broker -- it's a
+        one-shot, unattended container, unlike the bare interactive devcontainer."""
+        args = build_container_args(tmp_path, "run_x", self._cfg(tmp_path))
         assert not any("broker-key" in a for a in args)
+
+    def test_bare_interactive_devcontainer_gets_broker(self, tmp_path):
+        """Bare `cld` (interactive, no persistent role) is an ephemeral, single-user
+        `cld master` in every capability that matters -- it gets the broker too."""
+        args = build_container_args(tmp_path, "cld_x", self._cfg(tmp_path), interactive=True)
+        assert any("broker-key" in a for a in args)
+        assert "--name" in args and "cld_x" in args
+        assert any(a == "org.cld.kind=devcontainer" for a in args)
+
+    def test_run_devcontainer_not_named(self, tmp_path):
+        """Only the interactive bare devcontainer gets a name/labels; `cld run`
+        stays anonymous like before."""
+        args = build_container_args(tmp_path, "run_x", self._cfg(tmp_path))
+        assert "--name" not in args
 
 
 def _tasks(*specs):

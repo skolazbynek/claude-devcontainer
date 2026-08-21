@@ -120,6 +120,31 @@ class TestBuildContainerArgs:
         assert "org.cld.kind=agent" in args
         assert "AGENT_MODE=1" in env_pairs
 
+    def test_bare_devcontainer_mounts_mailbox_hub_mode_and_targets(self, jj_repo, tmp_path):
+        # The bare interactive devcontainer is meant to have master's full hub
+        # capability (broker, mailbox, sibling-target resolution) while staying
+        # ephemeral -- see the "same capabilities as master" fix.
+        target = tmp_path / "sibling-repo"
+        target.mkdir()
+        home = tmp_path / "home"
+        home.mkdir()
+        cfg = Config(
+            mailbox_root=str(tmp_path / "mailboxes"),
+            master_targets=(str(target),),
+        )
+        with patch.dict(os.environ, {"HOME": str(home)}):
+            args = build_container_args(
+                jj_repo.repo_root, "cld_x", cfg, interactive=True,
+            )
+        volume_args = [args[i+1] for i in range(len(args)-1) if args[i] == "-v"]
+        env_pairs = [args[i+1] for i in range(len(args)-1) if args[i] == "-e"]
+        assert any(v.endswith(":/var/cld/mailboxes:rw") for v in volume_args)
+        assert "org.cld.kind=devcontainer" in args
+        assert "HUB_MODE=1" in env_pairs
+        assert "--rm" in args  # still ephemeral, unlike master
+        assert any(e.startswith("MASTER_TARGETS=") and str(target) in e for e in env_pairs)
+        assert any(a == f"org.cld.targets={target}" for a in args)
+
     def test_master_target_outside_home_fails_fast(self, jj_repo, tmp_path):
         # Placeholders can only be mirrored under the container $HOME, so a
         # target outside the host home dir must be rejected at build time

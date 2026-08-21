@@ -76,7 +76,7 @@ def _reject_in_container() -> None:
     The container surface is its own app (cld/cli_container.py), installed as `cld`
     in the devcontainer image -- see docs/design-cli-split.md.
     """
-    if os.environ.get("MASTER_MODE") or os.environ.get("AGENT_MODE"):
+    if os.environ.get("HUB_MODE") or os.environ.get("AGENT_MODE"):
         typer.echo(
             "Error: this is the host cld, which needs a docker daemon. Inside a "
             "container run `cld` instead (task-agent, agent, msg, repos, prompts).",

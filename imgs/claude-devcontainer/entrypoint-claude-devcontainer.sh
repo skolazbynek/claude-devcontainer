@@ -171,27 +171,30 @@ BRIEF_FILE="$WORKSPACE_CURRENT/.cld-run/brief.md"
 COMPOSED_PROMPT=""
 [ -f "$BRIEF_FILE" ] && COMPOSED_PROMPT="$(cat "$BRIEF_FILE")"
 
+# Materialize registered sibling targets as empty placeholder directories so
+# `cd <target>` inside the shell succeeds. This runs for both `cld master` and
+# the bare ephemeral devcontainer (HUB_MODE, not MASTER_MODE -- see
+# in_master_container() in cld/docker.py) -- neither gets a bind mount of the
+# sibling repo; cld-inside-the-container resolves cwd to the host path via
+# config lookup. See docs/design-master-sibling-launch.md.
+if [ -n "${HUB_MODE:-}" ] && [ -n "${MASTER_TARGETS:-}" ]; then
+    IFS=':' read -r -a _cld_targets <<< "$MASTER_TARGETS"
+    for t in "${_cld_targets[@]}"; do
+        [ -n "$t" ] || continue
+        # $t is a host path (e.g. /home/<user>/projects/x). The unprivileged
+        # container user can only create under its own $HOME, so mirror the
+        # target by swapping the host-home prefix ($CLD_HOST_HOME) for $HOME.
+        # build_container_args guarantees every target lives under host home.
+        _mirror="$t"
+        case "$t" in
+            "${CLD_HOST_HOME:-/nonexistent}"/*) _mirror="$HOME/${t#"${CLD_HOST_HOME}"/}";;
+        esac
+        mkdir -p "$_mirror" 2>/dev/null || echo "[WARN] could not create placeholder $_mirror (target $t)" >&2
+    done
+    unset _cld_targets _mirror
+fi
+
 if [ -n "${MASTER_MODE:-}" ]; then
-    # Materialize registered sibling targets as empty placeholder directories
-    # so `cd <target>` inside master's shell succeeds. No bind mount of the
-    # sibling repo exists in master; cld-inside-master resolves cwd to the
-    # host path via config lookup. See docs/design-master-sibling-launch.md.
-    if [ -n "${MASTER_TARGETS:-}" ]; then
-        IFS=':' read -r -a _cld_targets <<< "$MASTER_TARGETS"
-        for t in "${_cld_targets[@]}"; do
-            [ -n "$t" ] || continue
-            # $t is a host path (e.g. /home/<user>/projects/x). The unprivileged
-            # container user can only create under its own $HOME, so mirror the
-            # target by swapping the host-home prefix ($CLD_HOST_HOME) for $HOME.
-            # build_container_args guarantees every target lives under host home.
-            _mirror="$t"
-            case "$t" in
-                "${CLD_HOST_HOME:-/nonexistent}"/*) _mirror="$HOME/${t#"${CLD_HOST_HOME}"/}";;
-            esac
-            mkdir -p "$_mirror" 2>/dev/null || echo "[WARN] could not create placeholder $_mirror (target $t)" >&2
-        done
-        unset _cld_targets _mirror
-    fi
     # Signal readiness as soon as setup is done, before the optional first-launch
     # prompt, so the host can attach immediately no matter how long the prompt runs.
     # /tmp (not /run, which is root-owned 755) is writable by the non-root container user.
@@ -242,5 +245,17 @@ if [ -n "${AGENT_MODE:-}" ]; then
     touch /tmp/cld-agent-ready               # host readiness sentinel (/tmp is non-root writable)
     exec python3 -P -m cld.messenger.agent_loop
 fi
+
+# Bare ephemeral devcontainer: unlike master/agent there is no restart or
+# reattach concept for this mode, so nothing else will ever forget this
+# session's bookmark or workspace registration out of the origin's jj store.
+# Without this, every exited session (each with its own random session name,
+# see build_session_name) would leave a permanently orphaned bookmark and a
+# stale `jj workspace` entry behind even though the container itself is --rm.
+_cld_bare_cleanup() {
+    (cd "$WORKSPACE_ORIGIN" && jj bookmark forget "$SESSION_NAME" 2>&1) || true
+    (cd "$WORKSPACE_ORIGIN" && jj workspace forget "$SESSION_NAME" 2>&1) || true
+}
+trap _cld_bare_cleanup EXIT
 
 /bin/bash

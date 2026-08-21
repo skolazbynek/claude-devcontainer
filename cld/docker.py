@@ -235,8 +235,15 @@ def ensure_image(
 
 
 def in_master_container() -> bool:
-    """True when the current process is running inside a `cld master` container."""
-    return bool(os.environ.get("MASTER_MODE"))
+    """True when running inside a `cld master`, or the bare ephemeral devcontainer.
+
+    The name predates the bare devcontainer getting hub capability (broker reach,
+    sibling-target resolution, mailbox); it now checks ``HUB_MODE``, which is set
+    for both, rather than ``MASTER_MODE`` alone, which stays master-only (it also
+    drives entrypoint boot behavior -- idle sleep vs. dropping to bash -- that must
+    NOT apply to the ephemeral devcontainer).
+    """
+    return bool(os.environ.get("HUB_MODE"))
 
 
 def find_target_repo(cfg: Config) -> Path:
@@ -285,21 +292,22 @@ def anchor_env_args(cfg: Config, session: str, revision: str, brief: str = "") -
 
 
 def resolve_master_target(cwd: Path, cfg: Config) -> str:
-    """From inside a master container, return the host path of the target repo
-    selected by *cwd*.
+    """From inside a master or bare-devcontainer "hub", return the host path of
+    the target repo selected by *cwd*.
 
     Resolution:
     - cwd (or ancestor) under ``/workspace/current`` or ``/workspace/origin``
-      → master's own repo, host path from ``CLD_HOST_PROJECT_DIR``.
+      → the hub's own repo, host path from ``CLD_HOST_PROJECT_DIR``.
     - cwd (or ancestor) matches an entry in ``MASTER_TARGETS`` (colon-separated)
       → that entry.
     - Otherwise → RuntimeError with a hint about adding the path to
       ``master_targets`` in cld config.
 
-    Only meaningful inside a master container; raises RuntimeError elsewhere.
+    Only meaningful inside a hub container (``in_master_container()``); raises
+    RuntimeError elsewhere.
     """
     if not in_master_container():
-        raise RuntimeError("resolve_master_target: not running inside a cld master container")
+        raise RuntimeError("resolve_master_target: not running inside a cld master or hub-capable devcontainer")
     cwd = cwd.resolve()
 
     def _is_within(child: Path, parent: str) -> bool:
@@ -413,7 +421,12 @@ def build_container_args(
     persistent-container roles (``agent`` is the headless messaging agent,
     unrelated to the one-shot `cld agent` command; ``task_agent`` is the
     task-scoped one); any of them adds the ``org.cld.kind`` label set and
-    mounts the shared mailbox tree.
+    mounts the shared mailbox tree. When none of them is set and
+    ``interactive`` is true (the bare ``cld`` devcontainer), the container
+    still gets a name, ``org.cld.kind=devcontainer`` labels, the broker mount
+    and the mailbox mount -- an ephemeral, single-user stand-in for
+    `cld master` that can spawn and message its own fleet, just with no
+    persistent bookmark/state to reattach to once it exits.
     """
     if sum((master, agent, bool(task_agent))) > 1:
         raise ValueError("master, agent and task_agent are mutually exclusive roles")
@@ -421,6 +434,13 @@ def build_container_args(
     home = os.path.expanduser("~")
     host_home = to_host_path(home, cfg)
     host_repo_root = to_host_path(str(repo_root), cfg)
+
+    # The bare ephemeral devcontainer (`cld`, interactive, no persistent role):
+    # a single-user, throwaway `cld master` in every capability that matters
+    # (broker reach in particular) except that it never outlives the session.
+    # It still needs a name + the org.cld.* labels so the broker can identify
+    # it and resolve its repo root -- see broker/cld-broker.sh.
+    bare_devcontainer = interactive and not (master or agent or task_agent)
 
     args: list[str] = []
 
@@ -436,6 +456,13 @@ def build_container_args(
             "--label", f"org.cld.session={session_name}",
             "-e", f"{'MASTER_MODE' if master else 'AGENT_MODE'}=1",
         ]
+        if master:
+            # HUB_MODE is the capability flag `in_master_container()` actually
+            # checks (sibling-target resolution, broker dispatch): true for
+            # master and, below, the bare devcontainer -- unlike MASTER_MODE,
+            # which also drives entrypoint boot behavior (idle sleep vs bash)
+            # and must stay master-only.
+            args += ["-e", "HUB_MODE=1"]
         if task_agent:
             # TASK_AGENT_MODE modifies the AGENT_MODE branch (same mailbox
             # precondition, readiness sentinel and supervisor exec) rather than
@@ -458,6 +485,14 @@ def build_container_args(
             ]
     else:
         args += ["--rm"]
+        if bare_devcontainer:
+            args += [
+                "--name", session_name,
+                "--label", "org.cld.kind=devcontainer",
+                "--label", f"org.cld.repo-root={host_repo_root}",
+                "--label", f"org.cld.session={session_name}",
+                "-e", "HUB_MODE=1",
+            ]
 
     # Security and resources
     args += [
@@ -534,7 +569,8 @@ def build_container_args(
     # root). In-container docker needs -- peer enumeration and sibling `cld
     # agent` launches from inside master -- go through the host broker over SSH
     # (see cld/broker.py, broker/cld-broker.sh). The broker key is mounted for
-    # persistent roles (master, agent, task-agent) by stage_broker below; the
+    # persistent roles (master, agent, task-agent) and the bare ephemeral
+    # devcontainer by stage_broker below; the
     # `agent`/`task-agent` launcher actions stay master-only regardless, gated
     # by the org.cld.targets label (only master carries it, see master_targets
     # below), not by broker reachability.
@@ -554,18 +590,22 @@ def build_container_args(
         else:
             log.warning(f"CLD_MYSQL_CONFIG set but file not found: {cfg.mysql_config}")
 
-    # Host test broker (persistent roles): mount the restricted key + known_hosts
-    # and make the broker reachable. No-op unless broker_key is set. Agents and
-    # task-agents get this too so they can run `cld broker run-tests`, but their
-    # personas instruct them to only invoke it with explicit per-run
-    # authorization from their master -- see prompts/personas/agent.md and
-    # prompts/personas/task-agent.md.
-    if master or agent or task_agent:
+    # Host test broker (persistent roles, plus the bare ephemeral devcontainer):
+    # mount the restricted key + known_hosts and make the broker reachable.
+    # No-op unless broker_key is set. Agents and task-agents get this too so
+    # they can run `cld broker run-tests`, but their personas instruct them to
+    # only invoke it with explicit per-run authorization from their master --
+    # see prompts/personas/agent.md and prompts/personas/task-agent.md. The
+    # bare devcontainer has no such persona gate: it's the interactive user's
+    # own throwaway session, same trust level as a `cld master` shell.
+    if master or agent or task_agent or bare_devcontainer:
         args += stage_broker(cfg)
 
-    # Mailbox tree (persistent roles only) -- shared RW mount so every master,
-    # agent and task-agent container sees the same mailbox filesystem.
-    if master or agent or task_agent:
+    # Mailbox tree -- shared RW mount so every master, agent, task-agent and
+    # bare devcontainer container sees the same mailbox filesystem. The bare
+    # devcontainer needs its own mailbox to spawn agents/task-agents and get
+    # `cld msg` / the messenger MCP's send()/list_inbox() working, same as master.
+    if master or agent or task_agent or bare_devcontainer:
         mailbox_root = Path(cfg.mailbox_root).expanduser()
         host_mailbox_root = to_host_path(str(mailbox_root), cfg)
         if host_mailbox_root == str(mailbox_root):
@@ -589,14 +629,14 @@ def build_container_args(
         args += ["-v", f"{host_mailbox_root}:{MAILBOX_MOUNT}:rw"]
         log.info("Mailbox mounted: %s -> %s", host_mailbox_root, MAILBOX_MOUNT)
 
-    # Master-only: publish the registered sibling target paths as an env var
-    # so master's entrypoint can materialize them as empty placeholder
-    # directories (see docs/design-master-sibling-launch.md). Master gets no
-    # bind mount of a sibling repo -- the placeholder just lets `cd <path>`
-    # succeed and lets cld-inside-master resolve cwd to the host path.
-    # Host paths must exist on the host so the peer's -v mount will succeed
-    # later; we fail fast here rather than at peer-launch time.
-    if master and cfg.master_targets:
+    # Hub roles only (master, bare devcontainer): publish the registered
+    # sibling target paths as an env var so the entrypoint can materialize them
+    # as empty placeholder directories (see docs/design-master-sibling-launch.md).
+    # Neither gets a bind mount of a sibling repo -- the placeholder just lets
+    # `cd <path>` succeed and lets cld-inside-the-container resolve cwd to the
+    # host path. Host paths must exist on the host so the peer's -v mount will
+    # succeed later; we fail fast here rather than at peer-launch time.
+    if (master or bare_devcontainer) and cfg.master_targets:
         expanded_targets: list[str] = []
         for entry in cfg.master_targets:
             expanded = os.path.expanduser(entry)
@@ -888,10 +928,11 @@ def stage_broker(cfg: Config) -> list[str]:
     known_hosts) RO, adds a host-gateway alias so the container can reach the
     host-side sshd, and sets ``CLD_BROKER_ENDPOINT`` so the in-container client
     (``cld broker <action>``) can reach it. No-op unless ``cfg.broker_key`` is set.
-    Called for master, agent and task-agent containers (see the call site in
-    ``build_container_args``); the broker's sshd accepts ``cld_master_*`` and
-    ``cld_agent_*`` sessions (the latter covers both the standing repo agent and
-    task-agents -- see ``broker/cld-broker.sh``). See docs/design-cld-broker.md.
+    Called for master, agent, task-agent and the bare ephemeral devcontainer
+    (see the call site in ``build_container_args``); the broker's sshd accepts
+    any ``cld_*`` session and resolves its role from the ``org.cld.kind`` label
+    set at launch, not from the name -- see ``broker/cld-broker.sh``. See
+    docs/design-cld-broker.md.
     """
     if not cfg.broker_key:
         return []

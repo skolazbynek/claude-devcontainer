@@ -394,7 +394,7 @@ class TestRestartPreservesBookmark:
 
 class TestChainBlockedInMaster:
     def test_run_chain_blocked_inside_master(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("MASTER_MODE", "1")
+        monkeypatch.setenv("HUB_MODE", "1")
         from cld.chain import run_chain
         from cld.config import Config
         chain_file = tmp_path / "c.yaml"

@@ -11,16 +11,22 @@
 # launch, not caller input), so the caller controls only: the action, a
 # validated session id, and the decoded argv. Nothing is ever eval'd.
 #
-# Sessions come in two shapes: `cld_master_*` (a `cld master`) and
-# `cld_agent_*` (both the standing repo agent and task-agents -- kind is a
-# label, not a name, see cld/docker.py:task_agent_container_name). Any of the
-# three may call `run-tests` / `list-containers`. The `agent` / `task-agent`
-# launcher actions (spawning siblings) stay master-only in practice even
-# though the session regex admits agent/task-agent callers too: they gate on
-# the `org.cld.targets` label via validate_target, and only master containers
-# ever carry that label (set from `master_targets`, master-only in
-# build_container_args) -- an agent or task-agent session always fails
+# Sessions come in three shapes: `cld_master_*` (a `cld master`), `cld_agent_*`
+# (both the standing repo agent and task-agents -- kind is a label, not a
+# name, see cld/docker.py:task_agent_container_name), and the bare ephemeral
+# devcontainer (`cld_<name>`, org.cld.kind=devcontainer -- an ephemeral,
+# single-user `cld master`, so it gets the same broker reach). Any of these
+# may call `run-tests` / `list-containers`. The `agent` / `task-agent`
+# launcher actions (spawning siblings) stay master/devcontainer-only in
+# practice even though the session regex admits every kind of caller: they
+# gate on the `org.cld.targets` label via validate_target, which only master
+# and bare-devcontainer sessions ever carry (set from `master_targets`, see
+# build_container_args) -- a repo agent or task-agent session always fails
 # validate_target for lack of any registered target.
+#
+# The regex below is a format check only, not an authorization boundary --
+# `$session` doubles as the docker container name, and the label read below
+# (set at launch, trusted) is what actually gates repo/target access.
 #
 # ADD AN ACTION: define a function named `action_<name>` (hyphens in <name>
 # become underscores, so `run-tests` -> `action_run_tests`). It receives the
@@ -233,7 +239,7 @@ read -r action session payload <<<"${SSH_ORIGINAL_COMMAND:-}"
 fn="action_${action//-/_}"
 declare -F "$fn" >/dev/null || { echo "denied: unknown action '$action'" >&2; exit 2; }
 
-[[ "$session" =~ ^cld_(master|agent)_[A-Za-z0-9_-]+$ ]] || { echo "denied: bad session id" >&2; exit 2; }
+[[ "$session" =~ ^cld_[A-Za-z0-9_-]+$ ]] || { echo "denied: bad session id" >&2; exit 2; }
 
 # Resolve the target repo from the calling container's host-set label. The
 # container name == session, and the label is set at launch (trusted), so the
@@ -241,7 +247,7 @@ declare -F "$fn" >/dev/null || { echo "denied: unknown action '$action'" >&2; ex
 # agent's, or a task-agent's own repo.
 REPO=$(docker inspect "$session" --format '{{index .Config.Labels "org.cld.repo-root"}}' 2>/dev/null) || true
 [ -n "$REPO" ] && { [ -d "$REPO/.jj" ] || [ -d "$REPO/.git" ]; } \
-    || { echo "no master/agent/task-agent container for session $session" >&2; exit 3; }
+    || { echo "no master/agent/task-agent/devcontainer container for session $session" >&2; exit 3; }
 
 # Per-action context (REV, secrets, target validation) is resolved inside each
 # action_* function now, so read-only actions don't pay for -- or fail on --
