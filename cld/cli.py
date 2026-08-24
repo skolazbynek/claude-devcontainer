@@ -35,7 +35,7 @@ from cld.docker import (
     find_target_repo,
     master_container_name,
     require_docker,
-    resolve_task_agent_anchor,
+    resolve_anchor_checked,
     run_extra_paths,
     stage_home_ro,
     stage_ssh_agent,
@@ -69,6 +69,18 @@ log = get_logger(__name__)
 
 app = typer.Typer()
 
+_SHARED_ANCHOR_HELP = (
+    "Anchor directly on -r/--revision instead of a fresh isolated child: the "
+    "container can then touch any pre-existing descendant of the anchor, not "
+    "just its own. Refused if another live container is already anchored "
+    "somewhere in that tree. Default is isolated -- use this only for "
+    "explicit, human-approved cleanup/consolidation work."
+)
+
+
+def _anchor_mode(shared_anchor: bool) -> str:
+    return "shared" if shared_anchor else "isolated"
+
 
 def _reject_in_container() -> None:
     """Refuse `python3 -m cld` inside a container: this app needs a docker daemon.
@@ -101,6 +113,7 @@ def main(
     model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
     revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change -- @ for jj, HEAD for git)"),
     prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt for the session"),
+    shared_anchor: bool = typer.Option(False, "--shared-anchor", help=_SHARED_ANCHOR_HELP),
 ):
     """Launch an ephemeral interactive Claude devcontainer (default; no subcommand).
 
@@ -111,7 +124,7 @@ def main(
     _reject_in_container()
     if ctx.invoked_subcommand is not None:
         return
-    _run_devcontainer(name, model, revision, prompt)
+    _run_devcontainer(name, model, revision, prompt, shared_anchor)
 
 
 @app.command()
@@ -122,6 +135,7 @@ def run(
     model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
     revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change -- @ for jj, HEAD for git)"),
     prompt: str = typer.Option("", "-p", "--prompt", help="Inline task description, appended after the refs"),
+    shared_anchor: bool = typer.Option(False, "--shared-anchor", help=_SHARED_ANCHOR_HELP),
 ):
     """Launch a one-shot autonomous Claude agent (headless, --rm, commits to a branch)."""
     cfg = Config.from_env()
@@ -130,15 +144,16 @@ def run(
     brief, _ = _compose_from_args(refs or [], prompt, find_repo_root(), cld_root)
 
     log.info(
-        "run: name=%s, model=%s, revision=%s, refs=%s, prompt=%s",
+        "run: name=%s, model=%s, revision=%s, refs=%s, prompt=%s, shared_anchor=%s",
         name or "<auto>",
         model or "<default>",
         revision or "<default>",
         ", ".join(refs or []) or "<none>",
         "<provided>" if prompt else "<none>",
+        shared_anchor,
     )
 
-    launch_run(cfg, brief, name=name, model=model, revision=revision)
+    launch_run(cfg, brief, name=name, model=model, revision=revision, shared_anchor=shared_anchor)
 
 
 def _compose_from_args(
@@ -167,6 +182,7 @@ def _run_devcontainer(
     model: str,
     revision: str,
     prompt: str,
+    shared_anchor: bool = False,
 ) -> None:
     """Ephemeral interactive devcontainer launch. Persistent master/agent live in their own sub-apps."""
     require_docker()
@@ -174,11 +190,12 @@ def _run_devcontainer(
     setup_logging(cfg)
 
     log.info(
-        "devcontainer: name=%s, model=%s, revision=%s, prompt=%s",
+        "devcontainer: name=%s, model=%s, revision=%s, prompt=%s, shared_anchor=%s",
         name or "<auto>",
         model or "<default>",
         revision or "<default>",
         "<provided>" if prompt else "<none>",
+        shared_anchor,
     )
 
     cld_root = Path(__file__).resolve().parent.parent
@@ -197,11 +214,15 @@ def _run_devcontainer(
 
     session = build_session_name("cld", name)
     repo_root = find_target_repo(cfg)
+    mode = _anchor_mode(shared_anchor)
+    anchor = resolve_anchor_checked(cfg, repo_root, revision, mode)
 
     brief = compose_brief([], prompt) if prompt else ""
 
-    args = build_container_args(repo_root, session, cfg, interactive=True)
-    args += anchor_env_args(cfg, session, revision, brief=brief)
+    args = build_container_args(
+        repo_root, session, cfg, interactive=True, anchor_hash=anchor, anchor_mode=mode,
+    )
+    args += anchor_env_args(cfg, session, anchor, brief=brief, mode=mode)
     if model:
         args += ["-e", f"AGENT_MODEL={model}"]
 
@@ -258,6 +279,7 @@ def _run_persistent_devcontainer(
     model: str,
     revision: str,
     cfg: Config,
+    shared_anchor: bool = False,
 ) -> None:
     """Master/agent-mode devcontainer: start-or-attach the one persistent container per repo.
 
@@ -294,6 +316,8 @@ def _run_persistent_devcontainer(
             raise typer.Exit(1)
         if revision:
             log.warning("--%s: re-attaching to existing container; -r/--revision ignored", role)
+        if shared_anchor:
+            log.warning("--%s: re-attaching to existing container; --shared-anchor ignored", role)
         if status == "stopped":
             log.info("Starting stopped %s container: %s", role, session)
             subprocess.run(["docker", "start", session], check=True)
@@ -311,11 +335,14 @@ def _run_persistent_devcontainer(
     # very first launch. Inside master, `anchor_env_args` emits an unresolved
     # revision hint + scratch envelope so the peer's entrypoint does the
     # anchor work locally (master has no RW view of a sibling target).
+    mode = _anchor_mode(shared_anchor)
+    anchor = resolve_anchor_checked(cfg, repo_root, revision, mode)
     args = build_container_args(
         repo_root, session, cfg, interactive=False,
         master=(role == "master"), agent=(role == "agent"),
+        anchor_hash=anchor, anchor_mode=mode,
     )
-    args += anchor_env_args(cfg, session, revision, brief=brief)
+    args += anchor_env_args(cfg, session, anchor, brief=brief, mode=mode)
     if model:
         args += ["-e", f"AGENT_MODEL={model}"]
 
@@ -465,6 +492,7 @@ def master(
     model: str = typer.Option("", "-m", "--model", help="Claude model (first launch only)"),
     revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (first launch only)"),
     prompt: str = typer.Option("", "-p", "--prompt", help="First-launch prompt (refused on re-attach)"),
+    shared_anchor: bool = typer.Option(False, "--shared-anchor", help=_SHARED_ANCHOR_HELP + " (first launch only)"),
 ):
     """Start (or attach to) the persistent master devcontainer for this repo.
 
@@ -475,7 +503,7 @@ def master(
     cfg = Config.from_env()
     setup_logging(cfg)
     brief = compose_brief([], prompt) if prompt else ""
-    _run_persistent_devcontainer("master", brief, "", model, revision, cfg)
+    _run_persistent_devcontainer("master", brief, "", model, revision, cfg, shared_anchor)
 
 
 @master_app.command("restart")
@@ -524,13 +552,14 @@ def agent(
     ctx: typer.Context,
     model: str = typer.Option("", "-m", "--model", help="Claude model (first launch only)"),
     revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (first launch only)"),
+    shared_anchor: bool = typer.Option(False, "--shared-anchor", help=_SHARED_ANCHOR_HELP + " (first launch only)"),
 ):
     """Start the persistent repo agent for this repo. Idempotent per repo."""
     if ctx.invoked_subcommand is not None:
         return
     cfg = Config.from_env()
     setup_logging(cfg)
-    _run_persistent_devcontainer("agent", "", "", model, revision, cfg)
+    _run_persistent_devcontainer("agent", "", "", model, revision, cfg, shared_anchor)
 
 
 @agent_app.command("restart")
@@ -667,6 +696,7 @@ def task_agent_start(
     revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change)"),
     peer: list[str] = typer.Option([], "--peer", help="A peer this agent may message: <container-name>[:<hops>]. Repeatable."),
     parent: str = typer.Option("", "--parent", hidden=True, help="Owning master session (set by the host broker)"),
+    shared_anchor: bool = typer.Option(False, "--shared-anchor", help=_SHARED_ANCHOR_HELP),
 ):
     """Spawn a task-scoped agent. Every start creates a new container (no start-or-attach)."""
     cfg = Config.from_env()
@@ -709,7 +739,8 @@ def task_agent_start(
     # Both refusals are host-side, before anything is built or spawned: the cap
     # counts running siblings, the anchor check reads the origin store (§9).
     assert_task_agent_capacity(cfg, parent)
-    anchor = resolve_task_agent_anchor(cfg, repo_root, revision)
+    mode = _anchor_mode(shared_anchor)
+    anchor = resolve_anchor_checked(cfg, repo_root, revision, mode)
 
     ensure_image(
         cfg.devcontainer_image,
@@ -725,8 +756,8 @@ def task_agent_start(
     )
 
     log.info(
-        "task-agent: name=%s, task=%s, persona=%s, branch=%s, anchor=%s, peers=%s, parent=%s",
-        session, slug, role or "<none>", branch, anchor[:12],
+        "task-agent: name=%s, task=%s, persona=%s, branch=%s, anchor=%s, mode=%s, peers=%s, parent=%s",
+        session, slug, role or "<none>", branch, anchor[:12], mode,
         ",".join(f"{p}:{h}" for p, h in sorted(peers.items())) or "none",
         parent or "<none>",
     )
@@ -736,10 +767,11 @@ def task_agent_start(
         task_agent=TaskAgentSpec(
             slug=slug, parent_master=parent, deliverable_branch=branch, peers=peers,
         ),
+        anchor_hash=anchor, anchor_mode=mode,
     )
     # The already-resolved anchor, not `revision`: the launch must pin exactly the
-    # commit the live-stack refusal inspected. The brief rides in the same envelope.
-    args += anchor_env_args(cfg, session, anchor, brief=brief)
+    # commit the overlap check inspected. The brief rides in the same envelope.
+    args += anchor_env_args(cfg, session, anchor, brief=brief, mode=mode)
     args += ["-e", f"AGENT_PERSONA={role}"]
     if model:
         args += ["-e", f"AGENT_MODEL={model}"]
@@ -776,7 +808,7 @@ def task_agent_start(
     typer.echo(f"  Task:       {slug}")
     typer.echo(f"  Persona:    {role or '-'}")
     typer.echo(f"  Branch:     {branch}")
-    typer.echo(f"  Anchor:     {anchor[:12]}")
+    typer.echo(f"  Anchor:     {anchor[:12]} ({mode})")
     typer.echo(f"  Peers:      {format_peers(peers)}")
     typer.echo(f"  Status:     cld task-agent status {handle}")
     typer.echo(f"  Logs:       cld task-agent logs {handle}")

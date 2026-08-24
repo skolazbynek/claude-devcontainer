@@ -8,6 +8,31 @@ MAILBOX_OK=$?
 
 BOOKMARK="${SESSION_NAME:?SESSION_NAME must be set}"
 
+# Recover AGENT_ANCHOR_HASH on a warm restart or bookmark reattach: find the
+# ancestor of $BOOKMARK carrying our own 'cld anchor: <session>[ mode=<mode>]'
+# description (glob-matched -- `jj commit -m` appends a trailing newline to
+# single-line descriptions, so an exact match against the bare text never
+# hits), then read that scratch commit's own description back to recover the
+# mode it was staged with. isolated: the scratch commit itself is the anchor.
+# shared: its parent is (see docs/design-anchor-modes.md; mirrors the
+# first-launch branch below and cld.vcs.scratch.stage_in_workspace).
+_cld_recover_anchor() {
+    local scratch_hash desc
+    scratch_hash=$(jj log --no-graph -n 1 \
+        -r "heads(ancestors(${BOOKMARK}) & description(glob:'cld anchor: ${SESSION_NAME}*'))" \
+        -T commit_id 2>/dev/null || true)
+    [ -n "$scratch_hash" ] || return 0
+    desc=$(jj log --no-graph -n 1 -r "$scratch_hash" -T description 2>/dev/null || true)
+    case "$desc" in
+        *"mode=shared"*)
+            jj log --no-graph -n 1 -r "parents($scratch_hash)" -T commit_id 2>/dev/null || true
+            ;;
+        *)
+            echo "$scratch_hash"
+            ;;
+    esac
+}
+
 cd "$WORKSPACE_ORIGIN"
 
 # Workspace lives inside the container's ephemeral filesystem at
@@ -43,15 +68,7 @@ if [ -e /workspace/current/.jj ]; then
     # may have advanced it), and recover the anchor for downstream consumers.
     echo "[cld] warm restart: reusing existing workspace at /workspace/current"
     (cd /workspace/current && jj workspace update-stale 2>/dev/null || true)
-    # AGENT_ANCHOR_HASH is A, the resolved -r revision -- the parent of scratch
-    # commit B (found below by its 'cld anchor: <session>' description; glob,
-    # not exact -- `jj commit -m` appends a trailing newline to single-line
-    # descriptions, so an exact match against the bare text never hits). Any
-    # pre-existing descendant of A, not just of B, is in the container's
-    # editable tree (anchor descendant-tree contract).
-    AGENT_ANCHOR_HASH=$(jj log --no-graph -n 1 \
-        -r "parents(heads(ancestors(${BOOKMARK}) & description(glob:'cld anchor: ${SESSION_NAME}*')))" \
-        -T commit_id 2>/dev/null || true)
+    AGENT_ANCHOR_HASH=$(_cld_recover_anchor)
     export AGENT_ANCHOR_HASH
 else
 jj workspace forget "$BOOKMARK" 2>&1 || true
@@ -62,13 +79,7 @@ if jj bookmark list -T 'name ++ "\n"' | grep -qx "$BOOKMARK"; then
         echo "Error: jj workspace add failed (reattach)" >&2
         exit 1
     fi
-    # Recover the anchor: the ancestor of the bookmark with our own
-    # 'cld anchor: <session>' description (glob-matched, see warm-restart
-    # branch above) is scratch commit B; its parent is A, the value
-    # AGENT_ANCHOR_HASH must carry (not B itself).
-    AGENT_ANCHOR_HASH=$(jj log --no-graph -n 1 \
-        -r "parents(heads(ancestors(${BOOKMARK}) & description(glob:'cld anchor: ${SESSION_NAME}*')))" \
-        -T commit_id 2>/dev/null || true)
+    AGENT_ANCHOR_HASH=$(_cld_recover_anchor)
     export AGENT_ANCHOR_HASH
 else
     # First launch. Base revision comes from AGENT_REVISION_HINT (a resolved
@@ -97,12 +108,19 @@ else
         echo "Error: peer-side anchor staging failed" >&2
         exit 1
     fi
-    # AGENT_ANCHOR_HASH is A itself, not scratch commit B -- so any
-    # pre-existing descendant of A (not just of B) is in the container's
-    # editable tree, per the anchor descendant-tree contract.
-    AGENT_ANCHOR_HASH="$A_HASH"
+    # isolated (default): AGENT_ANCHOR_HASH is B, so only B's own descendants
+    # are editable. shared: AGENT_ANCHOR_HASH is A itself, so any pre-existing
+    # descendant of A (not just of B) is in the container's editable tree --
+    # see docs/design-anchor-modes.md. _cld_recover_anchor mirrors this choice
+    # on a later restart/reattach.
+    AGENT_ANCHOR_MODE="${AGENT_ANCHOR_MODE:-isolated}"
+    if [ "$AGENT_ANCHOR_MODE" = "shared" ]; then
+        AGENT_ANCHOR_HASH="$A_HASH"
+    else
+        AGENT_ANCHOR_HASH="$B_HASH"
+    fi
     export AGENT_ANCHOR_HASH
-    echo "[cld] anchor=${AGENT_ANCHOR_HASH:0:12} (scratch=${B_HASH:0:12})"
+    echo "[cld] anchor=${AGENT_ANCHOR_HASH:0:12} (mode=$AGENT_ANCHOR_MODE, base=${A_HASH:0:12}, scratch=${B_HASH:0:12})"
     (cd /workspace/current && jj bookmark set "$BOOKMARK" -r @ --allow-backwards)
 fi
 fi

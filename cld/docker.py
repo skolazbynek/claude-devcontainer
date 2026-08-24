@@ -259,15 +259,25 @@ def find_target_repo(cfg: Config) -> Path:
     return find_repo_context()[0]
 
 
-def anchor_env_args(cfg: Config, session: str, revision: str, brief: str = "") -> list[str]:
+def anchor_env_args(
+    cfg: Config, session: str, revision: str, brief: str = "", mode: str = "isolated",
+) -> list[str]:
     """Return the docker `-e` args carrying anchor info to a peer container.
 
     The host resolves the base revision to a commit hash from its jj view; the
     peer entrypoint uses it as the base for ``jj workspace add`` and then creates
-    the anchor commit B inside that workspace via ``stage_from_env``. See
+    the scratch commit B inside that workspace via ``stage_from_env``. See
     docs/design-anchor-change.md. Only ever called host-side now: launches from
     inside master are delegated to the host broker (see cld/broker.py), so
     the container itself never builds a peer's args.
+
+    ``mode``: ``"isolated"`` (default) -- the entrypoint exports B itself as
+    ``AGENT_ANCHOR_HASH``, so only B's own descendants are editable. ``"shared"``
+    -- the entrypoint exports A (B's parent) instead, so any pre-existing
+    descendant of A is editable too (docs/design-anchor-modes.md). *revision*
+    is expected to already be resolved to a concrete hash by the caller (via
+    ``resolve_anchor_checked``) when the overlap check matters; passing a
+    symbolic revision still works (``resolve_anchor`` is idempotent on a hash).
     """
     from cld.vcs import get_backend
     from cld.vcs.anchor import resolve_anchor
@@ -283,11 +293,12 @@ def anchor_env_args(cfg: Config, session: str, revision: str, brief: str = "") -
     payload = encode_scratch_envelope(scratch)
 
     hint = resolve_anchor(get_backend(), revision)
-    log.info("Anchor base: %s", hint[:12])
+    log.info("Anchor base: %s (mode=%s)", hint[:12], mode)
 
     return [
         "-e", f"AGENT_REVISION_HINT={hint}",
         "-e", f"AGENT_SCRATCH={payload}",
+        "-e", f"AGENT_ANCHOR_MODE={mode}",
     ]
 
 
@@ -409,6 +420,8 @@ def build_container_args(
     master: bool = False,
     agent: bool = False,
     task_agent: TaskAgentSpec | None = None,
+    anchor_hash: str = "",
+    anchor_mode: str = "isolated",
 ) -> list[str]:
     """Build the base ``docker run`` argument list every launcher needs.
 
@@ -427,6 +440,13 @@ def build_container_args(
     and the mailbox mount -- an ephemeral, single-user stand-in for
     `cld master` that can spawn and message its own fleet, just with no
     persistent bookmark/state to reattach to once it exits.
+
+    ``anchor_hash``/``anchor_mode``, when given, are stamped as host-set
+    ``org.cld.anchor``/``org.cld.anchor-mode`` labels on every role including
+    the plain ``cld run`` one-shot agent -- see ``resolve_anchor_checked`` and
+    docs/design-anchor-modes.md. Immutable for the container's lifetime, so
+    they're the source of truth the overlap check reads back via
+    ``docker_anchor_list``.
     """
     if sum((master, agent, bool(task_agent))) > 1:
         raise ValueError("master, agent and task_agent are mutually exclusive roles")
@@ -493,6 +513,21 @@ def build_container_args(
                 "--label", f"org.cld.session={session_name}",
                 "-e", "HUB_MODE=1",
             ]
+        elif anchor_hash:
+            # `cld run`: no other org.cld.* labels today (its `--name` is set by
+            # the caller in cld/run.py), but it still needs repo-root + anchor so
+            # docker_anchor_list can see it in the overlap check.
+            args += [
+                "--label", "org.cld.kind=run",
+                "--label", f"org.cld.repo-root={host_repo_root}",
+                "--label", f"org.cld.session={session_name}",
+            ]
+
+    if anchor_hash:
+        args += [
+            "--label", f"{ANCHOR_LABEL}={anchor_hash}",
+            "--label", f"{ANCHOR_MODE_LABEL}={anchor_mode}",
+        ]
 
     # Security and resources
     args += [
@@ -755,6 +790,8 @@ _INSPECT_LABELS = (
     ("kind", "org.cld.kind"),
     ("parent", "org.cld.parent-master"),
     ("task", "org.cld.task"),
+    ("anchor", "org.cld.anchor"),
+    ("anchor_mode", "org.cld.anchor-mode"),
 )
 _INSPECT_FORMAT = "|".join(f'{{{{index .Config.Labels "{label}"}}}}' for _, label in _INSPECT_LABELS)
 
@@ -828,67 +865,125 @@ def assert_task_agent_capacity(cfg: Config, parent_master: str) -> None:
     )
 
 
-def resolve_task_agent_anchor(cfg: Config, repo_root: Path, revision: str) -> str:
-    """Resolve *revision* to a commit hash, refusing an anchor inside a live agent's stack.
+ANCHOR_LABEL = "org.cld.anchor"
+ANCHOR_MODE_LABEL = "org.cld.anchor-mode"
 
-    A live agent may squash or rebase its own stack at any moment, so anchoring on
-    it pins the new agent to a base its owner has since revised -- silently, and
-    unfixable without re-anchoring from scratch. Teardown is the "finished" signal,
-    so the refusal names the owning agent and asks for it to be reaped first (§8, §9).
+_ANCHOR_INSPECT_FORMAT = (
+    '{{index .Config.Labels "org.cld.repo-root"}}|'
+    '{{index .Config.Labels "org.cld.anchor"}}|'
+    '{{index .Config.Labels "org.cld.anchor-mode"}}'
+)
 
-    Scoped to task-agents running in *repo_root*, not to one master's fleet: the
-    hazard is store-level, so another master's live agent is just as dangerous.
-    jj-only -- peer-side anchor staging has no git equivalent. Anchoring on the
-    shared base still passes, since a live agent's anchor is a *child* of it.
+
+def docker_anchor_list(*, running_only: bool = True) -> list[dict]:
+    """Every running container (any role) carrying an ``org.cld.anchor`` label.
+
+    Host-wide, not scoped to one kind or one master's fleet: two agents
+    anchored in the same store, launched by different callers, are exactly
+    the hazard this exists to catch. Records are
+    ``{name, repo_root, anchor, anchor_mode}``.
     """
-    from cld.messenger import mailbox
+    filters = ["--filter", f"label={ANCHOR_LABEL}"]
+    if running_only:
+        filters += ["--filter", "status=running"]
+    result = subprocess.run(
+        ["docker", "ps", "-a", *filters, "--format", "{{.Names}}"],
+        capture_output=True, text=True,
+    )
+    log_subprocess(log, ["docker", "ps", "-a", *filters], result)
+    if result.returncode != 0:
+        return []
+    containers: list[dict] = []
+    for name in result.stdout.strip().splitlines():
+        if not name:
+            continue
+        inspect = subprocess.run(
+            ["docker", "inspect", name, "--format", _ANCHOR_INSPECT_FORMAT],
+            capture_output=True, text=True,
+        )
+        log_subprocess(log, ["docker", "inspect", name], inspect)
+        if inspect.returncode != 0:
+            continue
+        repo_root, anchor, anchor_mode = (inspect.stdout.strip().split("|") + ["", "", ""])[:3]
+        containers.append({
+            "name": name, "repo_root": repo_root,
+            "anchor": anchor, "anchor_mode": anchor_mode or "isolated",
+        })
+    return containers
+
+
+def resolve_anchor_checked(cfg: Config, repo_root: Path, revision: str, mode: str = "isolated") -> str:
+    """Resolve *revision* to a commit hash, refusing overlap with another live anchor's reach.
+
+    A live container's "reach" -- the set of commits it may touch -- is the
+    descendant tree of its own recorded anchor (docs/design-anchor-modes.md).
+    Two refusals, checked against every other running cld container host-wide
+    (not just one master's fleet or one role -- the hazard is store-level):
+
+    1. Always: refuse if *revision* resolves to a commit already inside
+       another live container's reach. A live container may squash or rebase
+       its own stack at any moment, so anchoring inside it pins the new
+       container to a base its owner has since revised -- silently, and
+       unfixable without re-anchoring from scratch.
+    2. Only when ``mode == "shared"``: refuse if another live container's own
+       anchor falls inside *this* anchor's reach (``descendants(revision)``).
+       A shared anchor's reach is its own full descendant tree, so a shared
+       spawn must not claim a tree with a live occupant already inside it --
+       two isolated siblings spawned off the same base are unaffected, since
+       an isolated container's reach starts one commit below the shared base,
+       disjoint from a sibling's own line.
+
+    jj-only -- peer-side anchor staging has no git equivalent. Anchoring on a
+    finished (reaped) sibling's deliverable branch still passes in either mode.
+    """
     from cld.vcs import get_backend
     from cld.vcs.anchor import resolve_anchor
 
     vcs = get_backend(repo_root)
     anchor = resolve_anchor(vcs, revision)
     if vcs.name != "jj":
-        log.debug("live-stack anchor check skipped: %s backend has no equivalent", vcs.name)
+        log.debug("live-anchor overlap check skipped: %s backend has no equivalent", vcs.name)
         return anchor
 
     host_repo = to_host_path(str(repo_root), cfg)
-    mailbox_root = Path(cfg.mailbox_root).expanduser()
-    live: dict[str, str] = {}
-    for c in docker_task_agent_list(running_only=True):
-        if c["repo_root"] != host_repo:
-            continue
-        meta = mailbox.read_meta(mailbox_root, c["name"]) or {}
-        if meta.get("anchor"):
-            live[meta["anchor"]] = c["name"]
+    live = {
+        c["anchor"]: c["name"]
+        for c in docker_anchor_list(running_only=True)
+        if c["repo_root"] == host_repo and c["anchor"]
+    }
     if not live:
         return anchor
 
-    descendants = " | ".join(f"{a}::" for a in live)
-    probe = vcs.run(["log", "-r", f"{anchor} & ({descendants})", "--no-graph", "-T", "commit_id", "-n", "1"])
-    if probe.returncode != 0:
-        # Our own bookkeeping (a meta.json anchor no longer in the store) must not
-        # block a legitimate spawn -- warn and let it through.
-        log.warning(
-            "could not evaluate the live-stack anchor check against %s: %s",
-            ", ".join(f"{name}@{a[:12]}" for a, name in live.items()), (probe.stderr or "").strip(),
-        )
-        return anchor
-    if not probe.stdout.strip():
-        return anchor
+    def _probe(revset: str) -> bool:
+        result = vcs.run(["log", "-r", revset, "--no-graph", "-T", "commit_id", "-n", "1"])
+        if result.returncode != 0:
+            log.warning(
+                "could not evaluate the live-anchor overlap check (%s): %s",
+                revset, (result.stderr or "").strip(),
+            )
+            return False
+        return bool(result.stdout.strip())
 
-    # Only on refusal, and bounded by the cap: find which agent owns the stack.
-    owner, owner_anchor = next(iter(live.items()))[::-1]
-    for live_anchor, name in live.items():
-        hit = vcs.run(["log", "-r", f"{anchor} & {live_anchor}::", "--no-graph", "-T", "commit_id", "-n", "1"])
-        if hit.returncode == 0 and hit.stdout.strip():
-            owner, owner_anchor = name, live_anchor
-            break
-    raise RuntimeError(
-        f"refusing to anchor on {anchor[:12]}: it is inside the live stack of task-agent "
-        f"{owner} (anchor {owner_anchor[:12]}). A live agent can still rewrite that stack. "
-        f"Reap it first (`cld task-agent shutdown {owner}`) -- teardown is what makes its "
-        "deliverable branch safe to anchor on -- or anchor on the shared base instead."
-    )
+    others = " | ".join(f"{a}::" for a in live)
+
+    if _probe(f"{anchor} & ({others})"):
+        owner = next(name for a, name in live.items() if _probe(f"{anchor} & {a}::"))
+        raise RuntimeError(
+            f"refusing to anchor on {anchor[:12]}: it is inside the live reach of "
+            f"{owner}. A live container can still rewrite that stack. Reap/stop it "
+            "first -- teardown is what makes its deliverable branch safe to anchor "
+            "on -- or anchor on the shared base instead."
+        )
+
+    if mode == "shared" and _probe(f"({' | '.join(live)}) & {anchor}::"):
+        owner = next(name for a, name in live.items() if _probe(f"{a} & {anchor}::"))
+        raise RuntimeError(
+            f"refusing a shared anchor at {anchor[:12]}: {owner} is already live "
+            "somewhere inside that tree, and a shared anchor's reach covers all of "
+            f"it. Reap/stop {owner} first, or anchor in isolated mode instead."
+        )
+
+    return anchor
 
 
 _CONTAINER_SSH_AUTH_SOCK = "/run/host-ssh-agent.sock"

@@ -42,6 +42,7 @@ def stage_in_workspace(
     workspace_path: Path,
     session: str,
     scratch_files: dict[str, bytes],
+    mode: str = "isolated",
 ) -> str:
     """Materialize scratch and commit B inside an already-created jj workspace.
 
@@ -50,11 +51,15 @@ def stage_in_workspace(
             Its ``@`` must be an empty child of A when this is called.
         session: session name; embedded in B's description.
         scratch_files: mapping of ``relative-path-under-.cld-run/`` -> bytes.
+        mode: ``"isolated"`` (default) or ``"shared"`` -- embedded in B's
+            description so a restart/reattach can recover which anchor
+            semantics this session was launched with (see
+            docs/design-anchor-modes.md). Isolated: the caller uses B itself
+            as ``AGENT_ANCHOR_HASH``. Shared: the caller uses A (B's parent).
 
     Returns:
-        Commit id of B (the parent of ``@`` after the commit), the scratch
-        commit whose only diff vs. A is ``.cld-run/*``. B is not the enforced
-        anchor -- the caller uses A (B's parent) as ``AGENT_ANCHOR_HASH``.
+        Commit id of B, the scratch commit whose only diff vs. A is
+        ``.cld-run/*``.
     """
     scratch_dir = workspace_path / SCRATCH_DIR
     scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -64,7 +69,7 @@ def stage_in_workspace(
         dest.write_bytes(content)
 
     vcs = JjBackend(workspace_path, workspace_path=workspace_path)
-    desc = f"cld anchor: {session}"
+    desc = f"cld anchor: {session} mode={mode}"
     result = vcs.run(["commit", "-m", desc, SCRATCH_DIR])
     if result.returncode != 0:
         raise RuntimeError(
@@ -105,6 +110,8 @@ def stage_from_env() -> str:
     Env vars:
     - ``SESSION_NAME``  -- required.
     - ``AGENT_SCRATCH`` -- required, base64 envelope from ``encode_scratch_envelope``.
+    - ``AGENT_ANCHOR_MODE`` -- optional, ``"isolated"`` (default) or ``"shared"``;
+      embedded in B's description for restart/reattach recovery.
     - ``WORKSPACE_CURRENT`` -- optional; defaults to cwd.
 
     Returns B's commit id.
@@ -115,9 +122,10 @@ def stage_from_env() -> str:
     scratch_b64 = os.environ.get("AGENT_SCRATCH") or ""
     if not scratch_b64:
         raise RuntimeError("stage_from_env: AGENT_SCRATCH is required")
+    mode = os.environ.get("AGENT_ANCHOR_MODE") or "isolated"
     workspace = Path(os.environ.get("WORKSPACE_CURRENT") or os.getcwd())
     scratch = decode_scratch_envelope(scratch_b64)
-    return stage_in_workspace(workspace, session, scratch)
+    return stage_in_workspace(workspace, session, scratch, mode)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from cld.docker import (
     find_target_repo,
     in_master_container,
     require_docker,
+    resolve_anchor_checked,
     run_extra_paths,
 )
 from cld.log import get_logger
@@ -29,6 +30,7 @@ def launch_run(
     revision: str = "",
     session_name: str | None = None,
     quiet: bool = False,
+    shared_anchor: bool = False,
     *,
     extra_env: dict[str, str] | None = None,
 ) -> dict:
@@ -74,12 +76,14 @@ def launch_run(
     )
 
     session = session_name or build_session_name("run", name)
+    mode = "shared" if shared_anchor else "isolated"
+    anchor = resolve_anchor_checked(cfg, repo_root, revision, mode)
 
     args = ["--name", session]
-    args += build_container_args(repo_root, session, cfg)
+    args += build_container_args(repo_root, session, cfg, anchor_hash=anchor, anchor_mode=mode)
     # The brief travels in the anchor scratch envelope (-> .cld-run/brief.md); no
     # prompt mounts, no host temp file to outlive this detached launch.
-    args += anchor_env_args(cfg, session, revision, brief=brief)
+    args += anchor_env_args(cfg, session, anchor, brief=brief, mode=mode)
     if model:
         args += ["-e", f"AGENT_MODEL={model}"]
     if extra_env:

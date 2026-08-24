@@ -48,11 +48,18 @@ if ! B_HASH=$(cd /workspace/current && python3 -m cld.vcs.scratch); then
     echo "Error: peer-side anchor staging failed" >&2
     exit 1
 fi
-# AGENT_ANCHOR_HASH is A itself, not scratch commit B -- so any pre-existing
-# descendant of A (not just of B) is in the container's editable tree.
-AGENT_ANCHOR_HASH="$A_HASH"
+# isolated (default): AGENT_ANCHOR_HASH is B, so only B's own descendants are
+# editable. shared: AGENT_ANCHOR_HASH is A itself, so any pre-existing
+# descendant of A (not just of B) is in the container's editable tree -- see
+# docs/design-anchor-modes.md.
+AGENT_ANCHOR_MODE="${AGENT_ANCHOR_MODE:-isolated}"
+if [ "$AGENT_ANCHOR_MODE" = "shared" ]; then
+    AGENT_ANCHOR_HASH="$A_HASH"
+else
+    AGENT_ANCHOR_HASH="$B_HASH"
+fi
 export AGENT_ANCHOR_HASH
-echo "[cld] anchor=${AGENT_ANCHOR_HASH:0:12} (scratch=${B_HASH:0:12})"
+echo "[cld] anchor=${AGENT_ANCHOR_HASH:0:12} (mode=$AGENT_ANCHOR_MODE, base=${A_HASH:0:12}, scratch=${B_HASH:0:12})"
 (cd /workspace/current && jj bookmark set "$BOOKMARK" -r @ --allow-backwards)
 
 (cd /workspace/current && \

@@ -156,6 +156,7 @@ class TestAgentSubcommand:
              patch("cld.cli.ensure_image"), \
              patch("cld.cli.find_target_repo", return_value=repo_root), \
              patch("cld.cli.docker_agent_status", return_value="absent"), \
+             patch("cld.cli.resolve_anchor_checked", return_value="def456" * 6 + "abcd"), \
              patch("cld.cli.anchor_env_args", return_value=["-e", "AGENT_ANCHOR_HASH=def456"]), \
              patch("cld.cli.build_container_args", return_value=["--rm"]) as bca, \
              patch("cld.cli.stage_home_ro", return_value=[]), \
@@ -471,7 +472,7 @@ def start_env(tmp_path, monkeypatch):
             find_target_repo=p("find_target_repo", return_value=repo_root),
             ensure_image=p("ensure_image"),
             capacity=p("assert_task_agent_capacity"),
-            resolve_anchor=p("resolve_task_agent_anchor", return_value="c0ffee" * 6 + "abcd"),
+            resolve_anchor=p("resolve_anchor_checked", return_value="c0ffee" * 6 + "abcd"),
             # The real namer, minus the docker probe: slug validation stays real.
             allocate=p("allocate_task_agent_name", side_effect=task_agent_container_name),
             bca=p("build_container_args", return_value=["--name", "placeholder"]),

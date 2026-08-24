@@ -21,7 +21,7 @@ from cld.docker import (
     in_master_container,
     parse_peers_env,
     resolve_master_target,
-    resolve_task_agent_anchor,
+    resolve_anchor_checked,
     stage_home_ro,
     stage_broker,
     task_agent_container_name,
@@ -297,7 +297,7 @@ class TestDockerKindList:
         assert "index .Labels" not in _INSPECT_FORMAT
 
     def test_records_carry_kind_parent_task(self):
-        inspect = _ps("/home/u/repoA|cld_agent_repoA_add-oauth|task-agent|cld_master_repoA_ab12|add-oauth\n")
+        inspect = _ps("/home/u/repoA|cld_agent_repoA_add-oauth|task-agent|cld_master_repoA_ab12|add-oauth||\n")
         with patch("cld.docker.subprocess.run", side_effect=[_ps("cld_agent_repoA_add-oauth\n"), inspect]):
             assert docker_task_agent_list() == [{
                 "name": "cld_agent_repoA_add-oauth",
@@ -306,10 +306,12 @@ class TestDockerKindList:
                 "kind": "task-agent",
                 "parent": "cld_master_repoA_ab12",
                 "task": "add-oauth",
+                "anchor": "",
+                "anchor_mode": "",
             }]
 
     def test_missing_labels_become_empty(self):
-        with patch("cld.docker.subprocess.run", side_effect=[_ps("c1\n"), _ps("/repo|c1|agent||\n")]):
+        with patch("cld.docker.subprocess.run", side_effect=[_ps("c1\n"), _ps("/repo|c1|agent|||\n")]):
             rec = docker_task_agent_list()[0]
         assert (rec["parent"], rec["task"]) == ("", "")
 
@@ -544,8 +546,16 @@ class TestAssertTaskAgentCapacity:
         assert m.call_args.kwargs == {"running_only": True}
 
 
-class TestResolveTaskAgentAnchor:
-    """Live-stack refusal against a real jj repo; the container list is faked."""
+def _anchors(*specs):
+    """Fake docker_anchor_list records: (name, repo_root, anchor, anchor_mode)."""
+    return [
+        {"name": n, "repo_root": r, "anchor": a, "anchor_mode": m}
+        for n, r, a, m in specs
+    ]
+
+
+class TestResolveAnchorChecked:
+    """Live-anchor overlap refusal against a real jj repo; the container list is faked."""
 
     def _commits(self, jj_repo):
         base = jj_repo.resolve_revision("@-")
@@ -558,73 +568,87 @@ class TestResolveTaskAgentAnchor:
         inside = jj_repo.resolve_revision("@-")
         return base, live_anchor, inside
 
-    def _fleet(self, tmp_path, jj_repo, anchor, name="cld_agent_r_live"):
-        from cld.messenger import mailbox
-        mailbox_root = tmp_path / "mb"
-        mailbox.ensure_meta(
-            mailbox_root, name, parent="m1", task="t", persona="implementer",
-            deliverable_branch="d", anchor=anchor, peers={},
-        )
-        cfg = Config(mailbox_root=str(mailbox_root))
-        records = _tasks((name, "m1", str(jj_repo.repo_root), "t"))
+    def _fleet(self, tmp_path, jj_repo, anchor, name="cld_agent_r_live", anchor_mode="isolated"):
+        cfg = Config(mailbox_root=str(tmp_path / "mb"))
+        records = _anchors((name, str(jj_repo.repo_root), anchor, anchor_mode))
         return cfg, records
 
     def test_shared_base_passes_with_live_sibling(self, tmp_path, jj_repo):
         base, live_anchor, _ = self._commits(jj_repo)
         cfg, records = self._fleet(tmp_path, jj_repo, live_anchor)
-        with patch("cld.docker.docker_task_agent_list", return_value=records):
-            assert resolve_task_agent_anchor(cfg, jj_repo.repo_root, base) == base
+        with patch("cld.docker.docker_anchor_list", return_value=records):
+            assert resolve_anchor_checked(cfg, jj_repo.repo_root, base) == base
 
     def test_inside_live_stack_refused_naming_owner(self, tmp_path, jj_repo):
         _, live_anchor, inside = self._commits(jj_repo)
         cfg, records = self._fleet(tmp_path, jj_repo, live_anchor)
-        with patch("cld.docker.docker_task_agent_list", return_value=records):
-            with pytest.raises(RuntimeError, match="inside the live stack") as e:
-                resolve_task_agent_anchor(cfg, jj_repo.repo_root, inside)
+        with patch("cld.docker.docker_anchor_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live reach") as e:
+                resolve_anchor_checked(cfg, jj_repo.repo_root, inside)
         assert "cld_agent_r_live" in str(e.value)
 
     def test_equal_to_live_anchor_refused(self, tmp_path, jj_repo):
         _, live_anchor, _ = self._commits(jj_repo)
         cfg, records = self._fleet(tmp_path, jj_repo, live_anchor)
-        with patch("cld.docker.docker_task_agent_list", return_value=records):
-            with pytest.raises(RuntimeError, match="inside the live stack"):
-                resolve_task_agent_anchor(cfg, jj_repo.repo_root, live_anchor)
+        with patch("cld.docker.docker_anchor_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live reach"):
+                resolve_anchor_checked(cfg, jj_repo.repo_root, live_anchor)
 
     def test_other_repo_agents_ignored(self, tmp_path, jj_repo):
         _, live_anchor, inside = self._commits(jj_repo)
         cfg, _records = self._fleet(tmp_path, jj_repo, live_anchor)
-        elsewhere = _tasks(("cld_agent_r_live", "m1", "/some/other/repo", "t"))
-        with patch("cld.docker.docker_task_agent_list", return_value=elsewhere):
-            assert resolve_task_agent_anchor(cfg, jj_repo.repo_root, inside) == inside
+        elsewhere = _anchors(("cld_agent_r_live", "/some/other/repo", live_anchor, "isolated"))
+        with patch("cld.docker.docker_anchor_list", return_value=elsewhere):
+            assert resolve_anchor_checked(cfg, jj_repo.repo_root, inside) == inside
 
-    def test_missing_meta_anchor_ignored(self, tmp_path, jj_repo):
+    def test_missing_anchor_label_ignored(self, tmp_path, jj_repo):
         _, _, inside = self._commits(jj_repo)
         cfg, records = self._fleet(tmp_path, jj_repo, "")
-        with patch("cld.docker.docker_task_agent_list", return_value=records):
-            assert resolve_task_agent_anchor(cfg, jj_repo.repo_root, inside) == inside
+        with patch("cld.docker.docker_anchor_list", return_value=records):
+            assert resolve_anchor_checked(cfg, jj_repo.repo_root, inside) == inside
 
     def test_no_live_agents_passes(self, tmp_path, jj_repo):
         _, _, inside = self._commits(jj_repo)
-        with patch("cld.docker.docker_task_agent_list", return_value=[]):
+        with patch("cld.docker.docker_anchor_list", return_value=[]):
             cfg = Config(mailbox_root=str(tmp_path / "mb"))
-            assert resolve_task_agent_anchor(cfg, jj_repo.repo_root, inside) == inside
+            assert resolve_anchor_checked(cfg, jj_repo.repo_root, inside) == inside
 
-    def test_stale_meta_anchor_warns_and_allows(self, tmp_path, jj_repo, caplog):
-        # A meta.json anchor no longer resolvable in the store is our own
-        # bookkeeping failing, not a real hazard -- warn, don't block.
-        # ("0" * 40 would be jj's root commit, an ancestor of everything.)
+    def test_stale_anchor_label_warns_and_allows(self, tmp_path, jj_repo, caplog):
+        # An anchor label no longer resolvable in the store is our own bookkeeping
+        # failing, not a real hazard -- warn, don't block.
         _, _, inside = self._commits(jj_repo)
         cfg, records = self._fleet(tmp_path, jj_repo, "dead" * 10)
-        with caplog.at_level("WARNING"), patch("cld.docker.docker_task_agent_list", return_value=records):
-            assert resolve_task_agent_anchor(cfg, jj_repo.repo_root, inside) == inside
-        assert "live-stack anchor check" in caplog.text
+        with caplog.at_level("WARNING"), patch("cld.docker.docker_anchor_list", return_value=records):
+            assert resolve_anchor_checked(cfg, jj_repo.repo_root, inside) == inside
+        assert "live-anchor overlap check" in caplog.text
 
     def test_git_backend_skips_check(self, tmp_path, git_repo):
         head = git_repo.resolve_revision("HEAD")
         cfg = Config(mailbox_root=str(tmp_path / "mb"))
-        with patch("cld.docker.docker_task_agent_list") as m:
-            assert resolve_task_agent_anchor(cfg, git_repo.repo_root, head) == head
+        with patch("cld.docker.docker_anchor_list") as m:
+            assert resolve_anchor_checked(cfg, git_repo.repo_root, head) == head
         m.assert_not_called()
+
+    def test_isolated_sibling_of_live_base_passes(self, tmp_path, jj_repo):
+        """Two isolated agents off the same base don't collide (default mode)."""
+        base, live_anchor, _ = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, live_anchor, anchor_mode="isolated")
+        with patch("cld.docker.docker_anchor_list", return_value=records):
+            assert resolve_anchor_checked(cfg, jj_repo.repo_root, base, "isolated") == base
+
+    def test_shared_refused_when_live_occupant_inside_tree(self, tmp_path, jj_repo):
+        """A shared anchor claiming a tree with a live occupant already inside it is refused."""
+        base, live_anchor, _ = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, live_anchor, anchor_mode="isolated")
+        with patch("cld.docker.docker_anchor_list", return_value=records):
+            with pytest.raises(RuntimeError, match="already live"):
+                resolve_anchor_checked(cfg, jj_repo.repo_root, base, "shared")
+
+    def test_shared_passes_with_no_live_occupant(self, tmp_path, jj_repo):
+        base, _, _ = self._commits(jj_repo)
+        with patch("cld.docker.docker_anchor_list", return_value=[]):
+            cfg = Config(mailbox_root=str(tmp_path / "mb"))
+            assert resolve_anchor_checked(cfg, jj_repo.repo_root, base, "shared") == base
 
 
 class TestParsePeersEnv:

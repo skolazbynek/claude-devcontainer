@@ -181,6 +181,7 @@ def print_task_agent_detail(cfg: Config, name: str) -> None:
         typer.echo(f"  Persona:    {meta.get('persona', '')}")
         typer.echo(f"  Branch:     {meta.get('deliverable_branch', '')}")
         typer.echo(f"  Anchor:     {(meta.get('anchor') or '')[:12] or '-'}")
+        typer.echo(f"  Anchor mode: {task_agent_record(cfg, name).get('anchor_mode') or '-'}")
         typer.echo(f"  Parent:     {meta.get('parent') or '<none -- launched on the host>'}")
         typer.echo(f"  Peers:      {format_peers(peers)}")
         typer.echo(f"  Created:    {meta.get('created_at', '')}")

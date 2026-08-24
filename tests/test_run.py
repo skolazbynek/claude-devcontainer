@@ -52,6 +52,7 @@ class TestLaunchAgentExtensions:
             patch("cld.run.ensure_image"),
             patch("cld.run.build_session_name", return_value=session),
             patch("cld.run.build_container_args", return_value=[]),
+            patch("cld.run.resolve_anchor_checked", return_value="cafef00d1234"),
             patch("cld.run.anchor_env_args", return_value=["-e", "AGENT_REVISION_HINT=cafef00d1234"]) as anchor,
             patch("cld.run.subprocess.run", return_value=docker_result) as mock_run,
         ):

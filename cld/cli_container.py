@@ -113,6 +113,7 @@ def _dispatch_task_agent_to_broker(cfg: Config, op: str, extra_args: list[str]) 
 def _task_agent_start_argv(
     refs: list[str], name: str, prompt: str,
     branch: str, model: str, revision: str, peer: list[str],
+    shared_anchor: bool = False,
 ) -> list[str]:
     """Rebuild `start`'s argv for the broker, which re-parses it host-side.
 
@@ -150,6 +151,8 @@ def _task_agent_start_argv(
         argv += ["-r", revision]
     for spec in peer:
         argv += ["--peer", spec]
+    if shared_anchor:
+        argv += ["--shared-anchor"]
     return argv
 
 
@@ -170,12 +173,17 @@ def task_agent_start(
     model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
     revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change)"),
     peer: list[str] = typer.Option([], "--peer", help="A peer this agent may message: <container-name>[:<hops>]. Repeatable."),
+    shared_anchor: bool = typer.Option(
+        False, "--shared-anchor",
+        help="Anchor directly on -r, sharing reach with its existing descendants "
+        "(needs explicit human approval; default is an isolated sibling)",
+    ),
 ):
     """Spawn a task-scoped agent. Every start creates a new container (no start-or-attach)."""
     cfg = Config.from_env()
     setup_logging(cfg)
     _dispatch_task_agent_to_broker(cfg, "start", _task_agent_start_argv(
-        refs or [], name, prompt, branch, model, revision, peer,
+        refs or [], name, prompt, branch, model, revision, peer, shared_anchor,
     ))
 
 
@@ -257,6 +265,11 @@ def agent(
     ctx: typer.Context,
     model: str = typer.Option("", "-m", "--model", help="Claude model (first launch only)"),
     revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (first launch only)"),
+    shared_anchor: bool = typer.Option(
+        False, "--shared-anchor",
+        help="Anchor directly on -r, sharing reach with its existing descendants "
+        "(needs explicit human approval; default is an isolated sibling; first launch only)",
+    ),
 ):
     """Start the persistent repo agent for the cwd-selected repo. Idempotent per repo."""
     if ctx.invoked_subcommand is not None:
@@ -268,6 +281,8 @@ def agent(
         extra += ["-m", model]
     if revision:
         extra += ["-r", revision]
+    if shared_anchor:
+        extra += ["--shared-anchor"]
     _dispatch_agent_to_broker(cfg, "start", extra)
 
 
