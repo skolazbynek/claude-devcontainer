@@ -635,6 +635,7 @@ def build_container_args(
     # own throwaway session, same trust level as a `cld master` shell.
     if master or agent or task_agent or bare_devcontainer:
         args += stage_broker(cfg)
+        args += stage_otel(cfg, session_name)
 
     # Mailbox tree -- shared RW mount so every master, agent, task-agent and
     # bare devcontainer container sees the same mailbox filesystem. The bare
@@ -1055,6 +1056,30 @@ def stage_broker(cfg: Config) -> list[str]:
         )
     log.info("Host test broker wired: key -> %s, endpoint %s", _BROKER_KEY_MOUNT, cfg.broker_endpoint)
     return args
+
+
+def stage_otel(cfg: Config, session_name: str) -> list[str]:
+    """Return docker args pointing Claude Code's own OTEL export at a host collector.
+
+    Adds a host-gateway alias (same mechanism as ``stage_broker``) and sets
+    the standard ``OTEL_*`` env vars Claude Code reads natively -- no cld-side
+    daemon or receiver involved, just Claude Code talking OTLP/http to
+    whatever collector is listening at ``cfg.otel_endpoint``. The collector is
+    a plain, cld-independent OpenTelemetry Collector; see otel/README.md.
+    Session attribution uses the standard ``service.name`` resource attribute
+    (not a cld-specific one), so the collector and any aggregation on top of
+    it stay usable outside this repo. No-op unless ``cfg.otel_endpoint`` is set.
+    """
+    if not cfg.otel_endpoint:
+        return []
+    return [
+        "--add-host", "host.docker.internal:host-gateway",
+        "-e", "CLAUDE_CODE_ENABLE_TELEMETRY=1",
+        "-e", "OTEL_METRICS_EXPORTER=otlp",
+        "-e", "OTEL_EXPORTER_OTLP_PROTOCOL=http/json",
+        "-e", f"OTEL_EXPORTER_OTLP_ENDPOINT=http://{cfg.otel_endpoint}",
+        "-e", f"OTEL_RESOURCE_ATTRIBUTES=service.name={session_name}",
+    ]
 
 
 def stage_home_ro(rel_path: str, cfg: Config) -> list[str]:

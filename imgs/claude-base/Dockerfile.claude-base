@@ -66,7 +66,7 @@ RUN curl -sSL https://install.python-poetry.org | POETRY_HOME=~/.opt/poetry pyth
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="$HOME/.local/bin" sh
 
 # Install cld runtime dependencies (keep in sync with pyproject.toml).
-RUN pip install --user "mcp[cli]>=1.0" "typer>=0.9" "pyyaml>=6.0,<7.0"
+RUN pip install --user "mcp[cli]>=1.0,<2.0" "typer>=0.9" "pyyaml>=6.0,<7.0"
 
 # Install Claude (installs to user directory)
 RUN curl -fsSL https://claude.ai/install.sh | bash

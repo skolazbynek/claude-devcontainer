@@ -68,6 +68,7 @@ _TOML_KEYS = {
     "broker_key",
     "broker_endpoint",
     "broker_known_hosts",
+    "otel_endpoint",
     "mattermost_url",
     "mattermost_token_file",
     "mattermost_channel_id",
@@ -266,6 +267,13 @@ class Config:
     broker_endpoint: str = "host.docker.internal:2222"
     broker_known_hosts: str = ""
 
+    # Host-side OpenTelemetry collector (see otel/): if set, master/agent/
+    # task-agent containers and the bare devcontainer point Claude Code's
+    # own OTEL metrics export at it, tagged with this session's name as the
+    # standard `service.name` resource attribute. Empty = off. The collector
+    # itself is a plain, cld-independent OTel Collector -- see otel/README.md.
+    otel_endpoint: str = ""
+
     # Mattermost bridge (host-only; docs/impl-mattermost-bridge-plan.md).
     # mattermost_url empty = the bridge is not configured. The token is given as a
     # file path, never a value: it must not sit in a TOML file or an env var, and
@@ -334,6 +342,7 @@ class Config:
             broker_key=_env_str("CLD_BROKER_KEY", layered.get("broker_key", "")),
             broker_endpoint=_env_str("CLD_BROKER_ENDPOINT", layered.get("broker_endpoint", "host.docker.internal:2222")),
             broker_known_hosts=_env_str("CLD_BROKER_KNOWN_HOSTS", layered.get("broker_known_hosts", "")),
+            otel_endpoint=_env_str("CLD_OTEL_ENDPOINT", layered.get("otel_endpoint", "")),
             mattermost_url=_env_str("CLD_MATTERMOST_URL", layered.get("mattermost_url", "")),
             mattermost_token_file=_env_str("CLD_MATTERMOST_TOKEN_FILE", layered.get("mattermost_token_file", "")),
             mattermost_channel_id=_env_str("CLD_MATTERMOST_CHANNEL_ID", layered.get("mattermost_channel_id", "")),

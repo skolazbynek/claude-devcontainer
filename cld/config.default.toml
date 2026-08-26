@@ -69,3 +69,10 @@ home_mounts_devcontainer = [
 # broker_key = "~/.cld/broker/broker_key"
 # broker_endpoint = "host.docker.internal:2222"   # [user@]host:port
 # broker_known_hosts = "~/.cld/broker/known_hosts"
+
+# Host-side OpenTelemetry collector (see otel/README.md). Set otel_endpoint to
+# point master/agent/task-agent containers and the bare devcontainer at it --
+# Claude Code's own OTEL export is used as-is, tagged with the session name as
+# a standard `service.name` resource attribute. The collector itself is a
+# plain, cld-independent OTel Collector, not cld infrastructure. Off until set.
+# otel_endpoint = "host.docker.internal:4318"
