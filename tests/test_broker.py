@@ -137,6 +137,29 @@ class TestBrokerAgentOp:
             assert broker.broker_agent_op("/repo/y", "shutdown") == 1
 
 
+class TestGraphqlOp:
+    def test_forwards_op_and_args_capturing_by_default(self, configured):
+        with patch("cld.broker.subprocess.run", return_value=_cp(returncode=0, stdout="ok")) as run:
+            result = broker.graphql_op("status")
+        assert result.stdout == "ok"
+        assert run.call_args[0][0][-1].startswith("graphql cld_master_cld_ab12 ")
+        assert _argv_of(run) == ["status"]
+        assert run.call_args.kwargs["capture_output"] is True
+
+    def test_query_string_with_spaces_quotes_and_semicolon_is_one_argv_element(self, configured):
+        """Mirrors test_argv_never_becomes_a_command: a query string is one opaque argument."""
+        weird = 'query { user(id: "1; rm -rf /") { name } }'
+        with patch("cld.broker.subprocess.run", return_value=_cp()) as run:
+            broker.graphql_op("query", "local", weird, "{}")
+        assert _argv_of(run) == ["query", "local", weird, "{}"]
+        assert "rm -rf" not in " ".join(run.call_args[0][0][:-1])
+
+    def test_capture_can_be_disabled(self, configured):
+        with patch("cld.broker.subprocess.run", return_value=_cp()) as run:
+            broker.graphql_op("start", capture=False)
+        assert run.call_args.kwargs["capture_output"] is False
+
+
 class TestBrokerTaskAgentOp:
     def test_uses_its_own_action_and_forwards_argv(self, configured):
         """A separate action from `agent`: different op set, and its own argv rules."""

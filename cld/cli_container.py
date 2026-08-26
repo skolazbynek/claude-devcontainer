@@ -329,7 +329,7 @@ app.add_typer(msg_app, name="msg")
 @_handle_errors
 def broker(
     ctx: typer.Context,
-    action: str = typer.Argument(..., help="Broker action: run-tests, list-containers, agent, task-agent"),
+    action: str = typer.Argument(..., help="Broker action: run-tests, list-containers, agent, task-agent, graphql"),
 ):
     """Run a host-side action through the cld broker (docs/design-cld-broker.md).
 

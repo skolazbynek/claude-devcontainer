@@ -1,229 +1,106 @@
-"""MCP server for GraphQL API testing -- server lifecycle + client queries."""
+"""MCP server for GraphQL API testing -- server lifecycle + client queries.
+
+Lifecycle and queries are delegated to the host broker's `graphql` action
+(docs/impl-graphql-broker-plan.md): the broker runs the server from the real
+repo checkout, at the calling container's revision, with the real repo
+secrets -- the server and its credentials never live in this container. This
+module is a thin client over `cld.broker.graphql_op`.
+"""
 
 import json
-import os
 import re
-import signal
-import subprocess
-import time
-from collections import deque
-from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
-from threading import Thread
-from typing import AsyncIterator
-from urllib.error import URLError
-from urllib.request import Request, urlopen
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
+from cld.broker import graphql_op
+from cld.config import Config
+from cld.log import get_logger, setup_logging
 
-@dataclass
-class ServerState:
-    proc: subprocess.Popen | None = None
-    port: int | None = None
-    env: dict[str, str] = field(default_factory=dict)
-    command: str = ""
-    workdir: str = ""
-    log_buffer: deque[str] = field(default_factory=lambda: deque(maxlen=500))
-    cached_schema: dict | None = None
+log = get_logger(__name__)
 
-    @property
-    def running(self) -> bool:
-        return self.proc is not None and self.proc.poll() is None
+mcp = FastMCP("graphql-tester")
 
-    @property
-    def endpoint(self) -> str | None:
-        if self.running:
-            return f"http://localhost:{self.port}/graphql"
-        return None
-
-    def kill(self) -> None:
-        if self.running:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-        self.proc = None
-        self.port = None
+# Last introspected schema, module-level rather than per-request lifespan
+# state (there's no subprocess to hold onto anymore) so a test can
+# monkeypatch it the way tests/test_messenger_mcp.py patches _mailbox_root.
+_cached_schema: dict | None = None
 
 
-def _log_reader(state: ServerState) -> None:
-    assert state.proc and state.proc.stdout
-    for line in state.proc.stdout:
-        state.log_buffer.append(line.rstrip("\n"))
+def _get_cached_schema() -> dict | None:
+    return _cached_schema
 
 
-def _health_check(port: int, path: str = "/graphql", timeout: float = 30.0) -> bool:
-    deadline = time.monotonic() + timeout
-    endpoint = f"http://localhost:{port}{path}"
-    while time.monotonic() < deadline:
-        try:
-            result = _gql_request(endpoint, "query { hello }")
-            if "errors" not in result:
-                return True
-        except Exception:
-            time.sleep(0.3)
-    return False
+def _set_cached_schema(schema: dict) -> None:
+    global _cached_schema
+    _cached_schema = schema
 
 
-def _resolve_endpoint(state: ServerState, endpoint: str) -> str | None:
-    return endpoint if endpoint else state.endpoint
+def _run(op: str, *args: str) -> str:
+    """Run a `graphql` broker op, returning its captured stdout or raising ToolError."""
+    result = graphql_op(op, *args)
+    if result.returncode != 0:
+        raise ToolError(f"graphql {op} failed: {(result.stderr or '').strip()}")
+    return result.stdout
 
 
-def _gql_request(endpoint: str, query: str, variables: dict | None = None) -> dict:
-    body = json.dumps({"query": query, "variables": variables or {}}).encode()
-    req = Request(
-        endpoint,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read())
-
-
-def _get_state(ctx: Context) -> ServerState:
-    return ctx.request_context.lifespan_context
-
-
-async def _start_server(ctx: Context, state: ServerState, command: str, port: int, workdir: str, env: dict[str, str] | None, health_path: str, health_timeout: float) -> dict:
-    if state.running:
-        raise ToolError(f"Server already running on port {state.port} (PID {state.proc.pid})")
-
-    state.command = command
-    state.workdir = workdir
-
-    merged_env = {**os.environ, **state.env}
-    if env:
-        merged_env.update(env)
-
-    state.log_buffer.clear()
-
-    state.proc = subprocess.Popen(
-        command,
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        cwd=workdir,
-        env=merged_env,
-        preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN),
-    )
-    state.port = port
-
-    Thread(target=_log_reader, args=(state,), daemon=True).start()
-
-    await ctx.info(f"Waiting for server on port {port}...")
-
-    if _health_check(port, health_path, health_timeout):
-        await ctx.info(f"Server healthy (PID {state.proc.pid})")
-        return {
-            "status": "running",
-            "pid": state.proc.pid,
-            "port": port,
-            "endpoint": f"http://localhost:{port}{health_path}",
-        }
-
-    returncode = state.proc.poll()
-    logs = list(state.log_buffer)[-20:]
-    state.kill()
-    raise ToolError(f"Server did not become healthy within {health_timeout}s (exit_code={returncode})\n" + "\n".join(logs[-20:]))
-
-
-@asynccontextmanager
-async def app_lifespan(server: FastMCP) -> AsyncIterator[ServerState]:
-    state = ServerState()
-    try:
-        yield state
-    finally:
-        state.kill()
-
-
-mcp = FastMCP("graphql-tester", lifespan=app_lifespan)
+def _parse_status_line(line: str) -> dict:
+    """Parse a `graphql status`-shaped tab-separated line: state, port, endpoint, revision, container."""
+    parts = (line or "").rstrip("\n").split("\t")
+    parts += [""] * (5 - len(parts))
+    status, port, endpoint, revision, container = parts[:5]
+    return {
+        "status": status or "unknown",
+        "port": int(port) if port.isdigit() else None,
+        "endpoint": endpoint or None,
+        "revision": revision or None,
+        "container": container or None,
+    }
 
 
 # --- Lifecycle tools ---
 
 
 @mcp.tool()
-async def start_server(
-    ctx: Context,
-    command: str = "poetry run python manage.py",
-    workdir: str = ".",
-    env: dict[str, str] | None = None,
-    health_path: str = "/graphql",
-    health_timeout: float = 15.0,
-) -> dict:
-    """Start a local GraphQL server as a subprocess.
+def start_server() -> dict:
+    """Start the GraphQL server for this session's repo, at its current revision.
 
-    command: shell command to start the server (default: strawberry server).
-    workdir: working directory for the server process.
-    env: extra environment variables (merged with current env and set_env overrides).
-    health_path: path to poll for health check (default: /graphql).
-    health_timeout: seconds to wait for the server to become healthy.
+    Runs on the host broker from the real repo checkout with the real .env
+    secrets. Idempotent -- calling this while a server is already running just
+    returns its current status. The repo must set `graphql_command` in its
+    `.cld/config.toml` (see docs/graphql-mcp.md); this is a slow path, every
+    start/restart pays a fresh `poetry install`.
     """
-    return await _start_server(ctx, _get_state(ctx), command, 5000, workdir, env, health_path, health_timeout)
+    return _parse_status_line(_run("start"))
 
 
 @mcp.tool()
-def stop_server(ctx: Context) -> dict:
-    """Stop the running local GraphQL server."""
-    state = _get_state(ctx)
-    if not state.running:
-        return {"status": "not_running"}
-    pid = state.proc.pid
-    state.kill()
-    return {"status": "stopped", "pid": pid}
+def stop_server() -> dict:
+    """Stop this session's GraphQL server, if one is running."""
+    return {"status": _run("stop").strip() or "stopped"}
 
 
 @mcp.tool()
-async def restart_server(ctx: Context) -> dict:
-    """Restart the local server with current env/config. Uses the same command and workdir from the last start."""
-    state = _get_state(ctx)
-    if not state.command:
-        raise ToolError("No previous server configuration. Use start_server first.")
-    port = state.port or 8000
-    workdir = state.workdir or "."
-    state.kill()
-    time.sleep(0.5)
-    return await _start_server(ctx, state, state.command, port, workdir, None, "/graphql", 15.0)
+def restart_server() -> dict:
+    """Restart this session's GraphQL server -- use this after editing code or config it serves."""
+    return _parse_status_line(_run("restart"))
 
 
 @mcp.tool()
-def server_status(ctx: Context) -> dict:
-    """Check if the local GraphQL server is running."""
-    state = _get_state(ctx)
-    if not state.proc:
-        return {"status": "not_started"}
-    if not state.running:
-        return {"status": "exited", "exit_code": state.proc.returncode}
-    return {
-        "status": "running",
-        "pid": state.proc.pid,
-        "port": state.port,
-        "endpoint": state.endpoint,
-    }
+def server_status() -> dict:
+    """Check this session's GraphQL server: not_started / starting / running / exited."""
+    return _parse_status_line(_run("status"))
 
 
 @mcp.tool()
-def set_env(ctx: Context, key: str, value: str) -> dict:
-    """Set an environment variable for the server. Takes effect on next start/restart."""
-    state = _get_state(ctx)
-    state.env[key] = value
-    return {"env": dict(state.env)}
-
-
-@mcp.tool()
-def get_server_logs(ctx: Context, tail: int = 50, filter_pattern: str = "") -> list[str]:
+def get_server_logs(tail: int = 50, filter_pattern: str = "") -> list[str]:
     """Get recent server log lines.
 
     tail: number of lines to return (default 50).
-    filter_pattern: optional regex to filter lines.
+    filter_pattern: optional regex to filter lines, applied client-side to the
+    lines the broker returns.
     """
-    state = _get_state(ctx)
-    lines = list(state.log_buffer)
+    lines = _run("logs", str(tail)).splitlines()
     if filter_pattern:
         try:
             pat = re.compile(filter_pattern, re.IGNORECASE)
@@ -231,6 +108,16 @@ def get_server_logs(ctx: Context, tail: int = 50, filter_pattern: str = "") -> l
         except re.error as e:
             return [f"Invalid regex: {e}"]
     return lines[-tail:]
+
+
+@mcp.tool()
+def list_endpoints() -> list[str]:
+    """List configured GraphQL aliases (set in the repo's .env as CLD_GRAPHQL_URL_<ALIAS>).
+
+    Use an alias as `target` in `query`/`introspect` to reach it with its
+    attached credentials, without this container ever holding them.
+    """
+    return [line for line in _run("endpoints").splitlines() if line]
 
 
 # --- Client tools ---
@@ -263,12 +150,12 @@ _INTROSPECTION_QUERY = """
 
 
 @mcp.resource("graphql://schema")
-def schema_resource(ctx: Context) -> str:
+def schema_resource() -> str:
     """Cached GraphQL schema from last introspection."""
-    state = _get_state(ctx)
-    if not state.cached_schema:
+    schema = _get_cached_schema()
+    if not schema:
         return "No schema cached. Call the introspect tool first."
-    return json.dumps(state.cached_schema, indent=2)
+    return json.dumps(schema, indent=2)
 
 
 def _format_type_ref(t: dict | None) -> str:
@@ -307,63 +194,60 @@ def _summarize_schema(raw: dict) -> dict:
 
 
 @mcp.tool()
-async def introspect(ctx: Context, endpoint: str = "") -> dict:
+def introspect(target: str = "local") -> dict:
     """Fetch the GraphQL schema and return a compact summary (type names, field signatures).
 
     Full schema is cached -- use describe_type to get details on a specific type.
-    endpoint: GraphQL endpoint URL. Defaults to the local running server.
+    target: "local" (this session's own server, the default), an alias
+    configured in the repo's .env (CLD_GRAPHQL_URL_<ALIAS>, credentialed by
+    the broker), or a raw http(s):// URL (only reachable if allowlisted in
+    broker.conf; no credentials are attached to a raw URL).
     """
-    state = _get_state(ctx)
-    resolved = _resolve_endpoint(state, endpoint)
-    if not resolved:
-        raise ToolError("No endpoint specified and no local server running")
-
+    out = _run("introspect", target)
     try:
-        result = _gql_request(resolved, _INTROSPECTION_QUERY)
-    except Exception as e:
-        raise ToolError(f"Introspection failed ({resolved}): {e}")
-
-    state.cached_schema = result
-    await ctx.info("Full schema cached. Use describe_type for details on a specific type.")
+        result = json.loads(out)
+    except json.JSONDecodeError as e:
+        raise ToolError(f"introspection response was not valid JSON: {e}")
+    _set_cached_schema(result)
     return _summarize_schema(result)
 
 
 @mcp.tool()
-def describe_type(ctx: Context, type_name: str) -> dict:
+def describe_type(type_name: str) -> dict:
     """Return full details for a specific type from the cached schema.
 
     type_name: exact name of the type (e.g. "User", "CreateUserInput").
     Requires a prior introspect call.
     """
-    state = _get_state(ctx)
-    if not state.cached_schema:
+    schema = _get_cached_schema()
+    if not schema:
         raise ToolError("No cached schema. Call introspect first.")
-
-    schema = state.cached_schema.get("data", state.cached_schema).get("__schema", {})
-    for t in schema.get("types", []):
+    root = schema.get("data", schema).get("__schema", {})
+    for t in root.get("types", []):
         if t["name"] == type_name:
             return t
     raise ToolError(f"Type '{type_name}' not found in cached schema")
 
 
 @mcp.tool()
-def query(ctx: Context, query: str, variables: dict | None = None, endpoint: str = "") -> dict:
+def query(query: str, variables: dict | None = None, target: str = "local") -> dict:
     """Execute a GraphQL query or mutation.
 
     query: the GraphQL query/mutation string.
     variables: optional variables dict.
-    endpoint: GraphQL endpoint URL. Defaults to the local running server.
-              Can point to any external instance (e.g. dev, staging).
+    target: "local" (this session's own server, the default), an alias
+    configured in the repo's .env (CLD_GRAPHQL_URL_<ALIAS>, credentialed by
+    the broker), or a raw http(s):// URL (only reachable if allowlisted in
+    broker.conf; no credentials are attached to a raw URL).
     """
-    resolved = _resolve_endpoint(_get_state(ctx), endpoint)
-    if not resolved:
-        raise ToolError("No endpoint specified and no local server running")
-
+    out = _run("query", target, query, json.dumps(variables or {}))
     try:
-        return _gql_request(resolved, query, variables)
-    except Exception as e:
-        raise ToolError(f"Query failed ({resolved}): {e}")
+        return json.loads(out)
+    except json.JSONDecodeError as e:
+        raise ToolError(f"query response was not valid JSON: {e}")
 
 
 if __name__ == "__main__":
+    setup_logging(Config.from_env(), force_stderr=True)
+    log.info("graphql-tester MCP server starting")
     mcp.run()

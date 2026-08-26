@@ -179,9 +179,15 @@ _SECRET_KV_RE = re.compile(
     r"(?i)(TOKEN|KEY|SECRET|PASSWORD)=[^\s,'\"]+"
 )
 _SECRET_PATH_RE = re.compile(r"/run/secrets/[\w./-]+")
+# scheme://user:password@host -- e.g. a DSN a graphql server's error body
+# echoes back. Deliberately duplicated in broker/cld-broker.sh's own
+# mask_output(): the broker cannot depend on `cld` being importable by the
+# host's python3, so the same pattern is kept in both places on purpose.
+_SECRET_URL_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]*@")
 
 
 def mask_secrets(s: str) -> str:
     s = _SECRET_KV_RE.sub(r"\1=<redacted>", s)
     s = _SECRET_PATH_RE.sub("/run/secrets/<redacted>", s)
+    s = _SECRET_URL_RE.sub(r"\1<redacted>@", s)
     return s

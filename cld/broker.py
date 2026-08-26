@@ -172,6 +172,21 @@ def broker_agent_op(target: str, op: str, extra_args: list[str] | None = None) -
     return run_action("agent", target, op, *(extra_args or [])).returncode
 
 
+def graphql_op(op: str, *args: str, capture: bool = True) -> subprocess.CompletedProcess:
+    """Delegate a `graphql <op>` to the host broker.
+
+    Backs every tool in cld/mcp/graphql.py: the broker owns the server's
+    lifecycle and attaches credentials to queries the container never sees
+    (docs/impl-graphql-broker-plan.md). *op* is one of
+    start/stop/restart/status/logs/query/introspect/endpoints. Defaults to
+    ``capture=True`` (unlike ``broker_agent_op``/``broker_task_agent_op``,
+    which stream to the user) because every caller here is an MCP tool that
+    needs the broker's stdout back as a return value, not a human watching a
+    terminal.
+    """
+    return run_action("graphql", op, *args, capture=capture)
+
+
 def broker_task_agent_op(target: str, op: str, extra_args: list[str] | None = None) -> int:
     """Delegate a `cld task-agent <op>` for *target* to the host broker.
 
