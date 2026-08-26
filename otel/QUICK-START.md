@@ -1,0 +1,40 @@
+# Quick start
+
+1. **Start it** (needs Docker) -- one script runs both the collector and the
+   background aggregator:
+
+   ```
+   ./otelctl.sh start
+   ```
+
+   Collector listens on `127.0.0.1:4318`, writes raw metrics to
+   `~/.cld/otel/data/raw-metrics.jsonl`; the aggregator tails that into
+   `~/.cld/otel/stats/<service.name>.json` per session as data arrives.
+
+   Check with `./otelctl.sh status` / `logs`, stop with `./otelctl.sh stop`.
+
+2. **Point a Claude Code session at it.** For cld, set in config:
+
+   ```
+   otel_endpoint = "host.docker.internal:4318"
+   ```
+
+   and relaunch a `master`/`agent`/`task-agent`/devcontainer session -- it's wired in automatically.
+
+   For any other Claude Code session (no cld involved):
+
+   ```
+   export CLAUDE_CODE_ENABLE_TELEMETRY=1
+   export OTEL_METRICS_EXPORTER=otlp
+   export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+   export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+   export OTEL_RESOURCE_ATTRIBUTES=service.name=my-session
+   ```
+
+3. **Check the numbers**:
+
+   ```
+   cat ~/.cld/otel/stats/my-session.json
+   ```
+
+See `README.md` for the full picture (data flow, output schema, caveats).

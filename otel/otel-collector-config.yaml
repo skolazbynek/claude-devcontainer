@@ -1,0 +1,29 @@
+# Standalone OpenTelemetry Collector config for capturing Claude Code
+# telemetry (https://code.claude.com/docs/en/monitoring-usage.md) from any
+# client that points OTEL_EXPORTER_OTLP_ENDPOINT here. Nothing in this file
+# depends on cld -- it's an ordinary internal OTel collector any Claude Code
+# user on the team can point at, cld or not. See ./README.md to run it.
+#
+# Requires the *contrib* distribution (the file exporter isn't in the core
+# otel/opentelemetry-collector image): otel/opentelemetry-collector-contrib.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  # Raw OTLP-JSON metric export stream, one JSON object per export batch --
+  # aggregate.py in this directory tails it into per-session stats. See
+  # https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/exporter/fileexporter
+  # for the full option set (rotation, compression, ...) if you want more.
+  file:
+    path: /data/raw-metrics.jsonl
+    format: json
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      exporters: [file]
