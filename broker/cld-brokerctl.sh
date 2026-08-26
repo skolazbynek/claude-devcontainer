@@ -2,7 +2,7 @@
 # cld-brokerctl -- operate the cld host broker sshd. First-time setup is manual
 # (see ../broker-setup-home.md); day-to-day this is all you need:
 #
-#     cld-brokerctl start | restart | shutdown | status | logs [N]
+#     cld-brokerctl start | restart | shutdown | status | logs [N] | graphql-sweep
 #
 # Everything lives under $CLD_BROKER_DIR (default ~/.cld/broker): the sshd config,
 # its PID file, and its log. No sshd flags to remember.
@@ -46,6 +46,24 @@ shutdown() {
 
 restart() { shutdown; sleep 0.3; start; }
 
+# Duplicates cld-broker.sh's sweep_gql_orphans() rather than sourcing that
+# file: cld-broker.sh's own tail unconditionally dispatches on $SSH_ORIGINAL_COMMAND
+# once sourced, which would run (or fail oddly) here. Reaps any `graphql`
+# broker-action server whose owning session container is gone -- useful after
+# a host reboot, without needing to start any session first. Cross-reference:
+# broker/cld-broker.sh:sweep_gql_orphans.
+graphql-sweep() {
+    local c s r
+    for c in $(docker ps -a --filter label=org.cld.gql-session --format '{{.Names}}'); do
+        s=$(docker inspect "$c" --format '{{index .Config.Labels "org.cld.gql-session"}}' 2>/dev/null) || continue
+        docker inspect "$s" >/dev/null 2>&1 && continue   # owning session alive -- keep
+        r=$(docker inspect "$c" --format '{{index .Config.Labels "org.cld.gql-repo"}}' 2>/dev/null) || true
+        echo "reaping orphaned graphql server $c (session $s gone)"
+        docker rm -f "$c" >/dev/null 2>&1 || true
+        [ -n "$r" ] && jj -R "$r" --ignore-working-copy workspace forget "gql-$s" >/dev/null 2>&1 || true
+    done
+}
+
 status() {
     local pid
     if pid=$(running); then
@@ -62,5 +80,6 @@ case "${1:-}" in
     shutdown|stop)    shutdown ;;
     status)           status ;;
     logs)             tail -n "${2:-40}" "$LOG" 2>/dev/null || echo "no log at $LOG" ;;
-    *) echo "usage: cld-brokerctl {start|restart|shutdown|status|logs [N]}" >&2; exit 2 ;;
+    graphql-sweep)    graphql-sweep ;;
+    *) echo "usage: cld-brokerctl {start|restart|shutdown|status|logs [N]|graphql-sweep}" >&2; exit 2 ;;
 esac

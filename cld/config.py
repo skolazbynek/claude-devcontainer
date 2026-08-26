@@ -82,6 +82,13 @@ _TOML_KEYS = {
     # is read directly out of .cld/config.toml by cld-broker.sh's own parser
     # (PROJECT_SUBDIR for the cld broker / runtests container).
     "pyproject_dir",
+    # Same story as pyproject_dir above, but for the `graphql` broker action's
+    # server lifecycle (cld-broker.sh's resolve_graphql_config): the shell
+    # command that starts the server, the port it binds inside its container,
+    # and the HTTP path the readiness probe/queries hit.
+    "graphql_command",
+    "graphql_port",
+    "graphql_health_path",
 }
 
 
