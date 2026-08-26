@@ -8,9 +8,22 @@
 
 RUNTESTS_IMAGE=runtests:latest
 
-# The forced command runs with a minimal PATH; make jj, docker, and cld (the
-# `agent` action runs host-side `cld agent`) -- plus any other tools your
-# actions call -- reachable:
+# graphql action (docs/impl-graphql-broker-plan.md). GRAPHQL_IMAGE is the
+# server image (../graphqlserver/); GRAPHQL_BIND defaults to the docker
+# bridge gateway if unset -- same reasoning as sshd's own bridge-only bind,
+# see sshd_cld_broker.conf. GRAPHQL_URL_ALLOWLIST is deliberately commented
+# out below: empty/unset means no raw http(s):// query targets are allowed at
+# all, only "local" and repo-configured aliases -- list hostnames here to
+# permit specific ones (space-separated, exact match, no wildcards).
+# GRAPHQL_IMAGE=graphqlserver:latest
+# GRAPHQL_BIND=172.17.0.1
+# GRAPHQL_URL_ALLOWLIST=dev.example.internal staging.example.internal
+# GRAPHQL_START_TIMEOUT=300
+
+# The forced command runs with a minimal PATH; make jj, docker, cld (the
+# `agent` action runs host-side `cld agent`), curl (the `graphql` action's
+# readiness probe and queries), and jq/python3 if your `graphql_command`
+# needs them -- plus any other tools your actions call -- reachable:
 # PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 # Your ssh-agent socket, forwarded into the agents and task-agents the broker

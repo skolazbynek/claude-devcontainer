@@ -422,3 +422,67 @@ those contexts, accepted on the same single-user-host basis as the rest of §9's
 security model (a leaked key already unlocked the broker's actions for any repo
 with a running master; it now does the same for any repo with a running master,
 agent, or task-agent).
+
+## 16. Amendment (2026-08-26): the graphql action
+
+Adds `graphql`, a broker action running a project's GraphQL server on the host
+and executing credentialed queries against it — see
+`docs/impl-graphql-broker-plan.md` for the full design and
+`docs/graphql-mcp.md` for the container-side interface. Before this, the
+`graphql-tester` MCP ran the server as a subprocess *inside* the calling
+container, meaning the container held the server's environment directly,
+including any DB/API credentials in it. That is no longer true: the server
+now runs from the real repo checkout, on the exact jj revision the calling
+container is on, in its own `graphqlserver` container on the host, sourcing
+the repo's real `.env`.
+
+**Rulings made for this feature (settled, not reopened by future work
+without a fresh discussion):**
+
+- **Revision resolution: `${session}@`, not the bookmark.** The workspace
+  *tip* (uncommitted working-copy state), not whatever the session's bookmark
+  currently points to — the same fix this amendment's revision-semantics
+  change applies everywhere else the broker resolves "what the caller is
+  looking at" (`resolve_test_context`, `resolve_graphql_context`). Before,
+  `-r "$session"` resolved the bookmark, which can trail an in-progress edit
+  by an arbitrary number of commits; a caller testing an uncommitted change
+  got tested (or served) something else. Blast radius of getting this wrong:
+  every broker action that resolves a revision silently serves stale code
+  with no error, the single easiest way for this feature to look like it
+  works while actually testing the wrong thing.
+- **Slow path only.** Every `start`/`restart` pays a fresh `docker run` +
+  `poetry install` — no fast-restart path (e.g. reusing a warm container and
+  just re-checking-out the revision) is built. Simplicity over server startup
+  latency; revisit only if the slow path proves actually disruptive in
+  practice, not preemptively.
+- **`set_env` is deleted entirely**, not merely broker-routed. The old MCP's
+  `set_env` let a container inject an environment variable into the server
+  process; now that the server holds real secrets, that would be a container
+  → host credential-adjacent channel with no legitimate use the repo's own
+  `.env` doesn't already cover.
+- **The role gate is prompt-based only**, exactly like `run-tests` (§15) —
+  never mechanical. The broker cannot distinguish an agent invoking `cld
+  broker graphql start` on its own initiative from one relaying an explicit
+  instruction from its master; the constraint lives in persona/skill text
+  (`prompts/personas/agent.md`, `prompts/personas/task-agent.md`, the
+  `broker-run-tests` skill), not in `cld-broker.sh`, sshd, or
+  `build_container_args`.
+- **Queries go through the broker; raw URLs need an allowlist.** `query`/
+  `introspect` accept `"local"` (this session's own server), an alias
+  configured in the repo's `.env` (`CLD_GRAPHQL_URL_<ALIAS>` +
+  `CLD_GRAPHQL_AUTH_<ALIAS>`/`CLD_GRAPHQL_COOKIE_<ALIAS>`, credentials
+  attached host-side, never visible to the container), or a raw `http(s)://`
+  URL. A raw URL gets no credentials and is denied unless its hostname is in
+  the operator's `GRAPHQL_URL_ALLOWLIST` (`broker/broker.conf.sample`) —
+  otherwise a container gains the host as an unrestricted SSRF pivot to
+  reach internal services it cannot itself route to. Default (unset/empty)
+  is no raw URLs at all.
+
+**What did not change:** `graphql` reuses the same session-resolution,
+label-based repo-scoping, and base64(NUL-joined)-argv-never-`eval`'d
+machinery as every other action (§9); it adds no new trust boundary beyond
+what §15 already established for agent/task-agent broker access. Output
+(logs, query responses) is masked (`mask_output`, mirroring
+`cld/log.py:mask_secrets`) and byte-capped host-side before it reaches the
+container, the same principle §6/§9 already apply elsewhere — by the time
+output reaches the container, masking it there is too late.

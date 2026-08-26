@@ -5,10 +5,12 @@ container trigger a fixed set of host-side actions -- run the target repo's
 tests, enumerate cld containers, launch/manage sibling agents -- without ever
 seeing the secrets. `agent`/`task-agent` launcher actions stay effectively
 master-only regardless (they gate on a label only master carries -- see
-`../docs/design-cld-broker.md` §15); `run-tests` and `list-containers` are the
-two actions all three roles can actually reach. Agents and task-agents are
-instructed (persona prompts, not enforced here) to only run `run-tests` with
-their master's explicit per-invocation authorization.
+`../docs/design-cld-broker.md` §15); `run-tests`, `list-containers`, and
+`graphql` are the actions all three roles can actually reach -- `graphql`'s
+role gate, like `run-tests`', is prompt-based only (persona/skill text), not
+mechanical (see `../docs/design-cld-broker.md` §16). Agents and task-agents
+are instructed (persona prompts, not enforced here) to only run `run-tests`
+or `graphql` with their master's explicit per-invocation authorization.
 
 A container asks over SSH; a dedicated, single-purpose `sshd` answers with a
 forced command (`cld-broker.sh`). It serves **any repo that has a running
@@ -25,7 +27,7 @@ container: cld broker run-tests -k login -x tests/
    └─ssh (restricted key)─▶ dedicated sshd ─ForceCommand▶ cld-broker.sh
         ├─ validate: action=run-tests, session=cld_master_… or cld_agent_…
         ├─ REPO = docker inspect <session> -> org.cld.repo-root label
-        ├─ REV  = jj -R <repo> log -r <session>     (store-reading only)
+        ├─ REV  = jj -R <repo> --ignore-working-copy log -r "<session>@"   (workspace tip, store-reading only)
         ├─ .env = <repo>/.env  (or under pyproject_dir from <repo>/.cld/config.toml)
         └─ docker run --rm runtests -e REVISION=REV -v repo -v .env -- -k login -x tests/
    ◀───────────────── stdout / stderr / exit code ─────────────────┘
@@ -130,10 +132,23 @@ just defining/removing the function.
 **Built-in actions:** `run-tests` (pytest in the `runtests` container),
 `list-containers` (read-only cld-container enumeration for the messenger /
 `cld agent status`), `agent` (`<target> <op>` -- launch/manage a sibling
-`cld agent` on the host) and `task-agent` (`<target> <op>` -- the `cld task-agent`
-lifecycle verbs). Both launcher actions validate `<target>` against the master's
-host-set `org.cld.repo-root` + `org.cld.targets` labels through the shared
-`validate_target`.
+`cld agent` on the host), `task-agent` (`<target> <op>` -- the `cld task-agent`
+lifecycle verbs), and `graphql` (`<op> [args...]` -- start/stop/restart/status/
+logs for the calling session's own GraphQL server, plus query/introspect/
+endpoints against it or a credentialed alias; see
+`../docs/impl-graphql-broker-plan.md` and `../docs/graphql-mcp.md`). Both
+launcher actions validate `<target>` against the master's host-set
+`org.cld.repo-root` + `org.cld.targets` labels through the shared
+`validate_target`; `graphql`, like `run-tests`, instead operates on the
+calling session's own repo (`$session`'s `org.cld.repo-root` label), since it
+has no separate target to launch.
+
+Both `run-tests`' `resolve_test_context` and `graphql`'s
+`resolve_graphql_context` resolve the session's revision by calling `jj`
+unconditionally -- neither action works against a git-backed repo (jj
+resolution `exit 3`s). `graphql`'s read-only ops (`status`/`logs`/`stop`/
+`endpoints`) avoid this by not resolving a revision at all; only `start` (and
+by extension `restart`) needs it.
 
 `task-agent` is the only action that creates a container with a caller-chosen file
 mounted inside it, so it also polices its argv: `--force` is denied (overriding a

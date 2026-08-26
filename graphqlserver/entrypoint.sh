@@ -24,7 +24,7 @@ set -euo pipefail
 : "${REVISION:=@}"
 : "${PROJECT_SUBDIR:=.}"
 : "${SECRETS_FILE:=/secrets/.env}"
-: "${GQL_WORKSPACE:=gql-$HOSTNAME}"
+: "${GQL_WORKSPACE:=gql-${HOSTNAME:-$$}}"
 : "${GQL_PORT:=8000}"
 : "${POETRY_INSTALL_ARGS:=--all-extras --all-groups}"
 if [ -z "${GQL_COMMAND:-}" ]; then

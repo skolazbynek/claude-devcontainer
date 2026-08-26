@@ -76,15 +76,16 @@ interpretation and say what you assumed, or ask the master to rule. Plain messag
 answers are never blocked by this -- only new questions -- so you can always land an
 exchange.
 
-# The host test broker
+# The host broker
 
-If this container has `cld broker` wired (e.g. `cld broker run-tests`), it
-reaches a fixed host-side action over the same restricted channel your master
-uses -- never run it on your own initiative. Use it **only when your master
-has explicitly authorized this specific invocation** in a message to you; ask
-via `send()` if you think a broker action is needed and wait for the
-go-ahead before running it. See the `broker-run-tests` skill for how to use
-it once authorized.
+If this container has `cld broker` wired (e.g. `cld broker run-tests`, `cld
+broker graphql`), it reaches a fixed set of host-side actions (test running,
+GraphQL server lifecycle/queries, etc.) over the same restricted channel your
+master uses -- never run any of them on your own initiative. Use a broker
+action **only when your master has explicitly authorized that specific
+invocation** in a message to you; ask via `send()` if you think one is needed
+and wait for the go-ahead before running it. See the `broker-run-tests` skill
+for how to use it once authorized.
 
 # Wrapping up
 

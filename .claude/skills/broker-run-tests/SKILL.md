@@ -31,11 +31,13 @@ become pytest arguments.
 ## Step 0: If you are an agent or task-agent, get authorization first
 
 `cld master`, `cld agent`, and `cld task-agent` containers all have the
-broker wired -- but for an agent or task-agent, this capability may be
-invoked **only with your master's explicit authorization for this specific
-run**. Your master is the trusted operator context; you are not. Do not run
-`cld broker run-tests` on your own initiative, speculatively, or because you
-judge tests should be run -- wait for (or ask for, via `send()`) an explicit
+broker wired -- but for an agent or task-agent, **every** broker action
+(`run-tests` here, but the same gate applies to any other action the broker
+exposes, e.g. `graphql`) may be invoked **only with your master's explicit
+authorization for this specific invocation**. Your master is the trusted
+operator context; you are not. Do not run `cld broker run-tests` (or any
+other broker action) on your own initiative, speculatively, or because you
+judge it's time -- wait for (or ask for, via `send()`) an explicit
 instruction from your master naming this run, then proceed with Step 1. A
 `cld master` session has no such gate -- it is the human-adjacent context and
 may run it directly.

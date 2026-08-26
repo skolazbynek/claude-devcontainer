@@ -315,7 +315,12 @@ sweep_gql_orphans() {
     local c s r
     for c in $(docker ps -a --filter label=org.cld.gql-session --format '{{.Names}}'); do
         s=$(docker inspect "$c" --format '{{index .Config.Labels "org.cld.gql-session"}}' 2>/dev/null) || continue
-        docker inspect "$s" >/dev/null 2>&1 && continue   # owning session alive -- keep
+        # Deliberately "exists", not "running": a stopped-but-not-removed
+        # session container is expected to resume (cld persistence model, see
+        # CLAUDE.md), and reaping its graphql server on every stop would
+        # defeat the point of this being an *orphan* sweep -- only a session
+        # that is actually gone (container removed) should cost its server.
+        docker inspect "$s" >/dev/null 2>&1 && continue   # owning session exists -- keep
         r=$(docker inspect "$c" --format '{{index .Config.Labels "org.cld.gql-repo"}}' 2>/dev/null) || true
         docker rm -f "$c" >/dev/null 2>&1 || true
         [ -n "$r" ] && jj -R "$r" --ignore-working-copy workspace forget "gql-$s" >/dev/null 2>&1 || true
@@ -334,7 +339,8 @@ mask_output() {
     sed -E \
         -e "s/(TOKEN|KEY|SECRET|PASSWORD)=[^[:space:],'\"]+/\\1=<redacted>/gI" \
         -e "s#/run/secrets/[A-Za-z0-9._/-]+#/run/secrets/<redacted>#g" \
-        -e "s#([A-Za-z][A-Za-z0-9+.-]*://)[^/@[:space:]]*@#\\1<redacted>@#g"
+        -e "s#([A-Za-z][A-Za-z0-9+.-]*://)[^/@[:space:]]*@#\\1<redacted>@#g" \
+        -e 's/"(token|key|secret|password)"[[:space:]]*:[[:space:]]*"[^"]*"/"\1": "<redacted>"/gI'
 }
 
 # Cap output to $GRAPHQL_OUTPUT_MAX_BYTES. `keep`=head for query (the response
@@ -399,6 +405,8 @@ check_url_allowlisted() {
     esac
     host="${host%%/*}"     # strip path
     host="${host%%\?*}"    # strip query (in case no path preceded it)
+    host="${host%%#*}"     # strip fragment
+    host="${host##*@}"     # strip userinfo (user:pass@) -- must precede the port strip
     host="${host%%:*}"     # strip port
     local IFS=' '
     for h in ${GRAPHQL_URL_ALLOWLIST:-}; do
@@ -508,7 +516,8 @@ do_graphql_endpoints() {
     [ -f "$SECRETS_ENV_FILE" ] || return 0
     grep -oE '^CLD_GRAPHQL_URL_[A-Za-z0-9_]+' "$SECRETS_ENV_FILE" \
         | sed -E 's/^CLD_GRAPHQL_URL_//; s/_/-/g' \
-        | tr '[:upper:]' '[:lower:]'
+        | tr '[:upper:]' '[:lower:]' \
+        || true
 }
 
 # One tab-separated line: state<TAB>port<TAB>endpoint<TAB>revision<TAB>container.
@@ -540,6 +549,17 @@ do_graphql_status() {
             | sed -n 's/^REVISION=//p')
     host_port=$(docker port "$cname" "$GQL_PORT/tcp" 2>/dev/null | head -n1)
     if [ -z "$host_port" ]; then
+        print_gql_status_line starting "" "" "$rev" "$cname"
+        return 0
+    fi
+    # docker port publishing early (or `poetry install` still running behind
+    # it) doesn't mean the server itself answers yet -- a live probe is the
+    # only way to tell "running" from "starting" here, same probe do_graphql_start
+    # waits on.
+    if ! { curl_capture --max-time 3 -X POST -H 'Content-Type: application/json' \
+             --data-binary '{"query":"{__typename}"}' \
+             "http://$host_port$GQL_HEALTH_PATH" \
+           && [ "$CURL_STATUS" = 200 ] && [[ "$CURL_BODY" != *'"errors"'* ]]; }; then
         print_gql_status_line starting "" "" "$rev" "$cname"
         return 0
     fi
@@ -616,8 +636,16 @@ do_graphql_start() {
     # unlike the old in-process MCP's `query { hello }` probe, which could
     # never succeed against a real schema and busy-looped until timeout
     # (docs/impl-graphql-broker-plan.md §4.3). A real sleep between attempts here.
-    local deadline=$((SECONDS + GRAPHQL_START_TIMEOUT)) ready=0
+    local deadline=$((SECONDS + GRAPHQL_START_TIMEOUT)) ready=0 died=0
     while [ "$SECONDS" -lt "$deadline" ]; do
+        # Check the container is still alive before probing it -- otherwise a
+        # crash (bad graphql_command, poetry install failure) just busy-loops
+        # the curl probe against a dead port until the full timeout elapses.
+        running=$(docker inspect "$cname" --format '{{.State.Running}}' 2>/dev/null) || true
+        if [ "$running" != "true" ]; then
+            died=1
+            break
+        fi
         if curl_capture --max-time 5 -X POST -H 'Content-Type: application/json' \
                 --data-binary '{"query":"{__typename}"}' \
                 "http://${GRAPHQL_BIND}:${host_port}${GQL_HEALTH_PATH}" \
@@ -627,6 +655,15 @@ do_graphql_start() {
         fi
         sleep 2
     done
+
+    if [ "$died" = 1 ]; then
+        echo "[cld-broker] graphql server for $session exited before becoming healthy" \
+             "-- last logs:" >&2
+        docker logs --tail 50 "$cname" 2>&1 | mask_output >&2 || true
+        docker rm -f "$cname" >/dev/null 2>&1 || true
+        jj -R "$REPO" --ignore-working-copy workspace forget "$wsname" >/dev/null 2>&1 || true
+        exit 3
+    fi
 
     if [ "$ready" != 1 ]; then
         echo "[cld-broker] graphql server for $session did not become healthy within" \

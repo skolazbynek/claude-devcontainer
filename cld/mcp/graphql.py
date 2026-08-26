@@ -36,12 +36,32 @@ def _set_cached_schema(schema: dict) -> None:
     _cached_schema = schema
 
 
-def _run(op: str, *args: str) -> str:
-    """Run a `graphql` broker op, returning its captured stdout or raising ToolError."""
+def _run_result(op: str, *args: str):
+    """Run a `graphql` broker op, returning the raw completed-process result."""
     result = graphql_op(op, *args)
     if result.returncode != 0:
-        raise ToolError(f"graphql {op} failed: {(result.stderr or '').strip()}")
-    return result.stdout
+        detail = (result.stderr or "").strip() or (result.stdout or "").strip()
+        raise ToolError(f"graphql {op} failed: {detail}")
+    return result
+
+
+def _run(op: str, *args: str) -> str:
+    """Run a `graphql` broker op, returning its captured stdout or raising ToolError."""
+    return _run_result(op, *args).stdout
+
+
+def _parse_json_response(op: str, result) -> dict:
+    """Parse a query/introspect result's stdout as JSON, distinguishing a
+    truncated body (cap_output's stderr marker) from a genuinely malformed one."""
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        if "output truncated" in (result.stderr or ""):
+            raise ToolError(
+                f"{op} response was truncated ({(result.stderr or '').strip()}) -- "
+                "raise GRAPHQL_OUTPUT_MAX_BYTES in broker.conf"
+            )
+        raise ToolError(f"{op} response was not valid JSON: {e}")
 
 
 def _parse_status_line(line: str) -> dict:
@@ -123,32 +143,6 @@ def list_endpoints() -> list[str]:
 # --- Client tools ---
 
 
-_INTROSPECTION_QUERY = """
-{
-  __schema {
-    queryType { name }
-    mutationType { name }
-    types {
-      name
-      kind
-      description
-      fields {
-        name
-        description
-        type { name kind ofType { name kind ofType { name kind } } }
-        args { name type { name kind ofType { name kind } } }
-      }
-      inputFields {
-        name
-        type { name kind ofType { name kind ofType { name kind } } }
-      }
-      enumValues { name description }
-    }
-  }
-}
-"""
-
-
 @mcp.resource("graphql://schema")
 def schema_resource() -> str:
     """Cached GraphQL schema from last introspection."""
@@ -203,11 +197,7 @@ def introspect(target: str = "local") -> dict:
     the broker), or a raw http(s):// URL (only reachable if allowlisted in
     broker.conf; no credentials are attached to a raw URL).
     """
-    out = _run("introspect", target)
-    try:
-        result = json.loads(out)
-    except json.JSONDecodeError as e:
-        raise ToolError(f"introspection response was not valid JSON: {e}")
+    result = _parse_json_response("introspection", _run_result("introspect", target))
     _set_cached_schema(result)
     return _summarize_schema(result)
 
@@ -240,11 +230,8 @@ def query(query: str, variables: dict | None = None, target: str = "local") -> d
     the broker), or a raw http(s):// URL (only reachable if allowlisted in
     broker.conf; no credentials are attached to a raw URL).
     """
-    out = _run("query", target, query, json.dumps(variables or {}))
-    try:
-        return json.loads(out)
-    except json.JSONDecodeError as e:
-        raise ToolError(f"query response was not valid JSON: {e}")
+    result = _run_result("query", target, query, json.dumps(variables or {}))
+    return _parse_json_response("query", result)
 
 
 if __name__ == "__main__":

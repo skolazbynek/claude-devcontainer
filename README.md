@@ -211,12 +211,17 @@ cld/                               Python package (CLI + shared logic)
     detect.py                      auto-detection logic
   mcp/orchestrator.py              MCP server for agent orchestration (deprecated, not wired)
   mcp/messenger.py                 MCP server for the mailbox transport
+  mcp/graphql.py                   MCP server for GraphQL testing -- thin client over the broker's `graphql` action
   messenger/mailbox.py             filesystem mailbox transport
   messenger/agent_loop.py          repo agent supervisor daemon
 
 scripts/
   mcp/run-orchestrator.sh          venv wrapper (deprecated, kept for reference)
   mcp/run-messenger.sh             venv wrapper for the messenger MCP server
+  mcp/run-graphql.sh               venv wrapper for the graphql-tester MCP server
+
+broker/                            host-side broker: sshd ForceCommand dispatching run-tests/agent/task-agent/graphql actions
+graphqlserver/                     image serving a project's GraphQL server at a jj revision, driven by the broker's graphql action
 
 imgs/
   claude-base/                     Common base image (debian, git, jj, docker cli, poetry, claude). No editor, no entrypoint.
