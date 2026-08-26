@@ -57,9 +57,23 @@ cld_conf_get() {
 # run-tests needs the session's current revision + the project's .env; resolve
 # those lazily here (not in the shared dispatcher) so read-only actions like
 # list-containers don't depend on the session bookmark being resolvable.
+#
+# REV comes from "${session}@" -- the *workspace* tip, not the `$session`
+# bookmark. The bookmark is set once at first container launch
+# (imgs/claude-devcontainer/entrypoint-claude-devcontainer.sh) and never moved
+# again, so it freezes at the container's first `jj commit` -- the normal state
+# once an agent starts working, which left this resolving one change behind
+# the code the caller just wrote. Workspace name == bookmark name == container
+# name == $session (verified via `jj workspace list`), and `${session}@` is
+# the same workspace-scoped-`@` idiom `cld/vcs/detect.py` already uses.
+# --ignore-working-copy matters here too: without it, `jj -R "$REPO" log`
+# snapshots the *host's* default workspace as a side effect, which would
+# violate the broker's store-reading-only posture (docs/design-cld-broker.md
+# §9) for no freshness gain -- watchman already wrote the container's own
+# snapshot independently.
 resolve_test_context() {
-    REV=$(jj -R "$REPO" log --no-graph -n1 -r "$session" -T commit_id) \
-        || { echo "cannot resolve revision for $session" >&2; exit 3; }
+    REV=$(jj -R "$REPO" --ignore-working-copy log --no-graph -n1 -r "${session}@" -T commit_id) \
+        || { echo "cannot resolve revision for workspace $session" >&2; exit 3; }
     PROJECT_SUBDIR=$(cld_conf_get "$REPO/.cld/config.toml" pyproject_dir)
     : "${PROJECT_SUBDIR:=.}"
     case "$PROJECT_SUBDIR" in
