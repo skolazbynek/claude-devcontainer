@@ -1,0 +1,62 @@
+# graphqlserver -- standalone GraphQL server host.
+#
+# Single job: materialize a jj revision into an isolated workspace and run a
+# caller-supplied server command against it. No dependency on any other
+# project. Movable to its own repository as-is. Mirrors runtests/Dockerfile
+# byte for byte (same toolchain, same CA bundle) -- only entrypoint.sh differs.
+FROM debian:stable-slim
+
+# Pin toolchain versions explicitly; do not track "latest".
+ARG JJ_VERSION=0.37.0
+# Poetry 2.x: reads PEP 621 [project] metadata (1.x only reads [tool.poetry]).
+ARG POETRY_VERSION=2.4.1
+
+# System + build deps. build-essential / pkg-config / default-libmysqlclient-dev
+# cover the C-extension deps (mysqlclient etc.) that target repos commonly pull.
+# curl also installs jj/poetry below; the readiness probe itself runs
+# host-side (broker/cld-broker.sh) -- curl inside the image is for
+# interactive debugging only (`docker exec ... curl localhost:$GQL_PORT`).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        python3 \
+        python3-venv \
+        python3-dev \
+        python3-pip \
+        build-essential \
+        pkg-config \
+        default-libmysqlclient-dev \
+        default-mysql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# jj: static musl binary works on any glibc/musl base.
+RUN curl -fsSL "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+        -o /tmp/jj.tar.gz && \
+    tar -xzf /tmp/jj.tar.gz -C /usr/local/bin ./jj && \
+    rm -f /tmp/jj.tar.gz && \
+    /usr/local/bin/jj --version
+
+# Poetry, pinned.
+RUN curl -sSL https://install.python-poetry.org | \
+        POETRY_HOME=/opt/poetry python3 - --version "${POETRY_VERSION}" && \
+    ln -s /opt/poetry/bin/poetry /usr/local/bin/poetry && \
+    /usr/local/bin/poetry --version
+
+# Bake internal CA certs into the system trust store so python/requests/poetry
+# and TLS to the databases trust them without any host mount.
+COPY ca-certs/seznam/ /tmp/seznam-ca/
+RUN mkdir -p /usr/local/share/ca-certificates/seznam && \
+    for f in /tmp/seznam-ca/*.pem; do \
+        cp "$f" "/usr/local/share/ca-certificates/seznam/$(basename "${f%.pem}").crt"; \
+    done && \
+    rm -rf /tmp/seznam-ca && \
+    update-ca-certificates
+
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
