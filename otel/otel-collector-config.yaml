@@ -21,6 +21,12 @@ exporters:
   file:
     path: /data/raw-metrics.jsonl
     format: json
+    # Without this, the exporter truncates the file on every open (its
+    # default), so any collector restart silently wipes prior history and
+    # desyncs aggregate.py's byte-offset bookkeeping against the new,
+    # shorter file -- it seeks to a stale offset past current EOF and never
+    # catches up. See open-telemetry/opentelemetry-collector-contrib#31364.
+    append: true
 
 service:
   pipelines:

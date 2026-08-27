@@ -149,7 +149,13 @@ def run(input_path, output_dir, watch):
     with input_path.open("r") as f:
         if offset_path.is_file():
             try:
-                f.seek(int(offset_path.read_text().strip()))
+                offset = int(offset_path.read_text().strip())
+                # If the input file is now shorter than the stored offset (e.g.
+                # the collector restarted and truncated it), seeking there would
+                # park us past current EOF forever, silently processing nothing
+                # new. Start over from the top instead.
+                if offset <= input_path.stat().st_size:
+                    f.seek(offset)
             except (ValueError, OSError):
                 pass
         while True:

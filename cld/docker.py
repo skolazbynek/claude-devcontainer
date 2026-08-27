@@ -872,8 +872,17 @@ ANCHOR_MODE_LABEL = "org.cld.anchor-mode"
 _ANCHOR_INSPECT_FORMAT = (
     '{{index .Config.Labels "org.cld.repo-root"}}|'
     '{{index .Config.Labels "org.cld.anchor"}}|'
-    '{{index .Config.Labels "org.cld.anchor-mode"}}'
+    '{{index .Config.Labels "org.cld.anchor-mode"}}|'
+    '{{index .Config.Labels "org.cld.kind"}}'
 )
+
+# Kinds whose live reach can block another container's anchor. Interactive
+# roles (master, the bare `cld` devcontainer) are deliberately excluded: a
+# master must be able to spawn task-agents into its own tree, that's the
+# normal nesting, not a hazard. Headless roles (agent, task-agent, run) can
+# still silently rewrite their stack with nobody watching, so they keep
+# blocking -- see resolve_anchor_checked.
+ANCHOR_BLOCKING_KINDS = {"agent", "task-agent", "run"}
 
 
 def docker_anchor_list(*, running_only: bool = True) -> list[dict]:
@@ -882,7 +891,7 @@ def docker_anchor_list(*, running_only: bool = True) -> list[dict]:
     Host-wide, not scoped to one kind or one master's fleet: two agents
     anchored in the same store, launched by different callers, are exactly
     the hazard this exists to catch. Records are
-    ``{name, repo_root, anchor, anchor_mode}``.
+    ``{name, repo_root, anchor, anchor_mode, kind}``.
     """
     filters = ["--filter", f"label={ANCHOR_LABEL}"]
     if running_only:
@@ -905,10 +914,11 @@ def docker_anchor_list(*, running_only: bool = True) -> list[dict]:
         log_subprocess(log, ["docker", "inspect", name], inspect)
         if inspect.returncode != 0:
             continue
-        repo_root, anchor, anchor_mode = (inspect.stdout.strip().split("|") + ["", "", ""])[:3]
+        repo_root, anchor, anchor_mode, kind = (inspect.stdout.strip().split("|") + ["", "", "", ""])[:4]
         containers.append({
             "name": name, "repo_root": repo_root,
             "anchor": anchor, "anchor_mode": anchor_mode or "isolated",
+            "kind": kind,
         })
     return containers
 
@@ -934,6 +944,13 @@ def resolve_anchor_checked(cfg: Config, repo_root: Path, revision: str, mode: st
        an isolated container's reach starts one commit below the shared base,
        disjoint from a sibling's own line.
 
+    Only headless roles (``ANCHOR_BLOCKING_KINDS`` -- agent, task-agent, run)
+    occupy a tree for the purposes of this check. A live master or bare `cld`
+    devcontainer never blocks: spawning task-agents into its own tree is the
+    normal nesting, not the hazard this guards against. A live task-agent
+    still blocks another container (including one spawned by the same
+    master) from anchoring on top of it.
+
     jj-only -- peer-side anchor staging has no git equivalent. Anchoring on a
     finished (reaped) sibling's deliverable branch still passes in either mode.
     """
@@ -950,7 +967,7 @@ def resolve_anchor_checked(cfg: Config, repo_root: Path, revision: str, mode: st
     live = {
         c["anchor"]: c["name"]
         for c in docker_anchor_list(running_only=True)
-        if c["repo_root"] == host_repo and c["anchor"]
+        if c["repo_root"] == host_repo and c["anchor"] and c["kind"] in ANCHOR_BLOCKING_KINDS
     }
     if not live:
         return anchor

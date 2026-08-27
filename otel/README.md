@@ -16,7 +16,7 @@ One script controls the whole pipeline -- the collector container and the
 background aggregator process:
 
 ```
-./otelctl.sh start              # docker run collector (127.0.0.1:4318) + aggregate.py --watch
+./otelctl.sh start              # docker run collector (bridge-gateway IP + 127.0.0.1, port 4318) + aggregate.py --watch
 ./otelctl.sh status             # both, at a glance
 ./otelctl.sh logs               # both, collector then aggregator
 ./otelctl.sh logs collector 100
@@ -42,6 +42,12 @@ export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector-host>:4318
 export OTEL_RESOURCE_ATTRIBUTES=service.name=<some-identifying-name>
 ```
+
+`<collector-host>` is `localhost` for a session running directly on the same
+host as the collector, or `host.docker.internal` for a session running
+inside any docker container on that host. The collector binds only to the
+docker bridge gateway IP and loopback -- not `0.0.0.0` -- so it's reachable
+from both without being exposed on the LAN-facing interface.
 
 `service.name` is the standard OTel resource attribute used to key the
 per-session output file -- pick whatever name you want that session's stats

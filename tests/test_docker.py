@@ -546,10 +546,10 @@ class TestAssertTaskAgentCapacity:
         assert m.call_args.kwargs == {"running_only": True}
 
 
-def _anchors(*specs):
+def _anchors(*specs, kind="agent"):
     """Fake docker_anchor_list records: (name, repo_root, anchor, anchor_mode)."""
     return [
-        {"name": n, "repo_root": r, "anchor": a, "anchor_mode": m}
+        {"name": n, "repo_root": r, "anchor": a, "anchor_mode": m, "kind": kind}
         for n, r, a, m in specs
     ]
 
@@ -568,9 +568,9 @@ class TestResolveAnchorChecked:
         inside = jj_repo.resolve_revision("@-")
         return base, live_anchor, inside
 
-    def _fleet(self, tmp_path, jj_repo, anchor, name="cld_agent_r_live", anchor_mode="isolated"):
+    def _fleet(self, tmp_path, jj_repo, anchor, name="cld_agent_r_live", anchor_mode="isolated", kind="agent"):
         cfg = Config(mailbox_root=str(tmp_path / "mb"))
-        records = _anchors((name, str(jj_repo.repo_root), anchor, anchor_mode))
+        records = _anchors((name, str(jj_repo.repo_root), anchor, anchor_mode), kind=kind)
         return cfg, records
 
     def test_shared_base_passes_with_live_sibling(self, tmp_path, jj_repo):
@@ -649,6 +649,34 @@ class TestResolveAnchorChecked:
         with patch("cld.docker.docker_anchor_list", return_value=[]):
             cfg = Config(mailbox_root=str(tmp_path / "mb"))
             assert resolve_anchor_checked(cfg, jj_repo.repo_root, base, "shared") == base
+
+    def test_live_master_does_not_block_task_agent_nesting(self, tmp_path, jj_repo):
+        """A task-agent may anchor inside its own live master's tree."""
+        _, live_anchor, inside = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, live_anchor, name="cld_master_r", kind="master")
+        with patch("cld.docker.docker_anchor_list", return_value=records):
+            assert resolve_anchor_checked(cfg, jj_repo.repo_root, inside) == inside
+
+    def test_live_devcontainer_does_not_block(self, tmp_path, jj_repo):
+        _, live_anchor, inside = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, live_anchor, name="cld_r", kind="devcontainer")
+        with patch("cld.docker.docker_anchor_list", return_value=records):
+            assert resolve_anchor_checked(cfg, jj_repo.repo_root, inside) == inside
+
+    def test_live_task_agent_still_blocks_nested_spawn(self, tmp_path, jj_repo):
+        """A live task-agent's own tree still refuses another spawn on top of it."""
+        _, live_anchor, inside = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, live_anchor, name="cld_task_r_a", kind="task-agent")
+        with patch("cld.docker.docker_anchor_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live reach"):
+                resolve_anchor_checked(cfg, jj_repo.repo_root, inside)
+
+    def test_live_run_still_blocks(self, tmp_path, jj_repo):
+        _, live_anchor, inside = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, live_anchor, name="cld_run_r", kind="run")
+        with patch("cld.docker.docker_anchor_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live reach"):
+                resolve_anchor_checked(cfg, jj_repo.repo_root, inside)
 
 
 class TestParsePeersEnv:

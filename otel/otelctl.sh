@@ -34,16 +34,23 @@ collector_running() {
 collector_start() {
     if collector_running; then echo "collector: already running"; return 0; fi
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    # Bind to the docker bridge gateway (how containers reach the host via
+    # host.docker.internal) plus loopback (for host-side sessions using
+    # localhost) -- reachable from both containers and the host itself, but
+    # not from 0.0.0.0/the LAN-facing NIC.
+    local gateway
+    gateway="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
     # Run as our own host uid/gid: the image's default (non-root) user can't
     # write into a host-owned bind mount otherwise -- the file exporter fails
     # with "permission denied" on the raw metrics file.
     docker run -d --name "$CONTAINER_NAME" \
         --user "$(id -u):$(id -g)" \
+        -p "${gateway}:${PORT}:4318" \
         -p "127.0.0.1:${PORT}:4318" \
         -v "$HERE/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro" \
         -v "$DATA_DIR/data:/data" \
         "$IMAGE" >/dev/null
-    echo "collector: started on 127.0.0.1:${PORT}"
+    echo "collector: started on ${gateway}:${PORT} + 127.0.0.1:${PORT} (containers via host.docker.internal, host via localhost -- not exposed to the LAN)"
 }
 
 collector_stop() {
