@@ -65,16 +65,20 @@ def _parse_json_response(op: str, result) -> dict:
 
 
 def _parse_status_line(line: str) -> dict:
-    """Parse a `graphql status`-shaped tab-separated line: state, port, endpoint, revision, container."""
+    """Parse a `graphql status`-shaped tab-separated line: state, port, endpoint, revision, container, stale."""
     parts = (line or "").rstrip("\n").split("\t")
-    parts += [""] * (5 - len(parts))
-    status, port, endpoint, revision, container = parts[:5]
+    parts += [""] * (6 - len(parts))
+    status, port, endpoint, revision, container, stale = parts[:6]
     return {
         "status": status or "unknown",
         "port": int(port) if port.isdigit() else None,
         "endpoint": endpoint or None,
         "revision": revision or None,
         "container": container or None,
+        # None (not "false") when there's nothing to compare against -- not
+        # started, exited, or the tip couldn't be resolved -- so "unknown"
+        # stays distinguishable from "fresh".
+        "stale": {"true": True, "false": False}.get(stale),
     }
 
 
@@ -87,9 +91,12 @@ def start_server() -> dict:
 
     Runs on the host broker from the real repo checkout with the real .env
     secrets. Idempotent -- calling this while a server is already running just
-    returns its current status. The repo must set `graphql_command` in its
-    `.cld/config.toml` (see docs/graphql-mcp.md); this is a slow path, every
-    start/restart pays a fresh `poetry install`.
+    returns its current status, without restarting it -- if the session has
+    kept editing since then, that status's `stale: true` means the running
+    server is serving an older revision; call `restart_server` to bring it
+    up to date. The repo must set `graphql_command` in its `.cld/config.toml`
+    (see docs/graphql-mcp.md); this is a slow path, every start/restart pays
+    a fresh `poetry install`.
     """
     return _parse_status_line(_run("start"))
 
@@ -108,7 +115,13 @@ def restart_server() -> dict:
 
 @mcp.tool()
 def server_status() -> dict:
-    """Check this session's GraphQL server: not_started / starting / running / exited."""
+    """Check this session's GraphQL server: not_started / starting / running / exited.
+
+    `stale` is true when a running/starting server's revision no longer
+    matches this session's current tip (you've kept editing since it
+    started) -- call `restart_server` to fix it. False when it matches, null
+    when there's nothing running to compare or the tip couldn't be resolved.
+    """
     return _parse_status_line(_run("status"))
 
 

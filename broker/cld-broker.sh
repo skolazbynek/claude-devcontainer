@@ -520,11 +520,14 @@ do_graphql_endpoints() {
         || true
 }
 
-# One tab-separated line: state<TAB>port<TAB>endpoint<TAB>revision<TAB>container.
-# state in running|starting|exited|not_started. Parsed client-side the same
-# way _parse_container_line (cld/broker.py) parses list-containers.
+# One tab-separated line: state<TAB>port<TAB>endpoint<TAB>revision<TAB>container<TAB>stale.
+# state in running|starting|exited|not_started. stale is "true"/"false" when
+# there's a serving revision to compare against the session's current tip,
+# empty otherwise (not_started, exited, or the tip couldn't be resolved).
+# Parsed client-side the same way _parse_container_line (cld/broker.py)
+# parses list-containers.
 print_gql_status_line() {
-    printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "${6:-}"
 }
 
 do_graphql_status() {
@@ -532,13 +535,13 @@ do_graphql_status() {
     resolve_graphql_config
     local cname="cld_gql_$session"
     if ! docker inspect "$cname" >/dev/null 2>&1; then
-        print_gql_status_line not_started "" "" "" ""
+        print_gql_status_line not_started "" "" "" "" ""
         return 0
     fi
     local running
     running=$(docker inspect "$cname" --format '{{.State.Running}}' 2>/dev/null)
     if [ "$running" != "true" ]; then
-        print_gql_status_line exited "" "" "" "$cname"
+        print_gql_status_line exited "" "" "" "$cname" ""
         return 0
     fi
     # Read the actually-serving revision back off the container's own env
@@ -547,9 +550,20 @@ do_graphql_status() {
     local rev host_port
     rev=$(docker inspect "$cname" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
             | sed -n 's/^REVISION=//p')
+    # Compare against the current tip so the caller can tell a running server
+    # is serving stale code without a second call. resolve_graphql_context's
+    # hard exit-3-on-failure isn't safe here -- status has to keep answering
+    # on a git-backed repo, or after graphql_command was removed, same as
+    # stop does today -- so resolve the tip inline and leave stale empty
+    # rather than aborting the op if it can't be resolved.
+    local tip stale=""
+    tip=$(jj -R "$REPO" --ignore-working-copy log --no-graph -n1 -r "${session}@" -T commit_id 2>/dev/null) || true
+    if [ -n "$tip" ] && [ -n "$rev" ]; then
+        [ "$rev" = "$tip" ] && stale=false || stale=true
+    fi
     host_port=$(docker port "$cname" "$GQL_PORT/tcp" 2>/dev/null | head -n1)
     if [ -z "$host_port" ]; then
-        print_gql_status_line starting "" "" "$rev" "$cname"
+        print_gql_status_line starting "" "" "$rev" "$cname" "$stale"
         return 0
     fi
     # docker port publishing early (or `poetry install` still running behind
@@ -560,10 +574,10 @@ do_graphql_status() {
              --data-binary '{"query":"{__typename}"}' \
              "http://$host_port$GQL_HEALTH_PATH" \
            && [ "$CURL_STATUS" = 200 ] && [[ "$CURL_BODY" != *'"errors"'* ]]; }; then
-        print_gql_status_line starting "" "" "$rev" "$cname"
+        print_gql_status_line starting "" "" "$rev" "$cname" "$stale"
         return 0
     fi
-    print_gql_status_line running "${host_port##*:}" "http://$host_port$GQL_HEALTH_PATH" "$rev" "$cname"
+    print_gql_status_line running "${host_port##*:}" "http://$host_port$GQL_HEALTH_PATH" "$rev" "$cname" "$stale"
 }
 
 # `docker rm -f` sends SIGKILL, so the entrypoint's own `trap EXIT` (and the

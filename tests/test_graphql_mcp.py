@@ -89,29 +89,42 @@ class TestBrokerFailurePropagates:
 
 
 class TestStatusLineParsing:
-    def test_running(self):
+    def test_running_fresh(self):
         with patch("cld.mcp.graphql.graphql_op",
-                    return_value=_cp(stdout="running\t32768\thttp://172.17.0.1:32768/graphql\tabc123\tcld_gql_x\n")):
+                    return_value=_cp(stdout="running\t32768\thttp://172.17.0.1:32768/graphql\tabc123\tcld_gql_x\tfalse\n")):
             out = server_status()
         assert out == {
             "status": "running", "port": 32768, "endpoint": "http://172.17.0.1:32768/graphql",
-            "revision": "abc123", "container": "cld_gql_x",
+            "revision": "abc123", "container": "cld_gql_x", "stale": False,
         }
 
-    def test_not_started_blank_fields(self):
-        with patch("cld.mcp.graphql.graphql_op", return_value=_cp(stdout="not_started\t\t\t\t\n")):
+    def test_running_stale(self):
+        with patch("cld.mcp.graphql.graphql_op",
+                    return_value=_cp(stdout="running\t32768\thttp://172.17.0.1:32768/graphql\tabc123\tcld_gql_x\ttrue\n")):
             out = server_status()
-        assert out == {"status": "not_started", "port": None, "endpoint": None, "revision": None, "container": None}
+        assert out["stale"] is True
+
+    def test_not_started_blank_fields(self):
+        with patch("cld.mcp.graphql.graphql_op", return_value=_cp(stdout="not_started\t\t\t\t\t\n")):
+            out = server_status()
+        assert out == {
+            "status": "not_started", "port": None, "endpoint": None, "revision": None,
+            "container": None, "stale": None,
+        }
 
     def test_malformed_short_line_pads_missing_fields(self):
         with patch("cld.mcp.graphql.graphql_op", return_value=_cp(stdout="running\n")):
             out = server_status()
-        assert out == {"status": "running", "port": None, "endpoint": None, "revision": None, "container": None}
+        assert out == {
+            "status": "running", "port": None, "endpoint": None, "revision": None,
+            "container": None, "stale": None,
+        }
 
     def test_empty_output_reports_unknown(self):
         with patch("cld.mcp.graphql.graphql_op", return_value=_cp(stdout="")):
             out = server_status()
         assert out["status"] == "unknown"
+        assert out["stale"] is None
 
 
 class TestGetServerLogs:

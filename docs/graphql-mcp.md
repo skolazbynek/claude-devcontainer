@@ -2,6 +2,55 @@
 
 MCP server for starting, managing, and querying a project's GraphQL server from Claude Code.
 
+## Quick start
+
+Wiring this onto a repo for the first time (host-side steps, then per-repo, then first run):
+
+1. **Build the server image** (once per host): `graphqlserver/build.sh`.
+2. **Broker config** (`/etc/cld/broker.conf` or wherever `CLD_BROKER_CONF`
+   points): set `GRAPHQL_IMAGE` (defaults to `graphqlserver:latest`, matches
+   step 1) and make sure `PATH` includes `docker`, `jj`, and `curl` -- see
+   `broker/broker.conf.sample`.
+3. **Restart the broker** so it picks up the config: `cld-brokerctl restart`.
+4. **Per-repo config** -- add to the repo's `.cld/config.toml`:
+   ```toml
+   graphql_command = "poetry run python manage.py runserver 0.0.0.0:$GQL_PORT"
+   graphql_port = "8000"            # optional, default 8000
+   graphql_health_path = "/graphql" # optional, default /graphql
+   ```
+5. **Wire the MCP itself** (once per host, if not already present): add a
+   `graphql-tester` entry to the **host's** `~/.claude.json`, then `cld build`
+   + restart the container -- the tool only appears in a container when the
+   host's `~/.claude.json` already has that entry.
+6. **First run**, from inside a container with the MCP wired: `start_server`
+   -> `introspect` -> `query` against `"local"` -- then, after editing code
+   the server serves, `restart_server` and query again.
+
+**Three things that silently break a first-time setup:**
+
+- **Quote every value in `.cld/config.toml`.** `cld_conf_get` parses
+  double-quoted strings only -- `graphql_port = 8000` (unquoted) reads back
+  as unset, not as `8000`.
+- **`graphql_command` must bind `0.0.0.0`, never `127.0.0.1`.** See
+  `graphqlserver/README.md`'s "one thing to get right" section for why.
+- **The `graphql-tester` MCP only appears in a container if the host's
+  `~/.claude.json` already has a `graphql-tester` entry** — a container-side
+  `claude mcp add` alone is not enough (`imgs/claude-devcontainer/container-init.sh:129`).
+
+**Optional: credentialed external targets.** To query a deployed environment
+instead of (or in addition to) `"local"`, add to the repo's `.env`:
+```
+CLD_GRAPHQL_URL_DEV=https://dev.example.internal/graphql
+CLD_GRAPHQL_AUTH_DEV=Bearer eyJ...       # optional, full Authorization value
+CLD_GRAPHQL_COOKIE_DEV=session=...       # optional, full Cookie value
+```
+then use `target="dev"` in `query`/`introspect`. A raw `http(s)://` URL
+instead of an alias needs its hostname in the broker operator's
+`GRAPHQL_URL_ALLOWLIST` (`broker/broker.conf.sample`) -- denied by default.
+
+The `cld` tool's own repo has no GraphQL server of its own, so run the first
+smoke test against a repo that does.
+
 Lifecycle and queries run on the **host**, through the cld broker's `graphql`
 action (see `docs/design-cld-broker.md` §16 and
 `docs/impl-graphql-broker-plan.md`), not as a subprocess inside this
@@ -52,7 +101,7 @@ is `COPY`'d into the image, not bind-mounted.
 | `start_server` | Start this session's server at its current revision. Idempotent -- returns existing status if already running. Requires `graphql_command`. |
 | `stop_server` | Stop it. |
 | `restart_server` | Stop + start -- use after editing code or config the server serves. |
-| `server_status` | `not_started` / `starting` / `running` / `exited`, with port/endpoint/revision/container when running. |
+| `server_status` | `not_started` / `starting` / `running` / `exited`, with port/endpoint/revision/container when running, plus `stale` (true if the running server's revision no longer matches the session's tip -- `restart_server` fixes it; null if there's nothing to compare). |
 | `get_server_logs` | Tail server logs. `filter_pattern` is a client-side regex over the returned lines. |
 | `list_endpoints` | List configured aliases (see "Targets" below). |
 

@@ -33,6 +33,16 @@ def _run_function(name: str, body_snippet: str, env: dict) -> subprocess.Complet
     )
 
 
+def _run_functions(names: list, body_snippet: str, env: dict) -> subprocess.CompletedProcess:
+    script = "\n".join(_extract_function(n) for n in names) + "\n" + body_snippet
+    return subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
 class TestCheckUrlAllowlisted:
     """C1: userinfo (user:pass@) must be stripped before the port, or
     'allowed.example:80@evil.com' passes the allowlist while curl actually
@@ -139,3 +149,96 @@ do_graphql_endpoints
         )
         assert result.returncode == 0, result.stderr
         assert set(result.stdout.split()) == {"dev", "staging"}
+
+
+class TestGraphqlStatusStale:
+    """M5: do_graphql_status's 6th field (stale) compares the container's own
+    served revision (REVISION env) against the session's current jj tip.
+    docker and jj are stubbed on PATH -- real curl_capture is never reached
+    because the stubbed `docker port` returns nothing, keeping the server in
+    the 'starting' state (still enough to exercise the stale computation,
+    which happens before the port/probe branching)."""
+
+    @pytest.fixture
+    def fakebin(self, tmp_path):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        (bindir / "docker").write_text("""#!/usr/bin/env bash
+case "$1" in
+  ps) exit 0 ;;
+  inspect)
+    shift; shift
+    fmt=""
+    while [ $# -gt 0 ]; do
+      case "$1" in --format) fmt="$2"; shift 2 ;; *) shift ;; esac
+    done
+    if [ -z "$fmt" ]; then
+      [ "${FAKE_CONTAINER_EXISTS:-1}" = 1 ] && exit 0 || exit 1
+    fi
+    case "$fmt" in
+      '{{.State.Running}}') echo "${FAKE_RUNNING:-true}" ;;
+      '{{range .Config.Env}}{{println .}}{{end}}') printf 'REVISION=%s\\n' "${FAKE_REV:-}" ;;
+    esac
+    ;;
+  port) exit 0 ;;
+esac
+""")
+        (bindir / "jj").write_text("""#!/usr/bin/env bash
+[ "${FAKE_TIP_FAILS:-0}" = 1 ] && exit 1
+echo "${FAKE_TIP:-}"
+""")
+        (bindir / "docker").chmod(0o755)
+        (bindir / "jj").chmod(0o755)
+        return bindir
+
+    def _status(self, fakebin, env_overrides, tmp_path):
+        import os
+
+        env = dict(os.environ)
+        env["PATH"] = f"{fakebin}:{env['PATH']}"
+        env.update(env_overrides)
+        return _run_functions(
+            ["do_graphql_status", "sweep_gql_orphans", "resolve_graphql_config",
+             "print_gql_status_line", "cld_conf_get"],
+            f"""
+set -euo pipefail
+REPO={str(tmp_path)!r}
+session=cld_agent_test
+do_graphql_status
+""",
+            env,
+        )
+
+    def test_matching_revision_is_not_stale(self, fakebin, tmp_path):
+        result = self._status(
+            fakebin, {"FAKE_REV": "abc123", "FAKE_TIP": "abc123"}, tmp_path
+        )
+        assert result.returncode == 0, result.stderr
+        fields = result.stdout.rstrip("\n").split("\t")
+        assert fields[0] == "starting"
+        assert fields[5] == "false"
+
+    def test_mismatched_revision_is_stale(self, fakebin, tmp_path):
+        result = self._status(
+            fakebin, {"FAKE_REV": "abc123", "FAKE_TIP": "def456"}, tmp_path
+        )
+        assert result.returncode == 0, result.stderr
+        fields = result.stdout.rstrip("\n").split("\t")
+        assert fields[0] == "starting"
+        assert fields[5] == "true"
+
+    def test_unresolvable_tip_leaves_stale_empty(self, fakebin, tmp_path):
+        result = self._status(
+            fakebin, {"FAKE_REV": "abc123", "FAKE_TIP_FAILS": "1"}, tmp_path
+        )
+        assert result.returncode == 0, result.stderr
+        fields = result.stdout.rstrip("\n").split("\t")
+        assert fields[0] == "starting"
+        assert fields[5] == ""
+
+    def test_not_started_stale_empty(self, fakebin, tmp_path):
+        result = self._status(fakebin, {"FAKE_CONTAINER_EXISTS": "0"}, tmp_path)
+        assert result.returncode == 0, result.stderr
+        fields = result.stdout.rstrip("\n").split("\t")
+        assert fields[0] == "not_started"
+        assert fields[5] == ""
