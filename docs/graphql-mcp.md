@@ -2,54 +2,8 @@
 
 MCP server for starting, managing, and querying a project's GraphQL server from Claude Code.
 
-## Quick start
-
-Wiring this onto a repo for the first time (host-side steps, then per-repo, then first run):
-
-1. **Build the server image** (once per host): `graphqlserver/build.sh`.
-2. **Broker config** (`/etc/cld/broker.conf` or wherever `CLD_BROKER_CONF`
-   points): set `GRAPHQL_IMAGE` (defaults to `graphqlserver:latest`, matches
-   step 1) and make sure `PATH` includes `docker`, `jj`, and `curl` -- see
-   `broker/broker.conf.sample`.
-3. **Restart the broker** so it picks up the config: `cld-brokerctl restart`.
-4. **Per-repo config** -- add to the repo's `.cld/config.toml`:
-   ```toml
-   graphql_command = "poetry run python manage.py runserver 0.0.0.0:$GQL_PORT"
-   graphql_port = "8000"            # optional, default 8000
-   graphql_health_path = "/graphql" # optional, default /graphql
-   ```
-5. **Wire the MCP itself** (once per host, if not already present): add a
-   `graphql-tester` entry to the **host's** `~/.claude.json`, then `cld build`
-   + restart the container -- the tool only appears in a container when the
-   host's `~/.claude.json` already has that entry.
-6. **First run**, from inside a container with the MCP wired: `start_server`
-   -> `introspect` -> `query` against `"local"` -- then, after editing code
-   the server serves, `restart_server` and query again.
-
-**Three things that silently break a first-time setup:**
-
-- **Quote every value in `.cld/config.toml`.** `cld_conf_get` parses
-  double-quoted strings only -- `graphql_port = 8000` (unquoted) reads back
-  as unset, not as `8000`.
-- **`graphql_command` must bind `0.0.0.0`, never `127.0.0.1`.** See
-  `graphqlserver/README.md`'s "one thing to get right" section for why.
-- **The `graphql-tester` MCP only appears in a container if the host's
-  `~/.claude.json` already has a `graphql-tester` entry** — a container-side
-  `claude mcp add` alone is not enough (`imgs/claude-devcontainer/container-init.sh:129`).
-
-**Optional: credentialed external targets.** To query a deployed environment
-instead of (or in addition to) `"local"`, add to the repo's `.env`:
-```
-CLD_GRAPHQL_URL_DEV=https://dev.example.internal/graphql
-CLD_GRAPHQL_AUTH_DEV=Bearer eyJ...       # optional, full Authorization value
-CLD_GRAPHQL_COOKIE_DEV=session=...       # optional, full Cookie value
-```
-then use `target="dev"` in `query`/`introspect`. A raw `http(s)://` URL
-instead of an alias needs its hostname in the broker operator's
-`GRAPHQL_URL_ALLOWLIST` (`broker/broker.conf.sample`) -- denied by default.
-
-The `cld` tool's own repo has no GraphQL server of its own, so run the first
-smoke test against a repo that does.
+Setting this up for the first time? Follow
+`docs/quick-start-graphql-mcp.md`. This file is the reference.
 
 Lifecycle and queries run on the **host**, through the cld broker's `graphql`
 action (see `docs/design-cld-broker.md` §16 and
@@ -87,7 +41,7 @@ repo's **host checkout** (`.cld/config.toml` as it stands on disk when a
 lifecycle op runs), not from the session's revision -- so editing config takes
 effect on the next `start`/`restart` regardless of what the session's `@` is
 on, unlike the server's own code, which is materialized fresh at that revision
-every time (see "Requires the cld venv" above and ruling B).
+every time (`graphqlserver/entrypoint.sh`).
 
 Editing `cld/mcp/graphql.py` needs `cld build` + a container restart: `cld/`
 is `COPY`'d into the image, not bind-mounted.
@@ -140,9 +94,10 @@ credentials, so that path doesn't exist.
 
 ## Typical workflow
 
-1. Add `graphql_command` (and, if needed, `graphql_port`/`graphql_health_path`) to the repo's `.cld/config.toml`.
-2. `start_server` -- first call pays for `poetry install`; a readiness probe (`{__typename}`) waits for it to come up.
-3. `introspect` to fetch and cache the schema.
-4. `query` to execute queries/mutations against `"local"` or a configured alias.
-5. `get_server_logs` to debug issues.
-6. `restart_server` after editing code the server serves; `stop_server` when done.
+Per-use loop, once setup is done:
+
+1. `start_server` -- first call pays for `poetry install`; a readiness probe (`{__typename}`) waits for it to come up.
+2. `introspect` to fetch and cache the schema.
+3. `query` to execute queries/mutations against `"local"` or a configured alias.
+4. `get_server_logs` to debug issues.
+5. `restart_server` after editing code the server serves; `stop_server` when done.

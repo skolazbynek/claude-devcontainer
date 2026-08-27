@@ -486,8 +486,12 @@ sys.stdout.write(json.dumps({"query": q, "variables": variables}))
     [ -n "$AUTH_HEADER" ] && hdrs+=(-H "Authorization: $AUTH_HEADER")
     [ -n "$COOKIE_HEADER" ] && hdrs+=(-H "Cookie: $COOKIE_HEADER")
 
-    if ! printf '%s' "$body" | curl_capture --max-time "$GRAPHQL_QUERY_TIMEOUT" \
-            -X POST "${hdrs[@]}" --data-binary @- "$TARGET_URL"; then
+    # $body is passed as an argument, not piped into curl_capture: a pipeline runs
+    # its last element in a subshell, so the CURL_STATUS/CURL_BODY set there would
+    # never reach the reads below. json.dumps always emits a leading `{`, so curl
+    # cannot read this as a `@file` reference.
+    if ! curl_capture --max-time "$GRAPHQL_QUERY_TIMEOUT" \
+            -X POST "${hdrs[@]}" --data-binary "$body" "$TARGET_URL"; then
         echo "graphql request to $TARGET_URL failed (curl error)" >&2
         exit 3
     fi

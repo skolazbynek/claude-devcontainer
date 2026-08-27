@@ -7,6 +7,7 @@ test out of the real script file, so it breaks if and only if that function's
 behavior changes -- not a general shell test harness, just subprocess calls.
 """
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -242,3 +243,54 @@ do_graphql_status
         fields = result.stdout.rstrip("\n").split("\t")
         assert fields[0] == "not_started"
         assert fields[5] == ""
+
+
+class TestGraphqlQueryBody:
+    """do_graphql_query must not pipe the request body into curl_capture: a
+    pipeline runs its last element in a subshell, so CURL_STATUS/CURL_BODY set
+    there never reach the reads that follow, and the function dies on
+    'CURL_BODY: unbound variable' under set -euo pipefail."""
+
+    @pytest.fixture
+    def fakecurl(self, tmp_path):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        # Echoes the --data-binary argument back as the response body, so a
+        # body that never arrived (or arrived as the literal '@-') is visible
+        # in the assertion rather than silently passing.
+        (bindir / "curl").write_text("""#!/usr/bin/env bash
+body=""
+while [ $# -gt 0 ]; do
+  case "$1" in --data-binary) body="$2"; shift 2 ;; *) shift ;; esac
+done
+printf '%s\\n200' "$body"
+""")
+        (bindir / "curl").chmod(0o755)
+        return bindir
+
+    def _query(self, fakecurl, query="{ __typename }", variables=""):
+        import os
+
+        env = dict(os.environ)
+        env["PATH"] = f"{fakecurl}:{env['PATH']}"
+        return _run_functions(
+            ["do_graphql_query", "curl_capture", "mask_output", "cap_output"],
+            f"""
+set -euo pipefail
+GRAPHQL_QUERY_TIMEOUT=5
+GRAPHQL_OUTPUT_MAX_BYTES=65536
+resolve_target() {{ TARGET_URL=http://stub/graphql; AUTH_HEADER=""; COOKIE_HEADER=""; }}
+do_graphql_query local {query!r} {variables!r}
+""",
+            env,
+        )
+
+    def test_body_reaches_curl_and_response_is_returned(self, fakecurl):
+        result = self._query(fakecurl)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"query": "{ __typename }", "variables": {}}
+
+    def test_variables_are_merged_into_the_body(self, fakecurl):
+        result = self._query(fakecurl, "query T($n: String!) { __type(name: $n) { name } }", '{"n": "Query"}')
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["variables"] == {"n": "Query"}
