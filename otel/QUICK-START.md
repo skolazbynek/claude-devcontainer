@@ -12,6 +12,9 @@
    `~/.cld/otel/stats/<service.name>.json` per session as data arrives.
 
    Check with `./otelctl.sh status` / `logs`, stop with `./otelctl.sh stop`.
+   `start` (and `restart`) also print the `export` block from step 2 below,
+   already filled in with the right host and port -- copy-paste from there
+   instead of retyping it.
 
 2. **Point a Claude Code session at it.** For cld, set in config:
 

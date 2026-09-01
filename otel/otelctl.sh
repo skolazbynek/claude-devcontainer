@@ -90,12 +90,31 @@ agg_stop() {
     rm -f "$AGG_PIDFILE" 2>/dev/null || true
 }
 
+# Same lines `otelctl.sh env` prints, both variants at once, so a user who
+# just ran `start` can copy-paste without a second command. Single source of
+# truth is env_cmd -- don't inline the exports here.
+print_env_block() {
+    cat <<EOF
+
+Point a Claude Code session at this collector -- pick the block that matches
+where the session runs, and edit service.name to whatever you want that
+session's stats filed under:
+
+# session running directly on this host:
+$(env_cmd)
+
+# session running inside a docker container on this host:
+$(env_cmd --docker)
+EOF
+}
+
 # --- combined commands ---------------------------------------------------
 
 start() {
     mkdir -p "$DATA_DIR/data"
     collector_start
     agg_start
+    print_env_block
 }
 
 stop() {

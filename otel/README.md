@@ -33,6 +33,11 @@ Override the collector image with `$CLD_OTEL_IMAGE`, the port with
 
 ## Point a Claude Code session at it
 
+`otelctl.sh start`/`restart` print a ready-to-paste `export` block for this
+(both the host and in-container variant) once the collector is up, filled in
+with the actual port. The rest of this section is the same information for
+reference.
+
 Any session, not just cld's:
 
 ```
