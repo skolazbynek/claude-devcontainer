@@ -56,6 +56,11 @@ filed under. In cld, this is wired automatically: set `otel_endpoint` (or
 devcontainer point at it with `service.name` set to the session name. `cld
 run` is unaffected -- it keeps its existing VCS-committed cost reporting.
 
+To make this persistent instead of retyping it in every terminal, `./otelctl.sh
+env` prints these same lines -- `eval "$(./otelctl.sh env)"` for the current
+shell, or `./otelctl.sh env >> ~/.bashrc` (or `.envrc`) to keep it. See
+`./otelctl.sh env --help` for the `--docker` flag.
+
 ## Output
 
 `otelctl.sh start` runs the aggregator (`aggregate.py --watch`) in the

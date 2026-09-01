@@ -31,6 +31,10 @@
    export OTEL_RESOURCE_ATTRIBUTES=service.name=my-session
    ```
 
+   To make this persistent instead of retyping it in every terminal, `./otelctl.sh
+   env` prints these same lines -- `eval "$(./otelctl.sh env)"`, or append to a
+   shell rc / `.envrc`. See `README.md` for the `--docker` variant.
+
 3. **Check the numbers**:
 
    ```

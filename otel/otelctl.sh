@@ -5,11 +5,12 @@
 # raw output into per-session stats.json files. One script, one thing to put
 # in your startup scripts.
 #
-#     otelctl.sh start | restart | stop | status | logs [collector|aggregate] [N]
+#     otelctl.sh start | restart | stop | status | logs [collector|aggregate] [N] | env [--docker]
 #
 # Nothing here depends on cld: it's an ordinary OTel collector plus a stdlib
 # Python script, shareable with your team as-is (point any Claude Code
-# session's OTEL_EXPORTER_OTLP_ENDPOINT at it).
+# session's OTEL_EXPORTER_OTLP_ENDPOINT at it). `env` prints the export
+# lines to do that persistently -- see its own comment below.
 #
 # State lives under $CLD_OTEL_DIR (default ~/.cld/otel): the raw metrics file
 # (data/raw-metrics.jsonl), the aggregator's PID file and log, and the
@@ -110,6 +111,36 @@ status() {
     if pid=$(agg_running); then echo "aggregate: running (pid $pid)"; else echo "aggregate: stopped"; fi
 }
 
+# --- env (persistent shell setup) ----------------------------------------
+
+# Prints the same export lines documented in README.md/QUICK-START.md,
+# sourceable directly (`eval "$(./otelctl.sh env)"`) or appendable to a
+# shell rc / `.envrc` (`./otelctl.sh env >> ~/.bashrc`). Defaults to
+# localhost -- the common case of a Claude Code session running directly on
+# this host; pass --docker for a session running inside a docker container
+# instead, which needs host.docker.internal to reach the collector.
+env_cmd() {
+    local host="localhost"
+    case "${1:-}" in
+        --docker) host="host.docker.internal" ;;
+        "") ;;
+        -h|--help)
+            echo "usage: otelctl.sh env [--docker]" >&2
+            echo "  (no flag)  host-side Claude Code session (default) -- localhost" >&2
+            echo "  --docker   Claude Code session running inside a docker container -- host.docker.internal" >&2
+            return 0 ;;
+        *) echo "usage: otelctl.sh env [--docker]" >&2; exit 2 ;;
+    esac
+    cat <<EOF
+export CLAUDE_CODE_ENABLE_TELEMETRY=1
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://${host}:${PORT}
+# edit this to identify the session -- keys the per-session stats output
+export OTEL_RESOURCE_ATTRIBUTES=service.name=my-session
+EOF
+}
+
 logs() {
     case "${1:-}" in
         collector) docker logs --tail "${2:-40}" "$CONTAINER_NAME" 2>&1 || echo "no container" ;;
@@ -127,5 +158,6 @@ case "${1:-}" in
     stop|shutdown)  stop ;;
     status)         status ;;
     logs)           logs "${2:-}" "${3:-40}" ;;
-    *) echo "usage: otelctl.sh {start|restart|stop|status|logs [collector|aggregate] [N]}" >&2; exit 2 ;;
+    env)            env_cmd "${2:-}" ;;
+    *) echo "usage: otelctl.sh {start|restart|stop|status|logs [collector|aggregate] [N]|env [--docker]}" >&2; exit 2 ;;
 esac
