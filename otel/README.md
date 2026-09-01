@@ -66,9 +66,11 @@ keep tailing). It defaults to `$CLD_OTEL_DIR/data/raw-metrics.jsonl` and
 `--input`/`--output-dir` for a different layout.
 
 Output is one folder per `service.name`, one file per Claude Code session
-inside it -- `stats/<service.name>/session-<id-prefix>.json` -- sums held
-over the metric's whole lifetime (all three Claude Code metrics are delta
-counters, so exports are summed, not overwritten):
+inside it -- `stats/<service.name>/session-<id-prefix>.json`, or
+`stats/<service.name>/<rename>-<id-prefix>.json` if the session has been
+renamed with Claude Code's own `/rename` -- sums held over the metric's
+whole lifetime (all three Claude Code metrics are delta counters, so
+exports are summed, not overwritten):
 
 ```json
 {
@@ -92,8 +94,28 @@ long-lived `service.name` (e.g. a `cld master` container, or a host session
 that reuses the same name across runs) still gets one file per distinct
 session, without cld or this pipeline having to track session identity
 itself. Renaming a session in Claude Code doesn't change its `session.id`,
-so a renamed session keeps writing to the same file; forking mints a new
-`session.id`, so a fork starts a new file.
+so a renamed session keeps writing to the same file (see below); forking
+mints a new `session.id`, so a fork starts a new file.
+
+`/rename` itself never touches OTel -- the aggregator instead reads the name
+back out of the session's own Claude Code transcript
+(`~/.claude/projects/<project-slug>/<session-id>.jsonl`, matched by
+`session.id`), which cld bind-mounts into every container at the same path
+as the host. This is checked on every export batch, so a rename shows up on
+the next export after it happens, and the existing file's history moves
+with it -- across a `/fork`, an `otelctl.sh restart`, and any further
+renames. A session that's never been renamed keeps the plain
+`session-<id-prefix>.json` name. On a host where `~/.claude` isn't reachable
+(no cld, not the same machine as the collector), names just never resolve
+and every session keeps the id-based filename -- override the transcript
+location with `$CLD_CLAUDE_DIR` (default `~/.claude`) if it lives elsewhere.
+
+Pass `--flat-output` to `aggregate.py` (or set `CLD_OTEL_FLAT_STATS=1`, which
+`otelctl.sh` picks up the same way it does `$CLD_OTEL_DIR`) to write
+`stats/<session>.json` directly instead of splitting into one folder per
+`service.name`. The default stays folder-split; switching the setting on an
+already-running session adopts its existing file rather than forking a new
+one under the other layout.
 
 `cache_read` tokens are billed far cheaper than fresh `input` tokens; a
 session with high `cache_read` relative to `input` is getting real value out
