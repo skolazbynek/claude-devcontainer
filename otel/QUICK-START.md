@@ -38,3 +38,7 @@
    ```
 
 See `README.md` for the full picture (data flow, output schema, caveats).
+
+Need this on another machine? See "Getting this on another machine" in
+`README.md` -- a `curl | tar` one-liner if you can reach github.com, or
+`./pack.sh` to hand someone a file (no network needed either end).

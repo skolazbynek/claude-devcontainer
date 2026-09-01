@@ -4,7 +4,7 @@ A standalone OpenTelemetry setup for tracking Claude Code's own cost, token,
 and active-time usage per session. Nothing here depends on cld -- it's an
 ordinary OTel Collector plus a small aggregation script, both usable by
 anyone running Claude Code, cld or not. cld just happens to be one client
-that points at it (see `stage_otel()` in `../cld/docker.py`).
+that points at it (see `stage_otel()` in cld's `cld/docker.py`).
 
 ```
 Claude Code (any session) --OTLP/http--> otel-collector --file exporter--> data/raw-metrics.jsonl --> aggregate.py --> stats/<service.name>/<session>.json
@@ -132,3 +132,72 @@ is best-effort, not transactional.
 - `otel/opentelemetry-collector-contrib` image (the `file` exporter used here
   isn't in the core `otel/opentelemetry-collector` image).
 - `aggregate.py` is stdlib-only Python 3 -- no install step.
+
+## Getting this on another machine
+
+Cloning the whole `cld` repo just to get these six files is unnecessary.
+Two ways to get just `otel/`, each for a different situation:
+
+### If you can reach github.com
+
+```
+curl -fsSL https://codeload.github.com/skolazbynek/claude-devcontainer/tar.gz/main \
+  | tar xz --strip-components=1 claude-devcontainer-main/otel
+```
+
+This fetches whatever is on `main` right now -- not necessarily whatever's in
+front of you locally. The `claude-devcontainer-main/` prefix follows the ref:
+swap `main` for a tag or a commit SHA and the prefix has to change to match
+(`claude-devcontainer-<ref>/otel`), or the archive won't have a member by that
+name.
+
+### If you can't, or you want to hand someone a file
+
+From inside any copy of `otel/`:
+
+```
+./pack.sh
+```
+
+This produces a single self-extracting file, `otel-standalone-<date>-<rev>.sh`
+(~26 KB) -- a readable header followed by a base64-encoded copy of this
+directory. Hand it to someone over whatever channel already exists (scp, a
+chat paste, a wiki attachment); they run:
+
+```
+bash otel-standalone-*.sh
+```
+
+and get an `otel/` directory to follow `QUICK-START.md` from. No repo access,
+no hosting, no build step needed on either end -- `pack.sh` is itself part of
+the payload, so a recipient can re-pack and pass it on. Unlike the `curl` form
+above, this packs *your* copy of the tree, not `main`.
+
+Useful flags:
+
+```
+otel-standalone-*.sh --list         # print provenance + manifest, extract nothing
+otel-standalone-*.sh --check        # verify the payload checksum only
+otel-standalone-*.sh --dir PATH     # extract somewhere other than ./otel
+pack.sh --tarball                   # emit a plain .tar.gz instead, for anyone
+                                     # who'd rather not run a script they were sent
+```
+
+The artifact is generated fresh from whatever is on disk every time
+`pack.sh` runs -- there's no separately maintained copy to drift out of sync.
+Each artifact carries a `PROVENANCE` file recording the source revision it
+was packed from.
+
+---
+
+`curl` leads because it's genuinely shorter for the common case. `pack.sh`
+isn't a fallback in the apologetic sense -- it's the only path that works
+offline, air-gapped, without GitHub access, or from a copy someone was
+already handed.
+
+If you already have repo access, `git sparse-checkout` works too and needs no
+new tooling -- a convenience for a live checkout, not really an install path:
+
+```
+git clone --filter=blob:none --sparse <url> && git sparse-checkout set otel
+```
