@@ -5,12 +5,16 @@
 # raw output into per-session stats.json files. One script, one thing to put
 # in your startup scripts.
 #
-#     otelctl.sh start | restart | stop | status | logs [collector|aggregate] [N] | env [--docker] | doctor
+#     otelctl.sh start | restart | stop | status | logs [collector|aggregate] [N]
+#                | env [--docker] | settings [--docker] [--service-name NAME]
+#                | settings install (--user|--project|--local|--file PATH) ...
+#                | doctor
 #
 # Nothing here depends on cld: it's an ordinary OTel collector plus a stdlib
 # Python script, shareable with your team as-is (point any Claude Code
 # session's OTEL_EXPORTER_OTLP_ENDPOINT at it). `env` prints the export
-# lines to do that persistently -- see its own comment below.
+# lines to do that persistently; `settings`/`settings install` do the same
+# via Claude Code's settings.json -- see their own comments below.
 #
 # State lives under $CLD_OTEL_DIR (default ~/.cld/otel): the raw metrics file
 # (data/raw-metrics.jsonl), the aggregator's PID file and log, and the
@@ -155,6 +159,8 @@ $(env_cmd)
 
 # session running inside a docker container on this host:
 $(env_cmd --docker)
+
+Prefer a config file to shell exports? \`./otelctl.sh settings --help\`
 EOF
 }
 
@@ -182,12 +188,29 @@ status() {
 
 # --- env (persistent shell setup) ----------------------------------------
 
+# Single source of truth for the five telemetry NAME=VALUE pairs -- consumed
+# by env_cmd (below) and by settings_cmd's JSON emitter (see "settings"
+# section), so the two never drift apart. Prints five "NAME=VALUE" lines,
+# unquoted; callers decide how to render them (export lines, JSON strings).
+telemetry_vars() {
+    local host="$1" service_name="${2:-my-session}"
+    cat <<EOF
+CLAUDE_CODE_ENABLE_TELEMETRY=1
+OTEL_METRICS_EXPORTER=otlp
+OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+OTEL_EXPORTER_OTLP_ENDPOINT=http://${host}:${PORT}
+OTEL_RESOURCE_ATTRIBUTES=service.name=${service_name}
+EOF
+}
+
 # Prints the same export lines documented in README.md/QUICK-START.md,
 # sourceable directly (`eval "$(./otelctl.sh env)"`) or appendable to a
 # shell rc / `.envrc` (`./otelctl.sh env >> ~/.bashrc`). Defaults to
 # localhost -- the common case of a Claude Code session running directly on
 # this host; pass --docker for a session running inside a docker container
 # instead, which needs host.docker.internal to reach the collector.
+#
+# Prefer a settings.json instead? See `otelctl.sh settings --help`.
 env_cmd() {
     local host="localhost"
     case "${1:-}" in
@@ -197,17 +220,377 @@ env_cmd() {
             echo "usage: otelctl.sh env [--docker]" >&2
             echo "  (no flag)  host-side Claude Code session (default) -- localhost" >&2
             echo "  --docker   Claude Code session running inside a docker container -- host.docker.internal" >&2
+            echo "  see also: otelctl.sh settings --help -- write this into Claude Code's settings.json instead" >&2
             return 0 ;;
         *) echo "usage: otelctl.sh env [--docker]" >&2; exit 2 ;;
     esac
-    cat <<EOF
-export CLAUDE_CODE_ENABLE_TELEMETRY=1
-export OTEL_METRICS_EXPORTER=otlp
-export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://${host}:${PORT}
-# edit this to identify the session -- keys the per-session stats output
-export OTEL_RESOURCE_ATTRIBUTES=service.name=my-session
-EOF
+    local line name value
+    while IFS='=' read -r name value; do
+        if [ "$name" = "OTEL_RESOURCE_ATTRIBUTES" ]; then
+            echo "# edit this to identify the session -- keys the per-session stats output"
+        fi
+        echo "export ${name}=${value}"
+    done < <(telemetry_vars "$host")
+}
+
+# --- settings (Claude Code settings.json config path) --------------------
+#
+# Design: docs/design-otel-settings-config.md. `settings` prints the
+# merge-ready {"env": {...}} fragment to stdout, human advice on stderr.
+# `settings install` merges it into a real settings.json, read-modify-write,
+# never touching any other key. Shared file-locating/parsing helpers (also
+# used by doctor's check 4 resolver) live in _settings_lib_py so the two
+# never disagree about where a settings file lives.
+
+# Shared python source: settings-file discovery (F3/F4/F12/F13) and safe
+# parsing. Every path here honors a DOCTOR_SETTINGS_* override so tests (and
+# doctor, for its own resolver) can point every tier at a tmp_path without
+# touching a real ~/.claude -- see docs/design-otel-settings-config.md's
+# "test hazard" note (_run_env has no $HOME, so a naive lookup would read the
+# developer's own settings file and make the suite machine-dependent).
+_settings_lib_py() {
+    cat <<'PYLIB'
+import json
+import os
+import sys
+from pathlib import Path
+
+TELEMETRY_KEYS = [
+    "CLAUDE_CODE_ENABLE_TELEMETRY",
+    "OTEL_METRICS_EXPORTER",
+    "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_RESOURCE_ATTRIBUTES",
+]
+
+
+def managed_settings_path():
+    override = os.environ.get("DOCTOR_SETTINGS_MANAGED")
+    if override:
+        return Path(override)
+    if sys.platform == "darwin":
+        return Path("/Library/Application Support/ClaudeCode/managed-settings.json")
+    return Path("/etc/claude-code/managed-settings.json")
+
+
+def user_settings_path():
+    override = os.environ.get("DOCTOR_SETTINGS_USER")
+    if override:
+        return Path(override)
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    return Path(config_dir) / "settings.json"
+
+
+def project_settings_path(cwd):
+    override = os.environ.get("DOCTOR_SETTINGS_PROJECT")
+    if override:
+        return Path(override)
+    return Path(cwd) / ".claude" / "settings.json"
+
+
+def local_settings_path(cwd):
+    override = os.environ.get("DOCTOR_SETTINGS_LOCAL")
+    if override:
+        return Path(override)
+    return Path(cwd) / ".claude" / "settings.local.json"
+
+
+def tier_paths(cwd):
+    """Precedence high -> low, excluding `claude --settings` (unreadable, F15)
+    and the shell (not a file)."""
+    return [
+        ("managed", managed_settings_path()),
+        ("local", local_settings_path(cwd)),
+        ("project", project_settings_path(cwd)),
+        ("user", user_settings_path()),
+    ]
+
+
+class SettingsFileError(Exception):
+    """A settings file that exists but cannot be used: unreadable, invalid
+    JSON, or a non-object top level. Message is ready to print as-is."""
+
+
+def read_settings_file(path):
+    """Parsed JSON object, or None if the file does not exist. Raises
+    SettingsFileError for anything that exists but is broken -- per F8, none
+    of that file's settings (not just the telemetry ones) apply until it
+    parses, so callers should treat this as a hard stop, not a soft skip."""
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise SettingsFileError(f"{path} is not readable: {e.strerror or e}")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise SettingsFileError(f"{path} is not valid JSON (line {e.lineno} column {e.colno}: {e.msg})")
+    if not isinstance(data, dict):
+        raise SettingsFileError(f"{path} does not contain a JSON object at the top level")
+    return data
+PYLIB
+}
+
+_settings_usage() {
+    echo "usage: otelctl.sh settings [--docker] [--service-name NAME]" >&2
+    echo "       otelctl.sh settings install (--user|--project|--local|--file PATH)" >&2
+    echo "                                   [--docker] [--service-name NAME] [--force] [--dry-run]" >&2
+}
+
+_settings_validate_service_name() {
+    case "$1" in
+        "")
+            echo "otelctl: --service-name must not be empty" >&2
+            exit 2 ;;
+        *[[:space:],=]*)
+            echo "otelctl: --service-name must not contain whitespace, a comma, or '=' -- OTEL_RESOURCE_ATTRIBUTES may not contain them" >&2
+            exit 2 ;;
+    esac
+}
+
+# Prints a merge-ready {"env": {...}} fragment for Claude Code's settings.json
+# to stdout, and nothing else -- `./otelctl.sh settings > frag.json` is exact.
+# Human advice goes to stderr. See `settings install` to merge it in directly.
+settings_print() {
+    local host="localhost" service_name="my-session" service_name_given=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --docker) host="host.docker.internal"; shift ;;
+            --service-name)
+                [ $# -ge 2 ] || { _settings_usage; exit 2; }
+                service_name="$2"; service_name_given=1
+                _settings_validate_service_name "$service_name"
+                shift 2 ;;
+            -h|--help)
+                _settings_usage
+                echo "  bare 'settings' prints a {\"env\": {...}} fragment to stdout for you to merge yourself" >&2
+                echo "  'settings install' merges it into a real settings.json -- see its own --help" >&2
+                return 0 ;;
+            *) _settings_usage; exit 2 ;;
+        esac
+    done
+    local vars
+    vars="$(telemetry_vars "$host" "$service_name")"
+    SETTINGS_VARS="$vars" "$PYTHON" - <<'PYEOF'
+import json
+import os
+import sys
+
+env = {}
+for line in os.environ["SETTINGS_VARS"].splitlines():
+    if not line:
+        continue
+    name, _, value = line.partition("=")
+    env[name] = value
+json.dump({"env": env}, sys.stdout, indent=2)
+sys.stdout.write("\n")
+PYEOF
+    if [ "$service_name_given" = "0" ]; then
+        echo "otelctl: edit service.name above -- it identifies this session's stats output" >&2
+    fi
+    echo "otelctl: settings-file values are read once at startup -- relaunch claude to apply a change" >&2
+}
+
+# Merges the fragment into a real settings.json: read-modify-write, touching
+# only settings["env"][KEY] for our five keys, everything else byte-for-byte
+# untouched. Design: docs/design-otel-settings-config.md D5-D8.
+settings_install() {
+    local target_kind="" target_path="" host="localhost" service_name="my-session"
+    local force=0 dry_run=0 docker_flag=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --user) target_kind="user"; shift ;;
+            --project) target_kind="project"; shift ;;
+            --local) target_kind="local"; shift ;;
+            --file) target_kind="file"; target_path="${2:-}"; shift 2 ;;
+            --docker) docker_flag=1; host="host.docker.internal"; shift ;;
+            --service-name)
+                [ $# -ge 2 ] || { _settings_usage; exit 2; }
+                service_name="$2"
+                _settings_validate_service_name "$service_name"
+                shift 2 ;;
+            --force) force=1; shift ;;
+            --dry-run) dry_run=1; shift ;;
+            -h|--help) _settings_usage; return 0 ;;
+            *) _settings_usage; exit 2 ;;
+        esac
+    done
+    if [ -z "$target_kind" ]; then
+        echo "otelctl: settings install needs a target -- --user, --project, --local, or --file PATH" >&2
+        _settings_usage
+        exit 2
+    fi
+    if [ "$target_kind" = "file" ] && [ -z "$target_path" ]; then
+        echo "otelctl: --file requires a path" >&2
+        exit 2
+    fi
+    if [ "$docker_flag" = "1" ] && [ "$target_kind" != "file" ]; then
+        cat >&2 <<'MSG'
+otelctl: --docker writes host.docker.internal, which only resolves inside a
+container. That endpoint in a host settings file breaks every host session.
+For a container, either point --file at that container's config dir, or run
+`otelctl.sh settings --docker` and paste it inside the container.
+MSG
+        exit 2
+    fi
+    if [ "$target_kind" = "project" ]; then
+        echo "otelctl: .claude/settings.json is meant to be committed -- everyone in this repo will pick up this collector. A shared service.name groups the team's sessions under one stats/<name>/ folder; they still split by session id, nothing is lost." >&2
+    fi
+
+    local vars
+    vars="$(telemetry_vars "$host" "$service_name")"
+    { _settings_lib_py; cat <<'PYEOF'
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+target_kind = os.environ["SETTINGS_TARGET_KIND"]
+target_path_env = os.environ.get("SETTINGS_TARGET_PATH", "")
+force = os.environ.get("SETTINGS_FORCE") == "1"
+dry_run = os.environ.get("SETTINGS_DRY_RUN") == "1"
+
+cwd = os.getcwd()
+if target_kind == "user":
+    target = user_settings_path()
+elif target_kind == "project":
+    target = project_settings_path(cwd)
+elif target_kind == "local":
+    target = local_settings_path(cwd)
+else:
+    target = Path(target_path_env)
+
+desired = {}
+for line in os.environ["SETTINGS_VARS"].splitlines():
+    if not line:
+        continue
+    name, _, value = line.partition("=")
+    desired[name] = value
+
+try:
+    existing = read_settings_file(target)
+except SettingsFileError as e:
+    print(f"otelctl: {e}", file=sys.stderr)
+    print("otelctl: refusing to merge into a file Claude Code itself cannot use -- fix the JSON first, or point --file elsewhere", file=sys.stderr)
+    sys.exit(1)
+
+created = existing is None
+original_bytes = target.read_bytes() if not created else None
+settings = existing if existing is not None else {}
+
+env_block = settings.get("env")
+if env_block is not None and not isinstance(env_block, dict):
+    print(f'otelctl: {target} has a top-level "env" key that is not an object -- refusing to replace it', file=sys.stderr)
+    sys.exit(1)
+if env_block is None:
+    env_block = {}
+    settings["env"] = env_block
+
+inserts, unchanged, conflicts = [], [], []
+for key in TELEMETRY_KEYS:
+    want = desired[key]
+    if key not in env_block:
+        inserts.append((key, want))
+    elif env_block[key] == want:
+        unchanged.append((key, want))
+    else:
+        conflicts.append((key, env_block[key], want))
+
+if conflicts and not force:
+    print(f"otelctl: refusing to change {len(conflicts)} existing value(s) in {target}", file=sys.stderr)
+    for key, old, new in conflicts:
+        print(f"  ~ {key}: {json.dumps(old)} -> {json.dumps(new)}", file=sys.stderr)
+    print(f"  ({len(inserts)} key(s) would be added, {len(unchanged)} already match)", file=sys.stderr)
+    print("re-run with --force to overwrite, or edit the file yourself", file=sys.stderr)
+    sys.exit(1)
+
+if not inserts and not conflicts:
+    print("already configured, no change")
+    sys.exit(0)
+
+applied_conflicts = list(conflicts)
+for key, old, new in applied_conflicts:
+    env_block[key] = new
+for key, want in inserts:
+    env_block[key] = want
+
+new_text = json.dumps(settings, indent=2) + "\n"
+
+if dry_run:
+    sys.stdout.write(new_text)
+    sys.exit(0)
+
+target.parent.mkdir(parents=True, exist_ok=True)
+tmp_path = target.with_name(target.name + f".otelctl-tmp-{os.getpid()}")
+tmp_path.write_text(new_text)
+if not created:
+    try:
+        shutil.copymode(target, tmp_path)
+    except OSError:
+        pass
+else:
+    os.chmod(tmp_path, 0o600)
+os.replace(tmp_path, target)
+
+# Verify (D7): re-read, and every pre-existing key -- outside our five,
+# inside or outside `env` -- must still be there, deep-equal. Any mismatch
+# restores the original bytes rather than leaving a bad write in place.
+verify_ok = True
+try:
+    reread = json.loads(target.read_text())
+except (OSError, json.JSONDecodeError):
+    verify_ok = False
+else:
+    if created:
+        baseline, baseline_env = {}, {}
+    else:
+        # Re-parsed from the pre-mutation bytes, not `existing` -- `settings`
+        # (built from `existing`) was mutated in place above, so comparing
+        # against `existing` would compare the write against itself.
+        baseline = json.loads(original_bytes)
+        baseline_env = baseline.get("env") if isinstance(baseline.get("env"), dict) else {}
+    for k, v in baseline.items():
+        if k != "env" and reread.get(k) != v:
+            verify_ok = False
+            break
+    if verify_ok:
+        reread_env = reread.get("env") if isinstance(reread.get("env"), dict) else {}
+        for k, v in baseline_env.items():
+            if k not in TELEMETRY_KEYS and reread_env.get(k) != v:
+                verify_ok = False
+                break
+
+if not verify_ok:
+    if created:
+        try:
+            target.unlink()
+        except OSError:
+            pass
+    else:
+        target.write_bytes(original_bytes)
+    print(f"otelctl: internal error -- verification failed writing {target}, restored the original file. Please report this as a bug.", file=sys.stderr)
+    sys.exit(1)
+
+for key, want in inserts:
+    print(f"+ {key} = {want}")
+for key, old, new in applied_conflicts:
+    print(f"~ {key}: {old} -> {new}")
+for key, want in unchanged:
+    print(f"= {key}")
+print(("created " if created else "updated ") + str(target))
+PYEOF
+    } | SETTINGS_TARGET_KIND="$target_kind" SETTINGS_TARGET_PATH="$target_path" \
+        SETTINGS_FORCE="$force" SETTINGS_DRY_RUN="$dry_run" SETTINGS_VARS="$vars" \
+        "$PYTHON" -
+}
+
+settings_cmd() {
+    case "${1:-}" in
+        install) settings_install "${@:2}" ;;
+        *) settings_print "$@" ;;
+    esac
 }
 
 logs() {
@@ -236,6 +619,17 @@ DOCTOR_SKIP_COUNT=0
 DOCTOR_FIRST_FAIL_LABEL=""
 DOCTOR_FIRST_FAIL_DETAIL=""
 declare -a DOCTOR_FAIL_LABELS_ARR
+
+# Resolved telemetry config (design: docs/design-otel-settings-config.md
+# Part 2). Populated by the resolver seam before doctor_check_env runs;
+# empty by default so doctor_check_env, cfg_get and cfg_src work whether or
+# not the resolver ran (e.g. under the TestDoctorCheckEnv harness, which
+# drives doctor_check_env directly). CFG_PATHS parallels CFG_NAMES/SRCS/VALS
+# with each record's source file, empty for a shell-sourced record.
+declare -a CFG_NAMES=() CFG_SRCS=() CFG_VALS=() CFG_PATHS=()
+declare -a TIER_TAGS_ARR=() TIER_PATHS_ARR=() TIER_FOUND_ARR=()
+DOCTOR_CFG_FROM_FILE=0
+DOCTOR_SUPPRESS_SHELL_OTEL=0
 
 doctor_report() {
     # doctor_report STATE LABEL MESSAGE [DETAIL]
@@ -389,53 +783,402 @@ doctor_check_collector() {
     fi
 }
 
+# --- check 4: telemetry cfg (settings files + shell) ----------------------
+#
+# Design: docs/design-otel-settings-config.md Part 2. Once telemetry config
+# can live in Claude Code's settings.json instead of (or as well as) the
+# shell, check 4 must resolve the same way Claude Code itself does (F3:
+# per-variable, highest-precedence tier wins) before it can say anything
+# true. The resolver below is a second invocation of doctor's existing
+# python seam (docs/design-otel-doctor.md D6), run *before* check 4 so its
+# output is ready when check 4 wants to print. doctor_cfg_get/doctor_cfg_src
+# fall back to the process environment (source tag "shell") when the
+# resolver found nothing for a name -- see D14 -- which is also what makes
+# every pre-existing TestDoctorCheckEnv assertion keep testing the same
+# logic: that harness drives doctor_check_env directly, the resolver never
+# runs, CFG_NAMES stays empty, and every lookup falls through to the shell.
+#
+# Protocol on top of doctor_report's existing `report|STATE|LABEL|MSG|DETAIL`
+# (docs/design-otel-doctor.md D6): two more record kinds, read the same way
+# (process substitution, never a pipe, or the array appends below happen in
+# a subshell and vanish -- docs/design-otel-doctor.md's own gotcha, and
+# D13's restatement of it for this seam):
+#   cfg|NAME|SOURCE_TAG|VALUE|PATH   -- one variable's resolved value
+#   tier|TAG|PATH|FOUND              -- one settings-file tier, for the
+#                                        "resolved from" legend line
+_doctor_cfg_resolver_py() {
+    cat <<'PYEOF'
+import os
+
+DOCTOR_CFG_NAMES = [
+    "CLAUDE_CODE_ENABLE_TELEMETRY",
+    "OTEL_METRICS_EXPORTER",
+    "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+    "OTEL_RESOURCE_ATTRIBUTES",
+    "OTEL_METRICS_INCLUDE_SESSION_ID",
+    "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE",
+    "OTEL_METRIC_EXPORT_INTERVAL",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+]
+
+
+def _clean(s):
+    return str(s).replace("|", "/").replace("\n", " ").strip()
+
+
+def cfg(name, tag, value, path=""):
+    print(f"cfg|{_clean(name)}|{_clean(tag)}|{_clean(value)}|{_clean(path)}", flush=True)
+
+
+def report(state, label, message, detail=""):
+    print(f"report|{_clean(state)}|{_clean(label)}|{_clean(message)}|{_clean(detail)}", flush=True)
+
+
+def tier_record(tag, path, found):
+    print(f"tier|{_clean(tag)}|{_clean(path)}|{1 if found else 0}", flush=True)
+
+
+def _resolve():
+    cwd = os.getcwd()
+    tiers = tier_paths(cwd)  # from _settings_lib_py: managed, local, project, user
+
+    # Pass 1: locate + parse every tier. A file that exists but doesn't parse
+    # (or isn't readable) is a `report|fail` per D18 -- none of its settings
+    # apply, telemetry or otherwise -- and contributes nothing to the merge.
+    parsed = {}
+    for tag, path in tiers:
+        try:
+            data = read_settings_file(path)
+        except SettingsFileError as e:
+            report("fail", "telemetry cfg", str(e),
+                   "Claude Code applies none of that file's settings until it parses")
+            tier_record(tag, str(path), False)
+            continue
+        if data is None:
+            tier_record(tag, str(path), False)
+            continue
+        tier_record(tag, str(path), True)
+        env_block = data.get("env")
+        if env_block is None:
+            continue
+        if not isinstance(env_block, dict):
+            report("warn", "telemetry cfg",
+                   f'{path} has a top-level "env" key that is not an object',
+                   "Claude Code will reject or ignore it")
+            continue
+        parsed[tag] = (path, env_block)
+
+    # Pass 2: per-variable merge, highest-precedence tier wins (F3), first
+    # tier in `tiers` order that sets a name is that name's winner. An empty
+    # string is an explicit unset (F9/D19), tagged so check 4 can word it
+    # as one.
+    resolved = {}
+    for tag, path in tiers:
+        if tag not in parsed:
+            continue
+        _, env_block = parsed[tag]
+        for name in DOCTOR_CFG_NAMES:
+            if name in resolved or name not in env_block:
+                continue
+            value = env_block[name]
+            if not isinstance(value, str):
+                report("warn", "telemetry cfg",
+                       f'{path} sets {name} to a non-string value ({value!r}) -- env values must be strings',
+                       "treated as str(value) for the rest of this report")
+                value = str(value)
+            resolved[name] = (f"{tag}:cleared" if value == "" else tag, value, str(path))
+
+    # F11/D20: a managed *generic* endpoint or protocol removes every
+    # lower-tier *per-signal* value at Claude Code startup, so reporting the
+    # per-signal value here (F16's ordinary preference) would be reporting a
+    # value Claude Code has already discarded.
+    managed_env = parsed.get("managed", (None, {}))[1]
+    for generic, per_signal in (
+        ("OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"),
+        ("OTEL_EXPORTER_OTLP_PROTOCOL", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"),
+    ):
+        if generic in managed_env and managed_env.get(generic, "") != "" and per_signal in resolved \
+                and not resolved[per_signal][0].startswith("managed"):
+            dropped_tag, dropped_value, _ = resolved.pop(per_signal)
+            report("warn", "telemetry cfg",
+                   f"{per_signal}={dropped_value} from {dropped_tag} is dropped at startup -- "
+                   f"managed settings set the generic {generic}",
+                   "managed settings remove developer-set per-signal OTLP variables when the generic "
+                   "one is set (this changed in v2.1.217 -- see the monitoring-usage docs for your version)")
+
+    for name, (tag, value, path) in resolved.items():
+        cfg(name, tag, value, path)
+
+
+# The resolver must never fail the run (design's implementation notes): an
+# exception here would otherwise cut the process-substitution stream short
+# mid-parse, silently starving doctor_check_env of some or all CFG_* records
+# with no indication why. Report it and move on -- doctor_check_env falls
+# back to the shell for anything left unresolved, same as it does today for
+# a name the resolver legitimately found nothing for.
+try:
+    _resolve()
+except Exception as e:
+    report("warn", "telemetry cfg", f"settings-file resolver failed unexpectedly: {e}",
+           "falling back to shell environment only for this run")
+PYEOF
+}
+
+# Effective value + source tag for NAME: a resolver record if the settings
+# files supplied one, else the process environment ("shell"), except that a
+# Claude Code child session (doctor_check_env sets DOCTOR_SUPPRESS_SHELL_OTEL)
+# must never treat a missing OTEL_* shell value as evidence of anything --
+# per F6 it was deliberately withheld, not left unset (D16).
+doctor_cfg_get() {
+    local name="$1" i
+    for ((i = 0; i < ${#CFG_NAMES[@]}; i++)); do
+        if [ "${CFG_NAMES[$i]}" = "$name" ]; then
+            echo "${CFG_VALS[$i]}"
+            return 0
+        fi
+    done
+    if [ "$DOCTOR_SUPPRESS_SHELL_OTEL" = "1" ] && [[ "$name" == OTEL_* ]]; then
+        echo ""
+        return 0
+    fi
+    echo "${!name:-}"
+}
+
+doctor_cfg_src() {
+    local name="$1" i
+    for ((i = 0; i < ${#CFG_NAMES[@]}; i++)); do
+        if [ "${CFG_NAMES[$i]}" = "$name" ]; then
+            echo "${CFG_SRCS[$i]}"
+            return 0
+        fi
+    done
+    if [ "$DOCTOR_SUPPRESS_SHELL_OTEL" = "1" ] && [[ "$name" == OTEL_* ]]; then
+        echo ""
+        return 0
+    fi
+    if [ -n "${!name:-}" ]; then echo "shell"; else echo ""; fi
+}
+
+# Path a cfg record's source came from, "" for shell/absent.
+doctor_cfg_path() {
+    local name="$1" i
+    for ((i = 0; i < ${#CFG_NAMES[@]}; i++)); do
+        if [ "${CFG_NAMES[$i]}" = "$name" ]; then
+            echo "${CFG_PATHS[$i]}"
+            return 0
+        fi
+    done
+    echo ""
+}
+
+# Runs the resolver and populates CFG_NAMES/CFG_SRCS/CFG_VALS/CFG_PATHS and
+# TIER_TAGS_ARR/TIER_PATHS_ARR/TIER_FOUND_ARR. A no-op (arrays stay empty)
+# without python -- doctor_check_env's process-environment path still works,
+# per D15's PYTHON_OK row.
+doctor_check_cfg_resolve() {
+    CFG_NAMES=(); CFG_SRCS=(); CFG_VALS=(); CFG_PATHS=()
+    TIER_TAGS_ARR=(); TIER_PATHS_ARR=(); TIER_FOUND_ARR=()
+    if [ "${PYTHON_OK:-0}" != "1" ]; then
+        return
+    fi
+    while IFS='|' read -r kind a b c d; do
+        case "$kind" in
+            report) doctor_report "$a" "$b" "$c" "${d:-}" ;;
+            cfg)    CFG_NAMES+=("$a"); CFG_SRCS+=("$b"); CFG_VALS+=("$c"); CFG_PATHS+=("${d:-}") ;;
+            tier)   TIER_TAGS_ARR+=("$a"); TIER_PATHS_ARR+=("$b"); TIER_FOUND_ARR+=("${c:-0}") ;;
+        esac
+    done < <({ _settings_lib_py; _doctor_cfg_resolver_py; } | "$PYTHON" -)
+}
+
+doctor_cfg_report_legend() {
+    local parts="" i tag path found count j v shell_count=0
+    for ((i = 0; i < ${#TIER_TAGS_ARR[@]}; i++)); do
+        tag="${TIER_TAGS_ARR[$i]}"; path="${TIER_PATHS_ARR[$i]}"; found="${TIER_FOUND_ARR[$i]}"
+        [ "$found" = "1" ] || continue
+        count=0
+        for ((j = 0; j < ${#CFG_SRCS[@]}; j++)); do
+            case "${CFG_SRCS[$j]}" in
+                "$tag"|"$tag:cleared") count=$((count + 1)) ;;
+            esac
+        done
+        [ -n "$parts" ] && parts="$parts, "
+        parts="${parts}${tag}=${path} (${count} value(s))"
+    done
+    for v in CLAUDE_CODE_ENABLE_TELEMETRY OTEL_METRICS_EXPORTER OTEL_EXPORTER_OTLP_PROTOCOL \
+             OTEL_EXPORTER_OTLP_METRICS_PROTOCOL OTEL_EXPORTER_OTLP_ENDPOINT \
+             OTEL_EXPORTER_OTLP_METRICS_ENDPOINT OTEL_RESOURCE_ATTRIBUTES \
+             OTEL_METRICS_INCLUDE_SESSION_ID OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE \
+             OTEL_METRIC_EXPORT_INTERVAL OTEL_EXPORTER_OTLP_HEADERS; do
+        [ "$(doctor_cfg_src "$v")" = "shell" ] && shell_count=$((shell_count + 1))
+    done
+    [ -n "$parts" ] && parts="$parts, "
+    parts="${parts}shell (${shell_count} value(s))"
+    doctor_report ok "telemetry cfg" "resolved from: $parts" \
+        "not visible to doctor: \`claude --settings\`, MDM/registry/server-managed policy, managed-settings.d/ drop-ins, and any settings file outside \$PWD"
+}
+
+# D17: a shell export shadowed by a higher-precedence settings-file value is
+# dead (F2) -- confusing, but never a `fail`: the file's value, already
+# validated above, is the one actually in effect.
+doctor_cfg_report_contradictions() {
+    local names="" detail="" count=0 v src shell_val val path plural verb
+    for v in CLAUDE_CODE_ENABLE_TELEMETRY OTEL_METRICS_EXPORTER OTEL_EXPORTER_OTLP_PROTOCOL \
+             OTEL_EXPORTER_OTLP_METRICS_PROTOCOL OTEL_EXPORTER_OTLP_ENDPOINT \
+             OTEL_EXPORTER_OTLP_METRICS_ENDPOINT OTEL_RESOURCE_ATTRIBUTES \
+             OTEL_METRICS_INCLUDE_SESSION_ID OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE \
+             OTEL_METRIC_EXPORT_INTERVAL OTEL_EXPORTER_OTLP_HEADERS; do
+        src="$(doctor_cfg_src "$v")"
+        case "$src" in "" | shell) continue ;; esac
+        if [ "$DOCTOR_SUPPRESS_SHELL_OTEL" = "1" ] && [[ "$v" == OTEL_* ]]; then continue; fi
+        shell_val="${!v:-}"
+        [ -n "$shell_val" ] || continue
+        val="$(doctor_cfg_get "$v")"
+        [ "$shell_val" = "$val" ] && continue
+        path="$(doctor_cfg_path "$v")"
+        count=$((count + 1))
+        [ -n "$names" ] && names="$names, "
+        names="${names}${v}"
+        [ -n "$detail" ] && detail="$detail; "
+        detail="${detail}${v}: ${path} wins with \"${val}\", the shell export \"${shell_val}\" is dead"
+    done
+    if [ "$count" -gt 0 ]; then
+        plural="s"; verb="have"; [ "$count" = 1 ] && { plural=""; verb="has"; }
+        doctor_report warn "telemetry cfg" \
+            "$count shell export$plural shadowed by a settings-file value and $verb no effect: $names" \
+            "settings files override shell exports (F2) -- $detail"
+    fi
+}
+
 doctor_check_env() {
-    local v any_set=0
+    local is_child=0 child_signal=""
+    if [ "${CLAUDE_CODE_CHILD_SESSION:-}" = "1" ]; then
+        is_child=1; child_signal="CLAUDE_CODE_CHILD_SESSION"
+    elif [ "${CLAUDECODE:-}" = "1" ]; then
+        is_child=1; child_signal="CLAUDECODE -- an older Claude Code (< v2.1.172); weaker signal than CLAUDE_CODE_CHILD_SESSION"
+    fi
+    DOCTOR_SUPPRESS_SHELL_OTEL=$is_child
+    DOCTOR_CFG_FROM_FILE=0
+    [ "${#CFG_NAMES[@]}" -gt 0 ] && DOCTOR_CFG_FROM_FILE=1
+
+    # any_set is keyed on *source*, not value -- an explicit "" (cleared, F9)
+    # is meaningful config and must be validated (and reported as cleared),
+    # not treated as if nothing were configured at all.
+    #
+    # otel_source_visible is narrower: only the 6 OTEL_* names, since
+    # CLAUDE_CODE_ENABLE_TELEMETRY is passed through to a Claude Code child
+    # process even though OTEL_* is withheld (F6) -- so it alone being
+    # visible must never satisfy the "can validate the pipeline" gate below,
+    # or every OTEL_* var falsely reads as "not set" (D16 case 2, the
+    # regression this whole resolver seam exists to fix).
+    local v any_set=0 otel_source_visible=0
     for v in CLAUDE_CODE_ENABLE_TELEMETRY OTEL_METRICS_EXPORTER OTEL_EXPORTER_OTLP_PROTOCOL \
              OTEL_EXPORTER_OTLP_METRICS_PROTOCOL OTEL_EXPORTER_OTLP_ENDPOINT \
              OTEL_EXPORTER_OTLP_METRICS_ENDPOINT OTEL_RESOURCE_ATTRIBUTES; do
-        if [ -n "${!v:-}" ]; then any_set=1; fi
+        if [ -n "$(doctor_cfg_src "$v")" ]; then
+            any_set=1
+            [[ "$v" == OTEL_* ]] && otel_source_visible=1
+        fi
     done
 
-    if [ "$any_set" = "0" ]; then
-        doctor_report warn "shell env" "no telemetry variables set in this shell" \
-            "doctor sees only exported variables; a wrapper (cld, systemd, an IDE) sets them in its own environment, which may be fine"
+    if [ "$is_child" = "1" ] && [ "$otel_source_visible" = "0" ]; then
+        # D16/D11 case 2: OTEL_* is withheld from this process on purpose (F6),
+        # so its absence here is not evidence of anything, even if
+        # CLAUDE_CODE_ENABLE_TELEMETRY (which IS passed through) is visible --
+        # must never fail or warn about individual variables, just say why
+        # nothing conclusive can be seen from here.
+        doctor_report warn "telemetry cfg" \
+            "running inside Claude Code -- OTEL_* is withheld from tool subprocesses ($child_signal)" \
+            "this session's telemetry config cannot be read from here; run \`otelctl.sh doctor\` in a plain terminal, or check the settings files above"
         return
     fi
 
-    if [ "${CLAUDE_CODE_ENABLE_TELEMETRY:-}" = "1" ]; then
-        doctor_report ok "shell env" "telemetry enabled"
-    elif [ -z "${CLAUDE_CODE_ENABLE_TELEMETRY:-}" ]; then
-        doctor_report fail "shell env" "CLAUDE_CODE_ENABLE_TELEMETRY is not set" "export CLAUDE_CODE_ENABLE_TELEMETRY=1"
-    else
-        doctor_report warn "shell env" "CLAUDE_CODE_ENABLE_TELEMETRY=${CLAUDE_CODE_ENABLE_TELEMETRY} -- only \"1\" is documented" "export CLAUDE_CODE_ENABLE_TELEMETRY=1"
+    if [ "$any_set" = "0" ]; then
+        doctor_report warn "telemetry cfg" "no telemetry configuration found" \
+            "checked: managed settings, .claude/settings.local.json, .claude/settings.json, \${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json, and this shell's exports -- a wrapper (cld, systemd, an IDE) may set these somewhere doctor cannot see"
+        return
     fi
 
-    local exporter="${OTEL_METRICS_EXPORTER:-}"
-    if [ -z "$exporter" ]; then
-        doctor_report fail "shell env" "OTEL_METRICS_EXPORTER is not set" "export OTEL_METRICS_EXPORTER=otlp"
-    elif ! printf '%s' ",$exporter," | grep -q ',otlp,'; then
-        doctor_report fail "shell env" "OTEL_METRICS_EXPORTER=$exporter does not include otlp" "export OTEL_METRICS_EXPORTER=otlp"
+    doctor_cfg_report_legend
+
+    local val src path
+    val="$(doctor_cfg_get CLAUDE_CODE_ENABLE_TELEMETRY)"; src="$(doctor_cfg_src CLAUDE_CODE_ENABLE_TELEMETRY)"
+    path="$(doctor_cfg_path CLAUDE_CODE_ENABLE_TELEMETRY)"
+    if [ "$val" = "1" ]; then
+        doctor_report ok "telemetry cfg" "telemetry enabled [$src]"
+    elif [ -z "$val" ]; then
+        if [[ "$src" == *:cleared ]]; then
+            doctor_report fail "telemetry cfg" "CLAUDE_CODE_ENABLE_TELEMETRY is cleared to \"\" by $path" \
+                "an empty value counts as unset (F9); remove the entry or set it to \"1\""
+        else
+            doctor_report fail "telemetry cfg" "CLAUDE_CODE_ENABLE_TELEMETRY is not set" \
+                "export CLAUDE_CODE_ENABLE_TELEMETRY=1, or set it in settings.json's env block"
+        fi
     else
-        doctor_report ok "shell env" "OTEL_METRICS_EXPORTER includes otlp"
+        doctor_report warn "telemetry cfg" "CLAUDE_CODE_ENABLE_TELEMETRY=${val} -- only \"1\" is documented [$src]" "set it to \"1\""
     fi
 
-    local protocol="${OTEL_EXPORTER_OTLP_METRICS_PROTOCOL:-${OTEL_EXPORTER_OTLP_PROTOCOL:-}}"
+    val="$(doctor_cfg_get OTEL_METRICS_EXPORTER)"; src="$(doctor_cfg_src OTEL_METRICS_EXPORTER)"
+    path="$(doctor_cfg_path OTEL_METRICS_EXPORTER)"
+    if [ -z "$val" ]; then
+        if [[ "$src" == *:cleared ]]; then
+            doctor_report fail "telemetry cfg" "OTEL_METRICS_EXPORTER is cleared to \"\" by $path" \
+                "an empty value counts as unset (F9); remove the entry or set it to \"otlp\""
+        else
+            doctor_report fail "telemetry cfg" "OTEL_METRICS_EXPORTER is not set" \
+                "export OTEL_METRICS_EXPORTER=otlp, or set it in settings.json's env block"
+        fi
+    elif ! printf '%s' ",$val," | grep -q ',otlp,'; then
+        doctor_report fail "telemetry cfg" "OTEL_METRICS_EXPORTER=$val does not include otlp [$src]" "set it to otlp"
+    else
+        doctor_report ok "telemetry cfg" "OTEL_METRICS_EXPORTER includes otlp [$src]"
+    fi
+
+    local protocol proto_src
+    protocol="$(doctor_cfg_get OTEL_EXPORTER_OTLP_METRICS_PROTOCOL)"
+    proto_src="$(doctor_cfg_src OTEL_EXPORTER_OTLP_METRICS_PROTOCOL)"
+    path="$(doctor_cfg_path OTEL_EXPORTER_OTLP_METRICS_PROTOCOL)"
     if [ -z "$protocol" ]; then
-        doctor_report fail "shell env" "OTEL_EXPORTER_OTLP_PROTOCOL is not set" \
-            "Claude Code has no default protocol, so nothing is exported; export OTEL_EXPORTER_OTLP_PROTOCOL=http/json"
+        protocol="$(doctor_cfg_get OTEL_EXPORTER_OTLP_PROTOCOL)"
+        proto_src="$(doctor_cfg_src OTEL_EXPORTER_OTLP_PROTOCOL)"
+        path="$(doctor_cfg_path OTEL_EXPORTER_OTLP_PROTOCOL)"
+    fi
+    if [ -z "$protocol" ]; then
+        if [[ "$proto_src" == *:cleared ]]; then
+            doctor_report fail "telemetry cfg" "OTEL_EXPORTER_OTLP_PROTOCOL is cleared to \"\" by $path" \
+                "an empty value counts as unset (F9); remove the entry or set it to \"http/json\""
+        else
+            doctor_report fail "telemetry cfg" "OTEL_EXPORTER_OTLP_PROTOCOL is not set" \
+                "Claude Code has no default protocol, so nothing is exported; export OTEL_EXPORTER_OTLP_PROTOCOL=http/json, or set it in settings.json's env block"
+        fi
     elif [ "$protocol" != "http/json" ] && [ "$protocol" != "http/protobuf" ]; then
-        doctor_report fail "shell env" "OTEL_EXPORTER_OTLP_PROTOCOL=$protocol -- the collector only opens an HTTP receiver" \
-            "export OTEL_EXPORTER_OTLP_PROTOCOL=http/json"
+        doctor_report fail "telemetry cfg" "OTEL_EXPORTER_OTLP_PROTOCOL=$protocol -- the collector only opens an HTTP receiver [$proto_src]" \
+            "set it to http/json"
     elif [ "$protocol" = "http/protobuf" ]; then
-        doctor_report ok "shell env" "protocol $protocol (fine -- the file exporter re-marshals to JSON regardless)"
+        doctor_report ok "telemetry cfg" "protocol $protocol (fine -- the file exporter re-marshals to JSON regardless) [$proto_src]"
     else
-        doctor_report ok "shell env" "protocol $protocol"
+        doctor_report ok "telemetry cfg" "protocol $protocol [$proto_src]"
     fi
 
-    local endpoint="${OTEL_EXPORTER_OTLP_METRICS_ENDPOINT:-${OTEL_EXPORTER_OTLP_ENDPOINT:-}}"
+    local endpoint ep_src
+    endpoint="$(doctor_cfg_get OTEL_EXPORTER_OTLP_METRICS_ENDPOINT)"
+    ep_src="$(doctor_cfg_src OTEL_EXPORTER_OTLP_METRICS_ENDPOINT)"
+    path="$(doctor_cfg_path OTEL_EXPORTER_OTLP_METRICS_ENDPOINT)"
     if [ -z "$endpoint" ]; then
-        doctor_report fail "shell env" "OTEL_EXPORTER_OTLP_ENDPOINT is not set" "export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:$PORT"
+        endpoint="$(doctor_cfg_get OTEL_EXPORTER_OTLP_ENDPOINT)"
+        ep_src="$(doctor_cfg_src OTEL_EXPORTER_OTLP_ENDPOINT)"
+        path="$(doctor_cfg_path OTEL_EXPORTER_OTLP_ENDPOINT)"
+    fi
+    if [ -z "$endpoint" ]; then
+        if [[ "$ep_src" == *:cleared ]]; then
+            doctor_report fail "telemetry cfg" "OTEL_EXPORTER_OTLP_ENDPOINT is cleared to \"\" by $path" \
+                "an empty value counts as unset (F9); remove the entry or set it to http://localhost:$PORT"
+        else
+            doctor_report fail "telemetry cfg" "OTEL_EXPORTER_OTLP_ENDPOINT is not set" \
+                "export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:$PORT, or set it in settings.json's env block"
+        fi
     else
         local scheme rest host ep_host ep_port
         scheme="${endpoint%%://*}"
@@ -444,65 +1187,76 @@ doctor_check_env() {
         ep_host="${host%%:*}"
         if [[ "$host" == *:* ]]; then ep_port="${host##*:}"; else ep_port=80; fi
         if [ "$scheme" != "http" ]; then
-            doctor_report fail "shell env" "OTEL_EXPORTER_OTLP_ENDPOINT uses scheme \"$scheme\" -- no TLS is configured" \
-                "export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:$PORT"
+            doctor_report fail "telemetry cfg" "OTEL_EXPORTER_OTLP_ENDPOINT uses scheme \"$scheme\" -- no TLS is configured [$ep_src]" \
+                "set it to http://localhost:$PORT"
         elif [ "$ep_port" != "$PORT" ]; then
-            doctor_report fail "shell env" "OTEL_EXPORTER_OTLP_ENDPOINT port $ep_port != collector port $PORT" \
-                "export OTEL_EXPORTER_OTLP_ENDPOINT=http://$ep_host:$PORT"
+            doctor_report fail "telemetry cfg" "OTEL_EXPORTER_OTLP_ENDPOINT port $ep_port != collector port $PORT [$ep_src]" \
+                "set it to http://$ep_host:$PORT"
         elif [ "$ep_host" = "localhost" ] || [ "$ep_host" = "127.0.0.1" ] || [ "$ep_host" = "::1" ] \
              || [ "$ep_host" = "host.docker.internal" ] || [[ "$ep_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             # Accepted set first, no resolution probe -- host.docker.internal is the
             # *correct* endpoint for a containerised session and does not resolve on
             # the host doctor itself runs on, so resolution-testing it would report
             # the recommended config as broken. A literal IP needs no resolving.
-            doctor_report ok "shell env" "endpoint http://$ep_host:$PORT"
+            doctor_report ok "telemetry cfg" "endpoint http://$ep_host:$PORT [$ep_src]"
         elif [ "${PYTHON_OK:-0}" = "1" ]; then
             # getent is glibc-only and absent on macOS, a first-class target for this
             # folder -- treating a missing getent as "unresolvable" would fail every
             # macOS user's endpoint. socket.getaddrinfo is portable.
             if "$PYTHON" -c "import socket,sys; socket.getaddrinfo(sys.argv[1], None)" "$ep_host" >/dev/null 2>&1; then
-                doctor_report fail "shell env" "OTEL_EXPORTER_OTLP_ENDPOINT host \"$ep_host\" is neither loopback, host.docker.internal, nor a literal IP" \
+                doctor_report fail "telemetry cfg" "OTEL_EXPORTER_OTLP_ENDPOINT host \"$ep_host\" is neither loopback, host.docker.internal, nor a literal IP [$ep_src]" \
                     "the collector only binds loopback and its docker bridge gateway IP -- this endpoint may point at a different machine's collector"
             else
-                doctor_report fail "shell env" "OTEL_EXPORTER_OTLP_ENDPOINT host \"$ep_host\" does not resolve" \
-                    "export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:$PORT"
+                doctor_report fail "telemetry cfg" "OTEL_EXPORTER_OTLP_ENDPOINT host \"$ep_host\" does not resolve [$ep_src]" \
+                    "set it to http://localhost:$PORT"
             fi
         else
-            doctor_report skip "shell env" "endpoint host \"$ep_host\" resolution" "cannot resolve without python3"
+            doctor_report skip "telemetry cfg" "endpoint host \"$ep_host\" resolution" "cannot resolve without python3"
         fi
     fi
 
-    local attrs="${OTEL_RESOURCE_ATTRIBUTES:-}"
+    local attrs attrs_src
+    attrs="$(doctor_cfg_get OTEL_RESOURCE_ATTRIBUTES)"
+    attrs_src="$(doctor_cfg_src OTEL_RESOURCE_ATTRIBUTES)"
     if [ -z "$attrs" ] || [[ "$attrs" != *"service.name="* ]]; then
-        doctor_report warn "shell env" "OTEL_RESOURCE_ATTRIBUTES has no service.name" \
+        doctor_report warn "telemetry cfg" "OTEL_RESOURCE_ATTRIBUTES has no service.name" \
             "aggregate.py keys output on service.name and skips exports lacking it"
     elif [[ "$attrs" == *" "* ]]; then
-        doctor_report fail "shell env" "OTEL_RESOURCE_ATTRIBUTES contains a space -- invalid" \
+        doctor_report fail "telemetry cfg" "OTEL_RESOURCE_ATTRIBUTES contains a space -- invalid [$attrs_src]" \
             "OTEL_RESOURCE_ATTRIBUTES must be a comma list with no spaces"
     else
-        doctor_report ok "shell env" "resource attributes: $attrs"
+        doctor_report ok "telemetry cfg" "resource attributes: $attrs [$attrs_src]"
     fi
 
-    if [ "${OTEL_METRICS_INCLUDE_SESSION_ID:-}" = "false" ]; then
-        doctor_report warn "shell env" "OTEL_METRICS_INCLUDE_SESSION_ID=false -- every session collapses into unknown-session.json"
+    if [ "$(doctor_cfg_get OTEL_METRICS_INCLUDE_SESSION_ID)" = "false" ]; then
+        doctor_report warn "telemetry cfg" "OTEL_METRICS_INCLUDE_SESSION_ID=false -- every session collapses into unknown-session.json [$(doctor_cfg_src OTEL_METRICS_INCLUDE_SESSION_ID)]"
     fi
 
-    local temporality="${OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE:-}"
+    local temporality
+    temporality="$(doctor_cfg_get OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE)"
     if [ "$(printf '%s' "$temporality" | tr '[:upper:]' '[:lower:]')" = "cumulative" ]; then
-        doctor_report fail "shell env" "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative -- aggregate.py sums every point as a delta" \
+        doctor_report fail "telemetry cfg" "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative -- aggregate.py sums every point as a delta [$(doctor_cfg_src OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE)]" \
             "unset it, or set it to delta"
     fi
 
-    local interval="${OTEL_METRIC_EXPORT_INTERVAL:-60000}"
-    doctor_report ok "shell env" "export interval ${interval}ms" "a new session's first stats file can take that long to appear"
-
-    if [ -n "${OTEL_EXPORTER_OTLP_HEADERS:-}" ]; then
-        doctor_report ok "shell env" "OTEL_EXPORTER_OTLP_HEADERS set (this collector needs no auth)"
+    local interval
+    interval="$(doctor_cfg_get OTEL_METRIC_EXPORT_INTERVAL)"
+    [ -z "$interval" ] && interval=60000
+    local relaunch_detail="a new session's first stats file can take that long to appear"
+    if [ "$DOCTOR_CFG_FROM_FILE" = "1" ]; then
+        relaunch_detail="$relaunch_detail (F5: settings-file values are read once at startup -- relaunch \`claude\` to apply a change)"
     fi
+    doctor_report ok "telemetry cfg" "export interval ${interval}ms" "$relaunch_detail"
+
+    if [ -n "$(doctor_cfg_get OTEL_EXPORTER_OTLP_HEADERS)" ]; then
+        doctor_report ok "telemetry cfg" "OTEL_EXPORTER_OTLP_HEADERS set (this collector needs no auth) [$(doctor_cfg_src OTEL_EXPORTER_OTLP_HEADERS)]"
+    fi
+
+    doctor_cfg_report_contradictions
 }
 
 doctor_summary() {
-    local parts=() all_fail_is_shell_env=1 l
+    local parts=() all_fail_is_cfg=1 l
     if [ "$DOCTOR_OK_COUNT" -gt 0 ]; then parts+=("$DOCTOR_OK_COUNT ok"); fi
     if [ "$DOCTOR_WARN_COUNT" -gt 0 ]; then
         if [ "$DOCTOR_WARN_COUNT" = 1 ]; then parts+=("1 warning"); else parts+=("$DOCTOR_WARN_COUNT warnings"); fi
@@ -512,15 +1266,23 @@ doctor_summary() {
     fi
     if [ "$DOCTOR_SKIP_COUNT" -gt 0 ]; then parts+=("$DOCTOR_SKIP_COUNT skipped"); fi
 
+    # D15/D22: softening now hinges on whether the effective config came from
+    # a settings file (DOCTOR_CFG_FROM_FILE, set in doctor_check_env) rather
+    # than unconditionally on the label -- a file is authoritative and read
+    # once at Claude Code startup, so a broken file is a real, strict failure;
+    # a shell-only gap is still just "this terminal won't export" (unchanged
+    # behavior, D15 row 1 vs row 2).
     local verdict
     if [ "$DOCTOR_FAIL_COUNT" -eq 0 ]; then
         verdict="telemetry is flowing"
     else
         for l in "${DOCTOR_FAIL_LABELS_ARR[@]}"; do
-            [ "$l" = "shell env" ] || { all_fail_is_shell_env=0; break; }
+            [ "$l" = "telemetry cfg" ] || { all_fail_is_cfg=0; break; }
         done
-        if [ "$all_fail_is_shell_env" = "1" ]; then
+        if [ "$all_fail_is_cfg" = "1" ] && [ "${DOCTOR_CFG_FROM_FILE:-0}" != "1" ]; then
             verdict="the pipeline is healthy, but this shell will not export to it"
+        elif [ "$all_fail_is_cfg" = "1" ]; then
+            verdict="Claude Code's telemetry config is broken"
         else
             verdict="telemetry is NOT being collected"
         fi
@@ -553,6 +1315,7 @@ doctor() {
     if [ "$DOCKER_OK" = "1" ]; then
         doctor_check_collector
     fi
+    doctor_check_cfg_resolve
     doctor_check_env
 
     local agg_pid
@@ -923,6 +1686,7 @@ case "${1:-}" in
     status)         status ;;
     logs)           logs "${2:-}" "${3:-40}" ;;
     env)            env_cmd "${2:-}" ;;
+    settings)       settings_cmd "${@:2}" ;;
     doctor)         doctor "${@:2}" ;;
-    *) echo "usage: otelctl.sh {start|restart|stop|status|logs [collector|aggregate] [N]|env [--docker]|doctor}" >&2; exit 2 ;;
+    *) echo "usage: otelctl.sh {start|restart|stop|status|logs [collector|aggregate] [N]|env [--docker]|settings [--docker] [--service-name NAME]|settings install ...|doctor}" >&2; exit 2 ;;
 esac

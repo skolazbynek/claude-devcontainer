@@ -38,6 +38,11 @@
    env` prints these same lines -- `eval "$(./otelctl.sh env)"`, or append to a
    shell rc / `.envrc`. See `README.md` for the `--docker` variant.
 
+   Or skip the shell entirely and write it straight into Claude Code's own
+   settings: `./otelctl.sh settings install --user` (or `--project`/`--local`/
+   `--file PATH`). See "Or a settings.json instead of shell exports" in
+   `README.md`.
+
 3. **Check the numbers**:
 
    ```

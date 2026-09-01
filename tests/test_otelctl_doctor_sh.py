@@ -24,6 +24,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -52,17 +53,36 @@ class TestDoctorCheckEnv:
     not reimplemented in Python, so a change to the real logic breaks this
     test rather than a parallel copy of it."""
 
+    # doctor_check_env now reads through doctor_cfg_get/src/path (design Part
+    # 2), which fall back to the shell environment only when CFG_NAMES has no
+    # entry for a given variable -- exactly the case here, since this harness
+    # never runs the resolver (doctor_check_cfg_resolve). Pulling in the real
+    # cfg_* functions and legend/contradiction helpers (rather than stubbing
+    # them) means a change to their fallback-to-shell behavior breaks this
+    # test too, not just a hand-written copy of it.
     def _run_env(self, env_overrides: dict) -> subprocess.CompletedProcess:
         env = {"PATH": os.environ["PATH"], "PORT": "4318"}
         env.update(env_overrides)
-        return _run_function("doctor_check_env", "doctor_report() { echo \"$1|$2|$3|${4:-}\"; }\ndoctor_check_env", env)
+        script = (
+            "declare -a CFG_NAMES=() CFG_SRCS=() CFG_VALS=() CFG_PATHS=()\n"
+            "declare -a TIER_TAGS_ARR=() TIER_PATHS_ARR=() TIER_FOUND_ARR=()\n"
+            "DOCTOR_CFG_FROM_FILE=0\nDOCTOR_SUPPRESS_SHELL_OTEL=0\n"
+            + _extract_function("doctor_cfg_get") + "\n"
+            + _extract_function("doctor_cfg_src") + "\n"
+            + _extract_function("doctor_cfg_path") + "\n"
+            + _extract_function("doctor_cfg_report_legend") + "\n"
+            + _extract_function("doctor_cfg_report_contradictions") + "\n"
+            + _extract_function("doctor_check_env") + "\n"
+            + "doctor_report() { echo \"$1|$2|$3|${4:-}\"; }\ndoctor_check_env"
+        )
+        return subprocess.run(["bash", "-c", "set -euo pipefail\n" + script], capture_output=True, text=True, env=env)
 
     def test_nothing_set_is_advisory_warn_only(self):
         result = self._run_env({})
         assert result.returncode == 0, result.stderr
         lines = result.stdout.strip().splitlines()
         assert len(lines) == 1
-        assert lines[0].startswith("warn|shell env|no telemetry variables set")
+        assert lines[0].startswith("warn|telemetry cfg|no telemetry configuration found")
 
     def test_fully_correct_env_is_all_ok(self):
         result = self._run_env(
@@ -88,7 +108,7 @@ class TestDoctorCheckEnv:
             }
         )
         lines = result.stdout.strip().splitlines()
-        assert any(l.startswith("fail|shell env|CLAUDE_CODE_ENABLE_TELEMETRY is not set") for l in lines)
+        assert any(l.startswith("fail|telemetry cfg|CLAUDE_CODE_ENABLE_TELEMETRY is not set") for l in lines)
 
     def test_wrong_enable_telemetry_value_is_warn_not_fail(self):
         result = self._run_env(
@@ -98,21 +118,21 @@ class TestDoctorCheckEnv:
             }
         )
         lines = result.stdout.strip().splitlines()
-        assert any(l.startswith('warn|shell env|CLAUDE_CODE_ENABLE_TELEMETRY=true') for l in lines)
+        assert any(l.startswith('warn|telemetry cfg|CLAUDE_CODE_ENABLE_TELEMETRY=true') for l in lines)
 
     def test_exporter_missing_otlp_is_fail(self):
         result = self._run_env(
             {"CLAUDE_CODE_ENABLE_TELEMETRY": "1", "OTEL_METRICS_EXPORTER": "console"}
         )
         lines = result.stdout.strip().splitlines()
-        assert any(l.startswith("fail|shell env|OTEL_METRICS_EXPORTER=console does not include otlp") for l in lines)
+        assert any(l.startswith("fail|telemetry cfg|OTEL_METRICS_EXPORTER=console does not include otlp") for l in lines)
 
     def test_exporter_comma_list_including_otlp_is_ok(self):
         result = self._run_env(
             {"CLAUDE_CODE_ENABLE_TELEMETRY": "1", "OTEL_METRICS_EXPORTER": "console,otlp"}
         )
         lines = result.stdout.strip().splitlines()
-        assert any(l.startswith("ok|shell env|OTEL_METRICS_EXPORTER includes otlp") for l in lines)
+        assert any(l.startswith("ok|telemetry cfg|OTEL_METRICS_EXPORTER includes otlp") for l in lines)
 
     def test_metrics_protocol_overrides_general_protocol(self):
         result = self._run_env(
@@ -123,7 +143,7 @@ class TestDoctorCheckEnv:
             }
         )
         lines = result.stdout.strip().splitlines()
-        assert any(l.startswith("ok|shell env|protocol http/json") for l in lines)
+        assert any(l.startswith("ok|telemetry cfg|protocol http/json") for l in lines)
 
     def test_grpc_protocol_is_fail(self):
         result = self._run_env({"CLAUDE_CODE_ENABLE_TELEMETRY": "1", "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc"})
@@ -156,14 +176,14 @@ class TestDoctorCheckEnv:
             {"CLAUDE_CODE_ENABLE_TELEMETRY": "1", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://host.docker.internal:4318"}
         )
         lines = result.stdout.strip().splitlines()
-        assert any(l.startswith("ok|shell env|endpoint http://host.docker.internal:4318") for l in lines)
+        assert any(l.startswith("ok|telemetry cfg|endpoint http://host.docker.internal:4318") for l in lines)
 
     def test_endpoint_literal_ip_is_ok_never_resolution_tested(self):
         result = self._run_env(
             {"CLAUDE_CODE_ENABLE_TELEMETRY": "1", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://172.17.0.1:4318"}
         )
         lines = result.stdout.strip().splitlines()
-        assert any(l.startswith("ok|shell env|endpoint http://172.17.0.1:4318") for l in lines)
+        assert any(l.startswith("ok|telemetry cfg|endpoint http://172.17.0.1:4318") for l in lines)
 
     def test_endpoint_unrecognized_host_without_python_is_skip_not_fail(self):
         """Trap 2: no getent, and a missing python3 must not be inferred as
@@ -173,7 +193,7 @@ class TestDoctorCheckEnv:
             {"CLAUDE_CODE_ENABLE_TELEMETRY": "1", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://example.com:4318", "PYTHON_OK": "0"}
         )
         lines = result.stdout.strip().splitlines()
-        assert any(l.startswith('skip|shell env|endpoint host "example.com" resolution') for l in lines)
+        assert any(l.startswith('skip|telemetry cfg|endpoint host "example.com" resolution') for l in lines)
         assert not any('does not resolve' in l for l in lines)
 
     def test_endpoint_unresolvable_host_with_python_is_fail(self):
@@ -211,7 +231,7 @@ class TestDoctorCheckEnv:
             {"CLAUDE_CODE_ENABLE_TELEMETRY": "1", "OTEL_RESOURCE_ATTRIBUTES": "service.name=my session"}
         )
         lines = result.stdout.strip().splitlines()
-        assert any(l.startswith("fail|shell env|OTEL_RESOURCE_ATTRIBUTES contains a space") for l in lines)
+        assert any(l.startswith("fail|telemetry cfg|OTEL_RESOURCE_ATTRIBUTES contains a space") for l in lines)
 
     def test_cumulative_temporality_is_fail(self):
         result = self._run_env(
@@ -221,7 +241,7 @@ class TestDoctorCheckEnv:
             }
         )
         lines = result.stdout.strip().splitlines()
-        assert any(l.startswith("fail|shell env|OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative") for l in lines)
+        assert any(l.startswith("fail|telemetry cfg|OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative") for l in lines)
 
     def test_include_session_id_false_is_warn(self):
         result = self._run_env(
@@ -229,6 +249,193 @@ class TestDoctorCheckEnv:
         )
         lines = result.stdout.strip().splitlines()
         assert any("collapses into unknown-session.json" in l for l in lines)
+
+
+class TestDoctorCfgResolver:
+    """doctor_check_cfg_resolve + doctor_check_env driven together, against
+    real settings files under tmp_path (design Part 2, D12-D20). Every tier
+    is pointed at a tmp file via DOCTOR_SETTINGS_* so the suite never reads a
+    real ~/.claude (see _settings_lib_py's "test hazard" note) and never
+    depends on cwd."""
+
+    def _run(self, tmp_path, tiers=None, env_overrides=None, cwd=None):
+        tiers = tiers or {}
+        env = {"PATH": os.environ["PATH"], "PORT": "4318", "PYTHON_OK": "1", "PYTHON": sys.executable}
+        for tag in ("managed", "local", "project", "user"):
+            path = tmp_path / f"{tag}.json"
+            if tag in tiers:
+                path.write_text(json.dumps(tiers[tag]))
+            env[f"DOCTOR_SETTINGS_{tag.upper()}"] = str(path)
+        if env_overrides:
+            env.update(env_overrides)
+        script = (
+            "declare -a CFG_NAMES=() CFG_SRCS=() CFG_VALS=() CFG_PATHS=()\n"
+            "declare -a TIER_TAGS_ARR=() TIER_PATHS_ARR=() TIER_FOUND_ARR=()\n"
+            "DOCTOR_CFG_FROM_FILE=0\nDOCTOR_SUPPRESS_SHELL_OTEL=0\n"
+            + _extract_function("_settings_lib_py") + "\n"
+            + _extract_function("_doctor_cfg_resolver_py") + "\n"
+            + _extract_function("doctor_check_cfg_resolve") + "\n"
+            + _extract_function("doctor_cfg_get") + "\n"
+            + _extract_function("doctor_cfg_src") + "\n"
+            + _extract_function("doctor_cfg_path") + "\n"
+            + _extract_function("doctor_cfg_report_legend") + "\n"
+            + _extract_function("doctor_cfg_report_contradictions") + "\n"
+            + _extract_function("doctor_check_env") + "\n"
+            + "doctor_report() { echo \"$1|$2|$3|${4:-}\"; }\n"
+            "doctor_check_cfg_resolve\ndoctor_check_env"
+        )
+        return subprocess.run(
+            ["bash", "-c", "set -euo pipefail\n" + script],
+            capture_output=True, text=True, env=env, cwd=cwd or str(tmp_path),
+        )
+
+    def test_precedence_managed_beats_local_beats_project_beats_user(self, tmp_path):
+        result = self._run(
+            tmp_path,
+            tiers={
+                "managed": {"env": {"CLAUDE_CODE_ENABLE_TELEMETRY": "1"}},
+                "local": {"env": {"OTEL_METRICS_EXPORTER": "otlp"}},
+                "project": {"env": {"OTEL_METRICS_EXPORTER": "console"}},
+                "user": {"env": {"OTEL_METRICS_EXPORTER": "console", "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json"}},
+            },
+        )
+        lines = result.stdout.strip().splitlines()
+        assert any(l.startswith("ok|telemetry cfg|telemetry enabled [managed]") for l in lines), result.stdout
+        assert any(l.startswith("ok|telemetry cfg|OTEL_METRICS_EXPORTER includes otlp [local]") for l in lines), result.stdout
+        assert any(l.startswith("ok|telemetry cfg|protocol http/json [user]") for l in lines), result.stdout
+
+    def test_unparseable_file_is_fail_and_its_settings_are_not_applied(self, tmp_path):
+        """D18: a broken file means none of ITS settings apply -- not just
+        the telemetry ones -- so a value that would otherwise resolve from
+        that tier must fall through to the next one (or go unset), and the
+        break itself is reported as its own fail."""
+        (tmp_path / "user.json").write_text("{not valid json")
+        result = self._run(
+            tmp_path,
+            tiers={"project": {"env": {"CLAUDE_CODE_ENABLE_TELEMETRY": "1", "OTEL_METRICS_EXPORTER": "otlp"}}},
+        )
+        lines = result.stdout.strip().splitlines()
+        assert any(l.startswith("fail|telemetry cfg|") and "not valid JSON" in l and "user.json" in l for l in lines), result.stdout
+        assert any(l.startswith("ok|telemetry cfg|telemetry enabled [project]") for l in lines), result.stdout
+
+    def test_empty_string_is_explicit_unset_not_missing(self, tmp_path):
+        """F9/D19: "" in a settings file is Claude Code's documented way to
+        cancel a variable -- distinct from the key being absent -- and must
+        be reported as cleared, with the clearing file named, not as a plain
+        "is not set"."""
+        result = self._run(
+            tmp_path,
+            tiers={"user": {"env": {"CLAUDE_CODE_ENABLE_TELEMETRY": ""}}},
+        )
+        lines = result.stdout.strip().splitlines()
+        assert any(
+            l.startswith("fail|telemetry cfg|CLAUDE_CODE_ENABLE_TELEMETRY is cleared to \"\" by")
+            and "user.json" in l
+            for l in lines
+        ), result.stdout
+        assert not any(l.startswith("fail|telemetry cfg|CLAUDE_CODE_ENABLE_TELEMETRY is not set") for l in lines), result.stdout
+
+    def test_managed_generic_endpoint_drops_lower_tier_per_signal_value(self, tmp_path):
+        """F11/D20: a managed generic OTEL_EXPORTER_OTLP_ENDPOINT makes Claude
+        Code drop any lower-tier per-signal OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+        at startup -- the inverse of the normal per-signal-beats-generic rule
+        -- so doctor must warn about the drop and resolve the generic value,
+        not silently keep validating the (dead) per-signal one."""
+        result = self._run(
+            tmp_path,
+            tiers={
+                "managed": {"env": {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318"}},
+                "user": {"env": {"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://localhost:9999"}},
+            },
+        )
+        lines = result.stdout.strip().splitlines()
+        assert any(
+            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://localhost:9999 from user is dropped at startup" in l
+            for l in lines
+        ), result.stdout
+        assert any(l.startswith("ok|telemetry cfg|endpoint http://localhost:4318 [managed]") for l in lines), result.stdout
+        assert not any("port 9999" in l for l in lines), result.stdout
+
+    def test_claude_code_child_session_withholds_otel_and_does_not_fail(self, tmp_path):
+        """D16/F6: a wrapper's shell `export`s (no settings file involved)
+        set up a fully healthy pipeline, but Claude Code withholds OTEL_*
+        from tool subprocesses while still passing CLAUDE_CODE_ENABLE_TELEMETRY
+        through. Naively reading the process env would see
+        CLAUDE_CODE_ENABLE_TELEMETRY=1 (so the old any-var-set gate would not
+        early-return) and then read every OTEL_* var as empty -- a false
+        "not set" fail for a pipeline that is actually fine. This is the
+        regression the design calls "the single most valuable new test"."""
+        result = self._run(
+            tmp_path,
+            env_overrides={
+                "CLAUDE_CODE_CHILD_SESSION": "1",
+                "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+                "OTEL_METRICS_EXPORTER": "otlp",
+                "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+                "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
+            },
+        )
+        lines = result.stdout.strip().splitlines()
+        assert len(lines) == 1, result.stdout
+        assert lines[0].startswith("warn|telemetry cfg|running inside Claude Code"), result.stdout
+        assert "CLAUDE_CODE_CHILD_SESSION" in lines[0]
+        assert not any(l.startswith("fail") for l in lines)
+
+    def test_shell_export_shadowed_by_file_value_is_warn_not_fail(self, tmp_path):
+        """D17: a live shell export overridden by a higher-precedence
+        settings-file value (F2: file always wins) is dead but not wrong --
+        must be a warn naming both the losing shell value and the winning
+        file, never a fail."""
+        result = self._run(
+            tmp_path,
+            tiers={
+                "user": {
+                    "env": {
+                        "OTEL_METRICS_EXPORTER": "otlp",
+                        "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+                        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
+                    }
+                }
+            },
+            env_overrides={
+                "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+                "OTEL_METRICS_EXPORTER": "console",
+            },
+        )
+        lines = result.stdout.strip().splitlines()
+        assert any(
+            l.startswith("warn|telemetry cfg|1 shell export shadowed by a settings-file value and has no effect")
+            and "OTEL_METRICS_EXPORTER" in l
+            for l in lines
+        ), result.stdout
+        assert not any(l.startswith("fail") for l in lines), result.stdout
+
+    def test_shell_exports_shadowed_by_file_value_plural_grammar(self, tmp_path):
+        """Same as above with two contradictions: the noun ('exports') and
+        the verb ('have') must both pluralize, not just the noun."""
+        result = self._run(
+            tmp_path,
+            tiers={
+                "user": {
+                    "env": {
+                        "OTEL_METRICS_EXPORTER": "otlp",
+                        "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+                        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
+                    }
+                }
+            },
+            env_overrides={
+                "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+                "OTEL_METRICS_EXPORTER": "console",
+                "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+            },
+        )
+        lines = result.stdout.strip().splitlines()
+        assert any(
+            l.startswith("warn|telemetry cfg|2 shell exports shadowed by a settings-file value and have no effect")
+            for l in lines
+        ), result.stdout
+        assert not any(l.startswith("fail") for l in lines), result.stdout
 
 
 class TestDoctorCheckCollectorMountsDrift:
@@ -360,7 +567,7 @@ class TestDoctorSummary:
     char of IFS when joining ${arr[*]}) and the shell-env-only-failure
     verdict branch."""
 
-    def _run(self, counts: dict, fail_labels=()) -> subprocess.CompletedProcess:
+    def _run(self, counts: dict, fail_labels=(), cfg_from_file=False) -> subprocess.CompletedProcess:
         env = {"PATH": os.environ["PATH"]}
         labels_decl = " ".join(f'"{l}"' for l in fail_labels)
         body = f"""
@@ -370,6 +577,7 @@ DOCTOR_FAIL_COUNT={counts.get('fail', 0)}
 DOCTOR_SKIP_COUNT={counts.get('skip', 0)}
 DOCTOR_FIRST_FAIL_DETAIL="first fail detail"
 DOCTOR_FAIL_LABELS_ARR=({labels_decl})
+DOCTOR_CFG_FROM_FILE={1 if cfg_from_file else 0}
 doctor_summary
 """
         return _run_function("doctor_summary", body, env)
@@ -398,13 +606,24 @@ doctor_summary
         result_fail = self._run({"ok": 4, "fail": 1}, fail_labels=["docker"])
         assert result_fail.stdout.splitlines()[-1] == "next: first fail detail"
 
-    def test_all_failures_shell_env_softens_verdict(self):
-        result = self._run({"ok": 4, "fail": 2}, fail_labels=["shell env", "shell env"])
+    def test_all_failures_telemetry_cfg_from_shell_softens_verdict(self):
+        result = self._run({"ok": 4, "fail": 2}, fail_labels=["telemetry cfg", "telemetry cfg"])
         assert "the pipeline is healthy, but this shell will not export to it" in result.stdout
 
-    def test_mixed_failures_including_non_shell_env_is_strict(self):
-        result = self._run({"ok": 4, "fail": 2}, fail_labels=["shell env", "docker"])
+    def test_mixed_failures_including_non_telemetry_cfg_is_strict(self):
+        result = self._run({"ok": 4, "fail": 2}, fail_labels=["telemetry cfg", "docker"])
         assert "telemetry is NOT being collected" in result.stdout
+
+    def test_all_failures_telemetry_cfg_from_file_is_not_softened(self):
+        """D15/D22: a broken settings *file* is authoritative and read once
+        at Claude Code startup -- unlike a shell-only gap, it must not get
+        the softened 'this shell will not export to it' wording, since the
+        problem isn't specific to this shell at all."""
+        result = self._run(
+            {"ok": 4, "fail": 2}, fail_labels=["telemetry cfg", "telemetry cfg"], cfg_from_file=True
+        )
+        assert "Claude Code's telemetry config is broken" in result.stdout
+        assert "the pipeline is healthy" not in result.stdout
 
 
 # --- round trip + isolated replay fallback, no Docker ---------------------
@@ -526,3 +745,306 @@ class TestDoctorRoundTrip:
         assert any("stats file" in l for l in round_trip_lines)
         # Cleaned up afterwards -- no leftover synthetic stats file.
         assert not (tmp_path / "stats").exists() or not list((tmp_path / "stats").rglob("*doctorcheck*"))
+
+
+def _run_otelctl(args, env_overrides=None, cwd=None):
+    # CLD_OTEL_DIR sidesteps otelctl.sh's top-level `${CLD_OTEL_DIR:-$HOME/...}`
+    # -- irrelevant to settings/settings install, but read unconditionally
+    # under `set -u` even for those subcommands.
+    env = {"PATH": os.environ["PATH"], "PORT": "4318", "CLD_OTEL_DIR": "/nonexistent-otel-dir"}
+    if env_overrides:
+        env.update(env_overrides)
+    return subprocess.run(
+        ["bash", str(OTELCTL_SH), *args], capture_output=True, text=True, env=env, cwd=cwd
+    )
+
+
+TELEMETRY_KEYS = [
+    "CLAUDE_CODE_ENABLE_TELEMETRY",
+    "OTEL_METRICS_EXPORTER",
+    "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_RESOURCE_ATTRIBUTES",
+]
+
+
+class TestSettingsPrint:
+    """`otelctl.sh settings` -- the print-only fragment (design category 7)."""
+
+    def test_default_output_is_pure_json_with_five_keys(self):
+        result = _run_otelctl(["settings"])
+        assert result.returncode == 0, result.stderr
+        parsed = json.loads(result.stdout)
+        assert set(parsed.keys()) == {"env"}
+        assert set(parsed["env"].keys()) == set(TELEMETRY_KEYS)
+        assert all(isinstance(v, str) for v in parsed["env"].values())
+        assert parsed["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://localhost:4318"
+        assert parsed["env"]["OTEL_RESOURCE_ATTRIBUTES"] == "service.name=my-session"
+
+    def test_docker_swaps_host(self):
+        result = _run_otelctl(["settings", "--docker"])
+        parsed = json.loads(result.stdout)
+        assert parsed["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://host.docker.internal:4318"
+
+    def test_service_name_substitutes(self):
+        result = _run_otelctl(["settings", "--service-name", "my-container"])
+        parsed = json.loads(result.stdout)
+        assert parsed["env"]["OTEL_RESOURCE_ATTRIBUTES"] == "service.name=my-container"
+
+    def test_service_name_with_no_value_is_usage_error_not_a_silent_crash(self):
+        # --service-name as the last arg leaves nothing for `shift 2` to
+        # consume; under `set -e` that used to exit 1 with no message at all.
+        result = _run_otelctl(["settings", "--service-name"])
+        assert result.returncode == 2, result.stdout
+        assert "usage" in result.stderr.lower()
+
+    def test_service_name_empty_string_is_rejected(self):
+        result = _run_otelctl(["settings", "--service-name", ""])
+        assert result.returncode == 2, result.stdout
+        assert "must not be empty" in result.stderr
+
+    def test_stdout_carries_no_advice_text(self):
+        # Every human-facing note goes to stderr; a naive `settings > frag.json`
+        # must produce a file that's exactly the fragment.
+        result = _run_otelctl(["settings"])
+        json.loads(result.stdout)  # raises if stdout has anything but the fragment
+        assert "relaunch" in result.stderr
+
+
+class TestSettingsInstall:
+    """`otelctl.sh settings install` -- the merge table (design category 8)."""
+
+    def _install(self, target, extra_args=(), env_overrides=None):
+        return _run_otelctl(["settings", "install", "--file", str(target), *extra_args], env_overrides)
+
+    def test_creates_from_nothing(self, tmp_path):
+        target = tmp_path / "settings.json"
+        result = self._install(target)
+        assert result.returncode == 0, result.stderr
+        assert f"created {target}" in result.stdout
+        data = json.loads(target.read_text())
+        assert set(data["env"].keys()) == set(TELEMETRY_KEYS)
+
+    def test_service_name_with_no_value_is_usage_error_not_a_silent_crash(self, tmp_path):
+        target = tmp_path / "settings.json"
+        result = self._install(target, extra_args=["--service-name"])
+        assert result.returncode == 2, result.stdout
+        assert "usage" in result.stderr.lower()
+        assert not target.exists()
+
+    def test_service_name_empty_string_is_rejected(self, tmp_path):
+        target = tmp_path / "settings.json"
+        result = self._install(target, extra_args=["--service-name", ""])
+        assert result.returncode == 2, result.stdout
+        assert "must not be empty" in result.stderr
+        assert not target.exists()
+
+    def test_unrelated_top_level_and_env_keys_survive_byte_for_byte(self, tmp_path):
+        target = tmp_path / "settings.json"
+        original = {
+            "permissions": {"allow": ["Bash(ls:*)"]},
+            "hooks": {"PreToolUse": []},
+            "env": {"SOME_OTHER_VAR": "keep-me"},
+        }
+        target.write_text(json.dumps(original, indent=2) + "\n")
+        result = self._install(target)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(target.read_text())
+        assert data["permissions"] == original["permissions"]
+        assert data["hooks"] == original["hooks"]
+        assert data["env"]["SOME_OTHER_VAR"] == "keep-me"
+        assert set(TELEMETRY_KEYS) <= set(data["env"].keys())
+
+    def test_idempotent_rerun_reports_no_change(self, tmp_path):
+        target = tmp_path / "settings.json"
+        self._install(target)
+        before = target.read_bytes()
+        result = self._install(target)
+        assert result.returncode == 0, result.stderr
+        assert "already configured, no change" in result.stdout
+        assert target.read_bytes() == before
+
+    def test_conflicting_value_refuses_and_leaves_file_untouched(self, tmp_path):
+        target = tmp_path / "settings.json"
+        original = {"env": {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel.corp:4318"}}
+        target.write_text(json.dumps(original, indent=2) + "\n")
+        before = target.read_bytes()
+        result = self._install(target)
+        assert result.returncode == 1
+        assert "refusing to change" in result.stderr
+        assert "re-run with --force" in result.stderr
+        assert target.read_bytes() == before
+
+    def test_force_applies_the_conflicting_value(self, tmp_path):
+        target = tmp_path / "settings.json"
+        original = {"env": {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel.corp:4318"}}
+        target.write_text(json.dumps(original, indent=2) + "\n")
+        result = self._install(target, extra_args=["--force"])
+        assert result.returncode == 0, result.stderr
+        data = json.loads(target.read_text())
+        assert data["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://localhost:4318"
+
+    def test_invalid_json_aborts_with_file_untouched(self, tmp_path):
+        target = tmp_path / "settings.json"
+        target.write_text("{\"env\": {\n")
+        before = target.read_bytes()
+        result = self._install(target)
+        assert result.returncode == 1
+        assert "not valid JSON" in result.stderr
+        assert target.read_bytes() == before
+
+    def test_dry_run_writes_nothing(self, tmp_path):
+        target = tmp_path / "settings.json"
+        target.write_text("{}\n")
+        before = target.read_bytes()
+        result = self._install(target, extra_args=["--dry-run"])
+        assert result.returncode == 0, result.stderr
+        assert target.read_bytes() == before
+        printed = json.loads(result.stdout)
+        assert set(TELEMETRY_KEYS) <= set(printed["env"].keys())
+
+    def test_docker_with_user_target_exits_2(self):
+        result = _run_otelctl(["settings", "install", "--user", "--docker"])
+        assert result.returncode == 2
+        assert "only resolves inside a" in result.stderr
+
+    def test_docker_with_file_target_is_allowed(self, tmp_path):
+        target = tmp_path / "settings.json"
+        result = self._install(target, extra_args=["--docker"])
+        assert result.returncode == 0, result.stderr
+        data = json.loads(target.read_text())
+        assert data["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://host.docker.internal:4318"
+
+
+def _settings_merge_python_source() -> str:
+    """The exact python program `settings install` feeds to $PYTHON -- the
+    shared lib (_settings_lib_py) followed by the merge body -- extracted
+    from the real script so a change to either can't silently drift from
+    this test."""
+    lib_src_match = re.search(r"<<'PYLIB'\n(.*?)\nPYLIB\n", _extract_function("_settings_lib_py"), re.DOTALL)
+    assert lib_src_match
+    install_src = _extract_function("settings_install")
+    merge_match = re.search(r"_settings_lib_py; cat <<'PYEOF'\n(.*?)\nPYEOF\n", install_src, re.DOTALL)
+    assert merge_match
+    return lib_src_match.group(1) + "\n" + merge_match.group(1)
+
+
+class TestSettingsInstallVerifyRestore:
+    """D7's read-back verification (design category 9). Per
+    feedback_verify_that_a_check_can_fail: prove the guard can actually fail,
+    not just trust it, by pointing the real merge program at a Path.write_text
+    stub that silently drops a key from the temp file before the atomic
+    rename -- simulating the on-disk corruption the verify step exists to
+    catch -- and asserting the original bytes come back."""
+
+    # Drops an *unrelated* key -- the class of corruption D7 actually guards
+    # against (our own five keys aren't checked by the verify step at all,
+    # only that nothing else got clobbered).
+    DROP_UNRELATED_KEY_FAULT = (
+        "import pathlib, json as _json\n"
+        "_orig_write_text = pathlib.Path.write_text\n"
+        "def _faulty_write_text(self, data, *a, **kw):\n"
+        "    if '.otelctl-tmp-' in self.name:\n"
+        "        obj = _json.loads(data)\n"
+        "        obj.get('env', {}).pop('SOME_OTHER_VAR', None)\n"
+        "        data = _json.dumps(obj, indent=2) + '\\n'\n"
+        "    return _orig_write_text(self, data, *a, **kw)\n"
+        "pathlib.Path.write_text = _faulty_write_text\n"
+    )
+
+    # Truncates mid-write into unparseable JSON -- for the created=True case
+    # there are no pre-existing keys to compare against, so the only way the
+    # verify step can catch a corrupted write is assertion 1 (it must parse).
+    TRUNCATE_FAULT = (
+        "import pathlib\n"
+        "_orig_write_text = pathlib.Path.write_text\n"
+        "def _faulty_write_text(self, data, *a, **kw):\n"
+        "    if '.otelctl-tmp-' in self.name:\n"
+        "        data = data[: len(data) // 2]\n"
+        "    return _orig_write_text(self, data, *a, **kw)\n"
+        "pathlib.Path.write_text = _faulty_write_text\n"
+    )
+
+    def _run_merge(self, target, source, env_overrides=None):
+        env = {"PATH": os.environ["PATH"]}
+        env.update(
+            {
+                "SETTINGS_TARGET_KIND": "file",
+                "SETTINGS_TARGET_PATH": str(target),
+                "SETTINGS_FORCE": "0",
+                "SETTINGS_DRY_RUN": "0",
+                "SETTINGS_VARS": "\n".join(f"{k}=v-{k}" for k in TELEMETRY_KEYS),
+            }
+        )
+        if env_overrides:
+            env.update(env_overrides)
+        return subprocess.run(["python3", "-c", source], capture_output=True, text=True, env=env)
+
+    def test_unfaulted_merge_sanity_check(self, tmp_path):
+        # Same program, no fault injected -- must succeed, proving the merge
+        # source extraction itself is correct before trusting the fault test.
+        target = tmp_path / "settings.json"
+        result = self._run_merge(target, _settings_merge_python_source())
+        assert result.returncode == 0, result.stderr
+        data = json.loads(target.read_text())
+        assert data["env"]["OTEL_RESOURCE_ATTRIBUTES"] == "v-OTEL_RESOURCE_ATTRIBUTES"
+
+    def test_corrupted_write_is_detected_and_original_bytes_restored(self, tmp_path):
+        target = tmp_path / "settings.json"
+        original = {"env": {"SOME_OTHER_VAR": "keep-me"}}
+        original_text = json.dumps(original, indent=2) + "\n"
+        target.write_text(original_text)
+
+        source = self.DROP_UNRELATED_KEY_FAULT + _settings_merge_python_source()
+        result = self._run_merge(target, source)
+
+        assert result.returncode == 1, result.stdout
+        assert "verification failed" in result.stderr
+        assert "restored the original file" in result.stderr
+        assert target.read_text() == original_text, "original bytes must be restored, not left half-written"
+
+    def test_corrupted_write_on_created_file_removes_it(self, tmp_path):
+        # created=True path: nothing pre-existed, so "restore" means unlink,
+        # not write-back (there is no original_bytes to write).
+        target = tmp_path / "settings.json"
+        source = self.TRUNCATE_FAULT + _settings_merge_python_source()
+        result = self._run_merge(target, source)
+
+        assert result.returncode == 1, result.stdout
+        assert "verification failed" in result.stderr
+        assert not target.exists(), "a from-nothing create must be rolled back, not left half-written"
+
+    # Unlike DROP_UNRELATED_KEY_FAULT (which corrupts only the bytes written
+    # to disk), this mutates the in-memory `settings` dict itself -- the
+    # class of bug D7's baseline comparison exists to catch is a *future
+    # edit to the merge code* that touches a key outside our five, not just
+    # an on-disk write fault. If the baseline used for comparison is the
+    # same object the merge mutated (`baseline = existing`), this fault is
+    # invisible: the baseline "sees" its own corruption and agrees with the
+    # corrupted reread. The baseline must come from a copy/reparse taken
+    # before any mutation.
+    FUTURE_EDIT_FAULT = (
+        "import json as _json\n"
+        "_orig_dumps = _json.dumps\n"
+        "_faulted = []\n"
+        "def _faulty_dumps(obj, *a, **kw):\n"
+        "    if not _faulted and isinstance(obj, dict) and 'env' in obj:\n"
+        "        _faulted.append(True)\n"
+        "        obj['env']['SOME_OTHER_VAR'] = 'corrupted-by-a-future-bug'\n"
+        "    return _orig_dumps(obj, *a, **kw)\n"
+        "_json.dumps = _faulty_dumps\n"
+    )
+
+    def test_merge_code_corrupting_an_unrelated_key_in_memory_is_detected(self, tmp_path):
+        target = tmp_path / "settings.json"
+        original = {"env": {"SOME_OTHER_VAR": "keep-me"}}
+        original_text = json.dumps(original, indent=2) + "\n"
+        target.write_text(original_text)
+
+        source = self.FUTURE_EDIT_FAULT + _settings_merge_python_source()
+        result = self._run_merge(target, source)
+
+        assert result.returncode == 1, result.stdout
+        assert "verification failed" in result.stderr
+        assert "restored the original file" in result.stderr
+        assert target.read_text() == original_text, "original bytes must be restored, not left corrupted"

@@ -163,6 +163,11 @@ is broken.
 ### D5. Four states, and the shell-env check is advisory unless it
 contradicts itself
 
+> Superseded in part by `docs/design-otel-settings-config.md`: check 4 no
+> longer looks at the shell alone, and the softening rule below now also
+> depends on whether the effective config came from a settings file (never
+> softened) rather than the shell (softened, as originally designed here).
+
 States: `ok`, `warn`, `fail`, `skip`. Exit **0** if no `fail` (warnings do
 not fail the run), **1** if any `fail`, **2** on usage error -- matching the
 existing dispatch (`otel/otelctl.sh:130`).
@@ -294,6 +299,11 @@ Three escalating probes; the third is the one that matters.
    probes loopback.
 
 ### Check 4 -- telemetry env vars in *this* shell
+
+> This check now also resolves Claude Code's own settings.json files, not
+> just the shell environment -- see `docs/design-otel-settings-config.md`.
+> The env-only description below is what shipped first; it is no longer the
+> whole of check 4.
 
 Advisory or strict per **D5**. Evaluate the Claude Code documented semantics
 (https://code.claude.com/docs/en/monitoring-usage.md), honouring per-signal

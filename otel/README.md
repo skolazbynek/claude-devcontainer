@@ -67,6 +67,53 @@ env` prints these same lines -- `eval "$(./otelctl.sh env)"` for the current
 shell, or `./otelctl.sh env >> ~/.bashrc` (or `.envrc`) to keep it. See
 `./otelctl.sh env --help` for the `--docker` flag.
 
+### Or a settings.json instead of shell exports
+
+`env` is still right for a one-off terminal, `.envrc`, or a container with no
+`~/.claude`. Everywhere else, Claude Code's own settings file is usually
+better: it's read directly by the process that needs these variables, so
+there's nothing to remember to re-source.
+
+```
+./otelctl.sh settings                 # print the {"env": {...}} fragment, to review or pipe elsewhere
+./otelctl.sh settings install --user      # you, every project      -- ${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json
+./otelctl.sh settings install --project   # everyone in the repo, committed -- ./.claude/settings.json
+./otelctl.sh settings install --local     # you, this project, gitignored   -- ./.claude/settings.local.json
+./otelctl.sh settings install --file PATH # a specific file, e.g. a managed-settings.json an admin is authoring
+```
+
+`install` merges into the target file -- read, patch just the telemetry keys
+under `env`, write back -- and never touches anything else already in it.
+There's no default target: pick the scope that matches who should get this
+config, since a personal endpoint written to a committed `--project` file
+gets seen by the whole team, and a team-wide value written to `--user`
+follows you into every other project.
+
+A few things worth knowing before using this:
+
+- **A file value beats a shell export**, not the other way around -- if both
+  set the same variable, Claude Code applies the file's value and the shell
+  export is simply dead. `otelctl.sh doctor` calls this out as a warning if
+  it finds a live shell export shadowed by a settings file.
+- **Settings are read once, at startup.** Editing the file doesn't affect an
+  already-running Claude Code session -- relaunch it to pick up the change.
+- **A shared `service.name` in a committed `.claude/settings.json` groups a
+  team's sessions under one `stats/<name>/` folder**, but doesn't merge them
+  -- they still split by session id inside it, same as any other shared
+  `service.name`. If you're running this inside a `cld` container, note that
+  cld already injects its own `service.name` for you; a settings-file entry
+  in that container's user settings would win over it (files beat shell
+  exports), so every session in that container ends up filed under whatever
+  name the file says instead of cld's per-session names.
+- **`doctor`, run from inside Claude Code's own Bash tool, can't see this.**
+  Claude Code doesn't pass `OTEL_*` to the subprocesses it spawns (the Bash
+  tool included), so a `doctor` run that way is blind to the process
+  environment by design -- run it from a plain terminal instead if you want
+  to check what a session is actually picking up.
+
+See `./otelctl.sh settings --help` and `./otelctl.sh settings install --help`
+for the full flag list, including `--docker` and `--service-name`.
+
 ## If nothing shows up
 
 `./otelctl.sh doctor` walks the whole chain -- Docker running? collector
