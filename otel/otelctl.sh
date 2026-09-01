@@ -157,9 +157,6 @@ session's stats filed under:
 # session running directly on this host:
 $(env_cmd)
 
-# session running inside a docker container on this host:
-$(env_cmd --docker)
-
 Prefer a config file to shell exports? \`./otelctl.sh settings --help\`
 EOF
 }
@@ -214,20 +211,23 @@ EOF
 env_cmd() {
     local host="localhost"
     case "${1:-}" in
-        --docker) host="host.docker.internal" ;;
         "") ;;
         -h|--help)
-            echo "usage: otelctl.sh env [--docker]" >&2
-            echo "  (no flag)  host-side Claude Code session (default) -- localhost" >&2
-            echo "  --docker   Claude Code session running inside a docker container -- host.docker.internal" >&2
+            echo "usage: otelctl.sh env" >&2
+            echo "  prints env variables required for Claude Code to target the otel collector." >&2
             echo "  see also: otelctl.sh settings --help -- write this into Claude Code's settings.json instead" >&2
             return 0 ;;
-        *) echo "usage: otelctl.sh env [--docker]" >&2; exit 2 ;;
+        *) echo "usage: otelctl.sh env [-h|--help]" >&2; exit 2 ;;
     esac
     local line name value
     while IFS='=' read -r name value; do
         if [ "$name" = "OTEL_RESOURCE_ATTRIBUTES" ]; then
-            echo "# edit this to identify the session -- keys the per-session stats output"
+	    echo ""
+	    echo "# edit this to identify the folder a session will belong to."
+        fi
+        if [ "$name" = "OTEL_EXPORTER_OTLP_ENDPOINT" ]; then
+	    echo ""
+            echo "# if running Claude Code from inside a docker container, use host.docker.internal instead of localhost"
         fi
         echo "export ${name}=${value}"
     done < <(telemetry_vars "$host")
