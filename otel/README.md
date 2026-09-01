@@ -23,6 +23,7 @@ background aggregator process:
 ./otelctl.sh logs aggregate 100
 ./otelctl.sh stop               # both
 ./otelctl.sh restart
+./otelctl.sh doctor              # end-to-end health check, see below
 ```
 
 State lives under `$CLD_OTEL_DIR` (default `~/.cld/otel`): the raw metrics
@@ -65,6 +66,27 @@ To make this persistent instead of retyping it in every terminal, `./otelctl.sh
 env` prints these same lines -- `eval "$(./otelctl.sh env)"` for the current
 shell, or `./otelctl.sh env >> ~/.bashrc` (or `.envrc`) to keep it. See
 `./otelctl.sh env --help` for the `--docker` flag.
+
+## If nothing shows up
+
+`./otelctl.sh doctor` walks the whole chain -- Docker running? collector
+container up? port bound and answering? telemetry env vars set in *this*
+shell? -- and finishes by sending one synthetic metric through the real
+pipeline (collector -> `raw-metrics.jsonl` -> `aggregate.py` -> a stats file)
+to prove it actually round-trips, not just that each piece looks up. Each
+check prints `ok`/`warn`/`fail`/`skip` with a one-line reason and, on
+failure, the next thing to try; it exits non-zero if anything failed.
+
+The synthetic check uses `service.name=otelctl-doctor-check`, so it never
+touches a real session's numbers, and it deletes the stats file it creates
+(`--keep-check-artifacts` to keep it for inspection). The one thing it can't
+clean up is its own line in `raw-metrics.jsonl` -- that file is append-only
+by design (see "Output" below), so a stray `otelctl-doctor-check` entry is
+expected to accumulate there, one line per `doctor` run.
+
+If a session's stats file isn't updating and you're not sure why, this is
+the first thing to run -- a first stats file can also just take a while to
+show up: exports fire on Claude Code's export interval, 60s by default.
 
 ## Output
 

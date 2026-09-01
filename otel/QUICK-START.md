@@ -44,6 +44,14 @@
    cat ~/.cld/otel/stats/my-session.json
    ```
 
+4. **Nothing there? Check it works**:
+
+   ```
+   ./otelctl.sh doctor
+   ```
+
+   Walks the whole chain end to end and tells you exactly what's missing.
+
 See `README.md` for the full picture (data flow, output schema, caveats).
 
 Need this on another machine? See "Getting this on another machine" in
