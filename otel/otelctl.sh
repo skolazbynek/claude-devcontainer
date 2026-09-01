@@ -32,8 +32,36 @@ collector_running() {
     [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null)" = "true" ]
 }
 
+collector_preflight() {
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "collector: 'docker' not found on \$PATH -- install Docker: https://docs.docker.com/get-docker/" >&2
+        exit 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        echo "collector: docker daemon not reachable -- is it installed and running? (try 'docker info' for the raw error)" >&2
+        exit 1
+    fi
+}
+
+# Turn docker run's stderr into a specific diagnosis where we recognize the
+# failure, falling back to the raw output otherwise so nothing is hidden.
+collector_diagnose_failure() {
+    local err="$1"
+    if grep -qi 'port is already allocated\|address already in use\|bind.*address already in use' <<<"$err"; then
+        echo "collector: port ${PORT} is already in use by something else -- stop whatever's bound to it, or set \$CLD_OTEL_PORT to a free port" >&2
+    elif grep -qi 'pull access denied\|manifest.*not found\|manifest unknown\|no such host\|failed to resolve reference\|error getting credentials\|i/o timeout' <<<"$err"; then
+        echo "collector: couldn't pull image '${IMAGE}' -- check network access to the registry, and that \$CLD_OTEL_IMAGE (if set) names a real image" >&2
+    elif grep -qi 'permission denied' <<<"$err"; then
+        echo "collector: permission denied writing to ${DATA_DIR}/data -- check that directory's ownership (the container runs as your host uid:gid $(id -u):$(id -g))" >&2
+    else
+        echo "collector: failed to start -- raw docker error:" >&2
+    fi
+    echo "$err" >&2
+}
+
 collector_start() {
     if collector_running; then echo "collector: already running"; return 0; fi
+    collector_preflight
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
     # Bind to the docker bridge gateway (how containers reach the host via
     # host.docker.internal) plus loopback (for host-side sessions using
@@ -44,13 +72,27 @@ collector_start() {
     # Run as our own host uid/gid: the image's default (non-root) user can't
     # write into a host-owned bind mount otherwise -- the file exporter fails
     # with "permission denied" on the raw metrics file.
-    docker run -d --name "$CONTAINER_NAME" \
+    local err
+    if ! err="$(docker run -d --name "$CONTAINER_NAME" \
         --user "$(id -u):$(id -g)" \
         -p "${gateway}:${PORT}:4318" \
         -p "127.0.0.1:${PORT}:4318" \
         -v "$HERE/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro" \
         -v "$DATA_DIR/data:/data" \
-        "$IMAGE" >/dev/null
+        "$IMAGE" 2>&1 >/dev/null)"; then
+        collector_diagnose_failure "$err"
+        docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        exit 1
+    fi
+    # `docker run -d` only reports errors from creating the container --
+    # failures inside it (e.g. the file exporter hitting a permission-denied
+    # bind mount) surface a moment later as the container exiting, not here.
+    sleep 0.5
+    if ! collector_running; then
+        collector_diagnose_failure "$(docker logs "$CONTAINER_NAME" 2>&1)"
+        docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        exit 1
+    fi
     echo "collector: started on ${gateway}:${PORT} + 127.0.0.1:${PORT} (containers via host.docker.internal, host via localhost -- not exposed to the LAN)"
 }
 
@@ -71,6 +113,10 @@ agg_running() {
 agg_start() {
     local pid
     if pid=$(agg_running); then echo "aggregate: already running (pid $pid)"; return 0; fi
+    if ! command -v "$PYTHON" >/dev/null 2>&1; then
+        echo "aggregate: '$PYTHON' not found on \$PATH -- install Python 3, or set \$PYTHON to its path" >&2
+        exit 1
+    fi
     rm -f "$AGG_PIDFILE" 2>/dev/null || true
     nohup "$PYTHON" "$HERE/aggregate.py" --watch >>"$AGG_LOG" 2>&1 &
     disown
@@ -79,7 +125,11 @@ agg_start() {
     if pid=$(agg_running); then
         echo "aggregate: started (pid $pid), logging to $AGG_LOG"
     else
-        echo "aggregate: failed to start -- check $AGG_LOG" >&2
+        if grep -qi 'permission denied' "$AGG_LOG" 2>/dev/null; then
+            echo "aggregate: failed to start -- permission denied writing under ${DATA_DIR} (check its ownership; this process runs as $(id -u):$(id -g))" >&2
+        else
+            echo "aggregate: failed to start -- check $AGG_LOG" >&2
+        fi
         exit 1
     fi
 }

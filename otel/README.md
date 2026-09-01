@@ -164,6 +164,11 @@ is best-effort, not transactional.
 - `otel/opentelemetry-collector-contrib` image (the `file` exporter used here
   isn't in the core `otel/opentelemetry-collector` image).
 - `aggregate.py` is stdlib-only Python 3 -- no install step.
+- Docker installed and the daemon running. `otelctl.sh start` checks for both
+  up front, and diagnoses common failures (port already in use, image pull
+  failure, bind-mount permission denied) instead of leaving you to `docker
+  logs` it out -- see the raw error printed alongside the diagnosis if a
+  failure doesn't match a known cause.
 
 ## Getting this on another machine
 
