@@ -7,8 +7,10 @@ RUN apt-get update && apt-get install -y vim && rm -rf /var/lib/apt/lists/*
 
 USER claude
 
-# Install latest Neovim from GitHub releases
-RUN curl -fsSL https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-linux-x86_64.tar.gz -o ~/.tmp/nvim.tar.gz && \
+# Neovim must stay >= 0.12: the dotfiles pin nvim-treesitter to its `main`
+# branch, which calls 0.12-only APIs (vim.list.*) and hard-fails parser
+# installation on 0.11, leaving every buffer without a parser.
+RUN curl -fsSL https://github.com/neovim/neovim/releases/download/v0.12.5/nvim-linux-x86_64.tar.gz -o ~/.tmp/nvim.tar.gz && \
     tar -xzf ~/.tmp/nvim.tar.gz -C ~/.opt && \
     ln -s ~/.opt/nvim-linux-x86_64/bin/nvim ~/.local/bin/nvim && \
     rm -f ~/.tmp/nvim.tar.gz
