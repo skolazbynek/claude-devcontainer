@@ -115,8 +115,6 @@ def _stats_path(output_dir, service_name, session_id, custom_name=None, flat=Fal
 # this standalone (no cld, no shared ~/.claude) just never resolves a name,
 # and those sessions keep today's session-id-based filename.
 
-_CUSTOM_TITLE_TAIL_BYTES = 8192
-
 
 def _find_transcript(claude_dir, session_id):
     matches = list(claude_dir.glob(f"projects/*/{session_id}.jsonl"))
@@ -138,15 +136,11 @@ def _extract_custom_title(text, session_id):
     return title
 
 
-def _read_custom_title(transcript_path, session_id, tail_only):
+def _read_custom_title(transcript_path, session_id, start=0):
     try:
-        if tail_only:
-            size = transcript_path.stat().st_size
-            with transcript_path.open("rb") as f:
-                f.seek(max(0, size - _CUSTOM_TITLE_TAIL_BYTES))
-                data = f.read()
-        else:
-            data = transcript_path.read_bytes()
+        with transcript_path.open("rb") as f:
+            f.seek(start)
+            data = f.read()
     except OSError:
         return None
     return _extract_custom_title(data.decode("utf-8", errors="ignore"), session_id)
@@ -160,18 +154,18 @@ def _resolve_session_name(session_id, claude_dir, session_names):
     full only the first time a session is seen (to seed the name even if it
     was renamed long before this process started watching), and the file's
     size is stat'd on every later call -- an unchanged size skips the read
-    entirely, and a changed one only tails the last few KB rather than
-    re-parsing the whole transcript, since Claude Code re-appends the
-    current title on most turns.
+    entirely, and a changed one reads only the bytes appended since the
+    last check (never a fixed-size tail), so a title re-emitted anywhere in
+    a large turn is never missed no matter how much that turn wrote.
     """
     if not session_id:
         return None
     entry = session_names.get(session_id)
     if entry is None:
         transcript = _find_transcript(claude_dir, session_id)
-        name = _read_custom_title(transcript, session_id, tail_only=False) if transcript else None
-        size = transcript.stat().st_size if transcript else -1
-        session_names[session_id] = {"transcript": transcript, "name": name, "size": size}
+        name = _read_custom_title(transcript, session_id) if transcript else None
+        scanned = transcript.stat().st_size if transcript else -1
+        session_names[session_id] = {"transcript": transcript, "name": name, "scanned": scanned}
         return name
     transcript = entry["transcript"]
     if transcript is None:
@@ -180,9 +174,15 @@ def _resolve_session_name(session_id, claude_dir, session_names):
         size = transcript.stat().st_size
     except OSError:
         return entry["name"]
-    if size != entry["size"]:
-        entry["size"] = size
-        title = _read_custom_title(transcript, session_id, tail_only=True)
+    if size > entry["scanned"]:
+        title = _read_custom_title(transcript, session_id, start=entry["scanned"])
+        entry["scanned"] = size
+        if title:
+            entry["name"] = title
+    elif size < entry["scanned"]:
+        # Transcript shrank (rotated/truncated) -- re-seed from scratch.
+        title = _read_custom_title(transcript, session_id)
+        entry["scanned"] = size
         if title:
             entry["name"] = title
     return entry["name"]
