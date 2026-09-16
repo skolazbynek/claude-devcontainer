@@ -8,6 +8,7 @@ behavior changes -- not a general shell test harness, just subprocess calls.
 """
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -471,6 +472,70 @@ do_graphql_status
         fields = result.stdout.rstrip("\n").split("\t")
         assert fields[0] == "not_started"
         assert fields[5] == ""
+
+
+class TestGraphqlStartRepoMismatch:
+    """do_graphql_start's idempotence is per repo: a server already running
+    for repo A answering `graphql start --repo B` must refuse and name A --
+    not hand a multi-repo ticket the wrong repo's endpoint. Same-repo (and
+    pre-label, empty-label) reuse stays idempotent."""
+
+    @pytest.fixture
+    def fakebin(self, tmp_path):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        (bindir / "docker").write_text("""#!/usr/bin/env bash
+[ "$1" = inspect ] || exit 1
+shift
+fmt=""
+while [ $# -gt 0 ]; do
+  case "$1" in --format) fmt="$2"; shift 2 ;; *) shift ;; esac
+done
+case "$fmt" in
+  '') exit 0 ;;
+  '{{.State.Running}}') echo true ;;
+  *gql-repo*) printf '%s\\n' "${FAKE_GQL_REPO:-}" ;;
+esac
+""")
+        (bindir / "docker").chmod(0o755)
+        return bindir
+
+    def _start(self, fakebin, repo: str, gql_repo: str) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        env["PATH"] = f"{fakebin}:{env['PATH']}"
+        env["FAKE_GQL_REPO"] = gql_repo
+        return _run_function(
+            "do_graphql_start",
+            f"""
+set -euo pipefail
+session=cld_ticket_x
+REPO={repo!r}
+sweep_gql_orphans() {{ :; }}
+resolve_graphql_context() {{ :; }}
+do_graphql_status() {{ echo STATUS_CALLED; }}
+do_graphql_start
+""",
+            env,
+        )
+
+    def test_cross_repo_reuse_refused_naming_the_running_repo(self, fakebin):
+        result = self._start(fakebin, repo="/repos/b", gql_repo="/repos/a")
+        assert result.returncode == 3
+        assert "denied" in result.stderr
+        assert "/repos/a" in result.stderr
+        assert "graphql stop" in result.stderr
+        assert "STATUS_CALLED" not in result.stdout
+
+    def test_same_repo_reuse_stays_idempotent(self, fakebin):
+        result = self._start(fakebin, repo="/repos/a", gql_repo="/repos/a")
+        assert result.returncode == 0, result.stderr
+        assert "STATUS_CALLED" in result.stdout
+
+    def test_unlabeled_server_stays_idempotent(self, fakebin):
+        # v1 / pre-label containers carry no org.cld.gql-repo label.
+        result = self._start(fakebin, repo="/repos/a", gql_repo="")
+        assert result.returncode == 0, result.stderr
+        assert "STATUS_CALLED" in result.stdout
 
 
 class TestGraphqlQueryBody:

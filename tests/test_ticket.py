@@ -255,6 +255,24 @@ class TestStartRepoSetChange:
         forget.assert_not_called()
         launch.assert_not_called()
 
+    def test_kept_repo_anchor_change_says_it_takes_effect_after_shutdown(self, tmp_path, capsys):
+        """A kept repo reattaches at its existing bookmark, so the diff line
+        for its changed anchor must say the change only lands after
+        shutdown + start -- not imply the new anchor applies now."""
+        cfg = self._cfg(tmp_path)
+        with patch("cld.ticket._docker_status", return_value="running"), \
+             patch("cld.ticket.read_manifest", return_value=self._old(tmp_path)), \
+             patch("cld.ticket.ticket_anchor_resolver", lambda cfg: lambda p, r, m: "d" * 40), \
+             patch("cld.ticket.typer.confirm", return_value=True), \
+             patch("cld.ticket._stop_and_remove"), \
+             patch("cld.ticket.forget_session_state"), \
+             patch("cld.ticket._launch"):
+            start_ticket(cfg, "lide-2600", ["lide-api"], [])
+        out = capsys.readouterr().out
+        assert f"~ lide-api  anchor {'b' * 12} -> {'d' * 12}" in out
+        assert "takes effect only after shutdown + start" in out
+        assert "reattaches at the existing bookmark" in out
+
     def test_identical_resolved_set_skips_the_recreate(self, tmp_path, capsys):
         """Same specs re-given = plain create-or-start, no diff prompt."""
         cfg = self._cfg(tmp_path)

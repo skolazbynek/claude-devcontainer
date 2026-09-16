@@ -685,11 +685,22 @@ do_graphql_start() {
 
     # start is idempotent: a running server already answers, so return its
     # existing endpoint rather than erroring -- it's what makes the MCP's
-    # start_server safe to call without checking status first.
+    # start_server safe to call without checking status first. Idempotence is
+    # per repo, though: a multi-repo ticket asking for a different repo than
+    # the running server's own org.cld.gql-repo label must be refused, not
+    # handed the wrong repo's endpoint. An unlabeled container (pre-label
+    # image) keeps the old always-idempotent behavior.
     if docker inspect "$cname" >/dev/null 2>&1; then
         local running
         running=$(docker inspect "$cname" --format '{{.State.Running}}' 2>/dev/null)
         if [ "$running" = "true" ]; then
+            local gql_repo
+            gql_repo=$(docker inspect "$cname" --format '{{index .Config.Labels "org.cld.gql-repo"}}' 2>/dev/null) || true
+            if [ -n "$gql_repo" ] && [ "$gql_repo" != "$REPO" ]; then
+                echo "denied: graphql server for $session is already running for repo" \
+                     "$gql_repo, not $REPO -- \`graphql stop\` it first" >&2
+                exit 3
+            fi
             do_graphql_status
             return 0
         fi

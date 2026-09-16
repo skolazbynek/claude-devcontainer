@@ -179,7 +179,13 @@ def _entry_change(old, new) -> str:
     if old.path != new.path:
         parts.append(f"path {old.path} -> {new.path}")
     if old.anchor_base != new.anchor_base:
-        parts.append(f"anchor {old.anchor_base[:12]} -> {new.anchor_base[:12]}")
+        # A kept repo reattaches at its existing bookmark; the new anchor only
+        # takes effect after `cld shutdown` + `cld start`.
+        parts.append(
+            f"anchor {old.anchor_base[:12]} -> {new.anchor_base[:12]} "
+            "(takes effect only after shutdown + start; reattaches at the "
+            "existing bookmark until then)"
+        )
     if old.anchor_mode != new.anchor_mode:
         parts.append(f"mode {old.anchor_mode} -> {new.anchor_mode}")
     return ", ".join(parts)
