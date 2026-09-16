@@ -430,6 +430,10 @@ With W4, the same checks apply behind `cld start` / `cld stop` /
   /workspace/smoke-t1/<repo-a>` — not `first launch`, no new scratch commit
   (host `jj log` shows exactly one `cld anchor:` commit for the session).
 - `warm-marker` still exists in the workspace (container layer persisted).
+- The readiness sentinel `/tmp/cld-ticket-ready` in the container is gone
+  right after `docker start` (the entrypoint removes the previous boot's
+  stale copy first) and reappears only once the boot loop finishes — so the
+  host-side readiness wait cannot return early on a warm start.
 - CLAUDE.md was regenerated (mtime changed), same content.
 
 ### 8.3 Restart-recreate (rm + rerun) reattaches at bookmarks

@@ -12,6 +12,10 @@ BOOKMARK="${SESSION_NAME:?SESSION_NAME must be set}"
 # own after-loop steps and PID-1 idle. It never reaches the v1 single-repo
 # flow below (docs/design-ticket-containers.md section 4).
 if [ -n "${TICKET_MODE:-}" ]; then
+    # The container layer survives `docker stop`, so a warm start (`docker
+    # start`) still sees the previous boot's sentinel. Clear it before any
+    # per-repo work, or the host-side readiness wait returns early.
+    rm -f /tmp/cld-ticket-ready
     : "${CLD_TICKET_MANIFEST:?CLD_TICKET_MANIFEST must be set in TICKET_MODE}"
     if ! command -v jq &>/dev/null; then
         echo "Error: TICKET_MODE requires jq in the image" >&2
