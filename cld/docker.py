@@ -763,7 +763,9 @@ def build_ticket_container_args(manifest: TicketManifest, cfg: Config) -> list[s
         path_map[origin] = host_path
         path_map[f"{WORKSPACE_BASE}/{manifest.ticket}/{repo.name}"] = host_path
     path_map[CONTAINER_HOME] = host_home
-    args += ["-w", f"{WORKSPACE_BASE}/{manifest.ticket}"]
+    # No -w: the daemon would pre-create the ticket root as root:root before
+    # the entrypoint can mkdir it as the container user; the post-boot
+    # `docker exec -w` calls supply the working directory instead.
 
     args += stage_ssl_certs(cfg)
 

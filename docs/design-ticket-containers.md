@@ -216,9 +216,11 @@ shared, not forked.
   host already has a correct TOML parser and the entrypoint should stay dumb;
   cost is staleness until the next recreate, accepted.
 - `-e CLD_PATH_MAP=<JSON>` — §6.4.
-- One mount per repo: `-v <path>:/workspace/origin/<name>`, plus
-  `-w /workspace/<slug>` (replaces the single mount + `-w` at
-  `docker.py:543-546` for this kind).
+- One mount per repo: `-v <path>:/workspace/origin/<name>` (replaces the
+  single mount + `-w` at `docker.py:543-546` for this kind). No `-w` on
+  `docker run`: the daemon would pre-create the ticket root as root:root
+  before the entrypoint can mkdir it as the container user; the post-boot
+  `docker exec -w /workspace/<slug>` calls (§7) supply the working directory.
 - **Not passed:** `AGENT_SCRATCH`, `AGENT_REVISION_HINT`, `AGENT_MODEL`,
   brief/prompt. Anchors ride in the manifest; model and prompt belong to
   `cld claude` (spec §5); the scratch payload is synthesized in-container

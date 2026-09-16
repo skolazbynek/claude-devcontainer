@@ -1114,11 +1114,13 @@ class TestBuildTicketContainerArgs:
         cfg = Config(mailbox_root=str(tmp_path / "mb"), **cfg_kwargs)
         return manifest, cfg
 
-    def test_name_and_workdir(self, tmp_path, monkeypatch):
+    def test_name_and_no_workdir(self, tmp_path, monkeypatch):
         manifest, cfg = self._setup(tmp_path, monkeypatch)
         args = build_ticket_container_args(manifest, cfg)
         assert args[:2] == ["--name", "cld_ticket_lide-2600"]
-        assert "-w" in args and "/workspace/lide-2600" in args
+        # No -w: the daemon would pre-create the ticket root as root:root,
+        # breaking the entrypoint's mkdir; `docker exec -w` sets it post-boot.
+        assert "-w" not in args
 
     def test_per_repo_rw_origin_mounts(self, tmp_path, monkeypatch):
         manifest, cfg = self._setup(tmp_path, monkeypatch)

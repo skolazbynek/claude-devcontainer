@@ -41,13 +41,26 @@ def config_path(tmp_path) -> Path:
     return p
 
 
+@pytest.fixture
+def home(tmp_path, monkeypatch) -> Path:
+    """HOME with an existing ~/projects/my-api, so tilde paths pass the add check."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "projects" / "my-api").mkdir(parents=True)
+    return tmp_path
+
+
 class TestAddRmRoundTrip:
-    def test_add_writes_a_repos_table(self, config_path):
+    def test_add_writes_a_repos_table(self, config_path, home):
         add_repo(config_path, "my-api", "~/projects/my-api")
         data = tomllib.loads(config_path.read_text())
         assert data["repos"]["my-api"] == {"path": "~/projects/my-api"}
 
-    def test_add_preserves_comments_and_unrelated_keys(self, config_path):
+    def test_add_nonexistent_path_raises(self, config_path, tmp_path):
+        with pytest.raises(RuntimeError, match="not an existing directory"):
+            add_repo(config_path, "ghost", str(tmp_path / "missing"))
+        assert "repos" not in tomllib.loads(config_path.read_text())
+
+    def test_add_preserves_comments_and_unrelated_keys(self, config_path, home):
         add_repo(config_path, "my-api", "~/projects/my-api", default_rev="trunk()", bootstrap=True)
         text = config_path.read_text()
         assert "# my hand-written header comment" in text
@@ -60,23 +73,29 @@ class TestAddRmRoundTrip:
             "path": "~/projects/my-api", "default_rev": "trunk()", "bootstrap": True,
         }
 
-    def test_add_then_rm_restores_the_rest(self, config_path):
+    def test_add_then_rm_restores_the_rest(self, config_path, tmp_path):
+        x, y = tmp_path / "x", tmp_path / "y"
+        x.mkdir()
+        y.mkdir()
         before = config_path.read_text()
-        add_repo(config_path, "a", "/x")
-        add_repo(config_path, "b", "/y")
+        add_repo(config_path, "a", str(x))
+        add_repo(config_path, "b", str(y))
         remove_repo(config_path, "a")
         data = tomllib.loads(config_path.read_text())
         assert "a" not in data["repos"]
-        assert data["repos"]["b"] == {"path": "/y"}
+        assert data["repos"]["b"] == {"path": str(y)}
         remove_repo(config_path, "b")
         text = config_path.read_text()
         assert before in text
         assert "repos" not in tomllib.loads(text).get("repos", {})
 
-    def test_add_duplicate_name_raises(self, config_path):
-        add_repo(config_path, "a", "/x")
+    def test_add_duplicate_name_raises(self, config_path, tmp_path):
+        x, y = tmp_path / "x", tmp_path / "y"
+        x.mkdir()
+        y.mkdir()
+        add_repo(config_path, "a", str(x))
         with pytest.raises(RuntimeError, match="already registered"):
-            add_repo(config_path, "a", "/y")
+            add_repo(config_path, "a", str(y))
 
     @pytest.mark.parametrize("name", ["My-Api", "a_b", "-lead", "a b", ""])
     def test_add_invalid_name_raises(self, config_path, name):
@@ -87,12 +106,12 @@ class TestAddRmRoundTrip:
         with pytest.raises(RuntimeError, match="not registered"):
             remove_repo(config_path, "ghost")
 
-    def test_load_parses_what_add_wrote(self, config_path, tmp_path):
+    def test_load_parses_what_add_wrote(self, config_path, tmp_path, home):
         add_repo(config_path, "my-api", "~/projects/my-api", default_rev="main")
         cfg = Config.from_env(user_config=config_path, project_config=tmp_path / "missing")
         assert cfg.repos == {"my-api": RepoEntry(path="~/projects/my-api", default_rev="main")}
 
-    def test_mysql_config_round_trips(self, config_path, tmp_path):
+    def test_mysql_config_round_trips(self, config_path, tmp_path, home):
         add_repo(config_path, "my-api", "~/projects/my-api", mysql_config="~/.config/cld/m.cnf")
         data = tomllib.loads(config_path.read_text())
         assert data["repos"]["my-api"] == {
@@ -262,40 +281,53 @@ class TestReposCli:
              patch("cld.config._user_config_path", return_value=config_path):
             return runner.invoke(app, ["repos", *argv])
 
-    def test_add_then_list(self, config_path):
+    def test_add_then_list(self, config_path, tmp_path):
+        repo = tmp_path / "my-api"
+        repo.mkdir()
         with patch("cld.cli.ticket_repo_mounts", return_value={}):
-            add = self._invoke(config_path, "add", "my-api", "/host/my-api", "--default-rev", "main")
+            add = self._invoke(config_path, "add", "my-api", str(repo), "--default-rev", "main")
             listing = self._invoke(config_path)
         assert add.exit_code == 0, add.output
         assert "registered 'my-api'" in add.output
         assert listing.exit_code == 0, listing.output
         assert "my-api" in listing.output
-        assert "/host/my-api" in listing.output
+        assert str(repo) in listing.output
         assert "main" in listing.output
+
+    def test_add_nonexistent_path_errors(self, config_path, tmp_path):
+        result = self._invoke(config_path, "add", "my-api", str(tmp_path / "missing"))
+        assert result.exit_code == 1
+        assert "not an existing directory" in result.output
 
     def test_list_empty_registry(self, config_path):
         result = self._invoke(config_path)
         assert result.exit_code == 0, result.output
         assert "No repos registered" in result.output
 
-    def test_list_names_mounting_tickets(self, config_path):
-        mounts = {"cld_ticket_lide-1": {"my-api": "/host/my-api"}}
+    def test_list_names_mounting_tickets(self, config_path, tmp_path):
+        repo = tmp_path / "my-api"
+        repo.mkdir()
+        mounts = {"cld_ticket_lide-1": {"my-api": str(repo)}}
         with patch("cld.cli.ticket_repo_mounts", return_value=mounts):
-            self._invoke(config_path, "add", "my-api", "/host/my-api")
+            self._invoke(config_path, "add", "my-api", str(repo))
             result = self._invoke(config_path)
         assert result.exit_code == 0, result.output
         assert "cld_ticket_lide-1" in result.output
 
-    def test_rm_removes(self, config_path):
+    def test_rm_removes(self, config_path, tmp_path):
+        repo = tmp_path / "my-api"
+        repo.mkdir()
         with patch("cld.cli.tickets_referencing", return_value=[]):
-            self._invoke(config_path, "add", "my-api", "/host/my-api")
+            self._invoke(config_path, "add", "my-api", str(repo))
             result = self._invoke(config_path, "rm", "my-api")
         assert result.exit_code == 0, result.output
         assert "repos" not in tomllib.loads(config_path.read_text())
 
-    def test_rm_refused_while_a_ticket_mounts_it(self, config_path):
+    def test_rm_refused_while_a_ticket_mounts_it(self, config_path, tmp_path):
+        repo = tmp_path / "my-api"
+        repo.mkdir()
         with patch("cld.cli.tickets_referencing", return_value=["cld_ticket_lide-1"]):
-            self._invoke(config_path, "add", "my-api", "/host/my-api")
+            self._invoke(config_path, "add", "my-api", str(repo))
             result = self._invoke(config_path, "rm", "my-api")
         assert result.exit_code == 1
         assert "cld_ticket_lide-1" in result.output

@@ -58,7 +58,8 @@ def parse_repos(raw: dict) -> dict[str, RepoEntry]:
 
     Invalid entries are warned about and skipped, never fatal: a broken
     registry entry should break launching *that* repo, not every cld
-    invocation. Paths are not checked for existence here -- only at launch.
+    invocation. Paths are not checked for existence here -- only at
+    ``repos add`` time.
     """
     repos: dict[str, RepoEntry] = {}
     for name, entry in raw.items():
@@ -107,6 +108,8 @@ def add_repo(
 ) -> None:
     """Append a ``[repos.<name>]`` table to the user config, preserving the rest."""
     validate_repo_name(name)
+    if not Path(path).expanduser().is_dir():
+        raise RuntimeError(f"path '{path}' is not an existing directory")
     doc = tomlkit.parse(config_path.read_text())
     repos = doc.get("repos")
     if repos is None:
