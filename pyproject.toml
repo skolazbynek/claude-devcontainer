@@ -14,6 +14,7 @@ httpx = "^0.28"
 mcp = {version = "^1.0", extras = ["cli"]}
 pyyaml = "^6.0"
 typer = "^0.24.1"
+tomlkit = "^0.15.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"

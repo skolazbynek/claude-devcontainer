@@ -13,7 +13,7 @@ import typer
 
 from cld.chain import ParallelGroup, apply_name_override, chain_state_dir, load_chain, print_chain_report, run_chain, validate_chain
 from cld.chain_state import ChainState, StateWriter, write_state, _utcnow_iso
-from cld.config import Config
+from cld.config import Config, _user_config_path
 from cld.docker import (
     TaskAgentSpec,
     agent_container_name,
@@ -46,6 +46,7 @@ from cld.bridge import daemon as bridge_daemon
 from cld.bridge.mattermost import build_bridge, run_bridge
 from cld.cli_msg import handle_errors as _handle_errors, msg_app
 from cld.messenger import mailbox
+from cld.registry import add_repo, remove_repo, ticket_repo_mounts, tickets_referencing
 from cld.run import launch_run
 from cld.log import get_logger, setup_logging
 from cld.prompts import compose_brief, list_prompt_items, resolve_prompt_args
@@ -1021,6 +1022,71 @@ def task_agent_shutdown(
 
 # --- Mailbox messaging (shared with the container CLI) ------------------------
 app.add_typer(msg_app, name="msg")
+
+
+# --- Repo registry ------------------------------------------------------------
+repos_app = typer.Typer(help="Named repo registry for ticket containers.")
+app.add_typer(repos_app, name="repos")
+
+
+@repos_app.callback(invoke_without_command=True)
+@_handle_errors
+def repos_list(ctx: typer.Context):
+    """List registered repos and which ticket containers mount them."""
+    if ctx.invoked_subcommand is not None:
+        return
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    if not cfg.repos:
+        typer.echo("No repos registered. `cld repos add <name> <path>` registers one.")
+        return
+    mounts = ticket_repo_mounts()
+    rows = []
+    for name in sorted(cfg.repos):
+        entry = cfg.repos[name]
+        host_path = str(Path(entry.path).expanduser())
+        tickets = sorted(c for c, m in mounts.items() if m.get(name) == host_path)
+        rows.append((
+            name, entry.path, entry.default_rev or "trunk()",
+            "yes" if entry.bootstrap else "", ", ".join(tickets),
+        ))
+    headers = ("NAME", "PATH", "DEFAULT_REV", "BOOTSTRAP", "TICKETS")
+    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
+    for row in (headers, *rows):
+        typer.echo("  ".join(f"{cell:<{w}}" for cell, w in zip(row, widths)).rstrip())
+
+
+@repos_app.command("add")
+@_handle_errors
+def repos_add(
+    name: str = typer.Argument(..., help="Registry name; becomes the ticket subdir name"),
+    path: str = typer.Argument(..., help="Host path of the repo"),
+    default_rev: str = typer.Option("", "--default-rev", help="Anchor revision offered at launch (default: trunk())"),
+    bootstrap: bool = typer.Option(False, "--bootstrap", help="Run poetry install in the repo's pyproject_dir on first boot"),
+):
+    """Register a repo in ~/.config/cld/config.toml."""
+    cfg = Config.from_env()  # ensures the user config exists
+    setup_logging(cfg)
+    add_repo(_user_config_path(), name, path, default_rev=default_rev, bootstrap=bootstrap)
+    typer.echo(f"registered '{name}' -> {path}")
+
+
+@repos_app.command("rm")
+@_handle_errors
+def repos_rm(name: str = typer.Argument(..., help="Registry name to remove")):
+    """Remove a repo from the registry (refused while a ticket container mounts it)."""
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    entry = cfg.repos.get(name)
+    if entry:
+        holders = tickets_referencing(name, entry.path)
+        if holders:
+            raise RuntimeError(
+                f"repo '{name}' is mounted by ticket container(s): {', '.join(holders)}; "
+                "shut them down first"
+            )
+    remove_repo(_user_config_path(), name)
+    typer.echo(f"removed '{name}'")
 
 
 # --- Chat bridges -------------------------------------------------------------

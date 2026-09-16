@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from cld.config import Config, _find_project_config, _load_toml
+from cld.registry import RepoEntry
 
 
 @pytest.fixture(autouse=True)
@@ -151,6 +152,37 @@ class TestLoadToml:
     def test_filters_unknown_keys(self, tmp_path):
         p = _write(tmp_path / "c.toml", 'base_image = "x"\nbogus = 1\n')
         assert _load_toml(p) == {"base_image": "x"}
+
+
+class TestReposTable:
+    def test_parsed_into_config(self, tmp_path):
+        user = _write(
+            tmp_path / "user.toml",
+            '[repos.lide-api]\npath = "~/projects/lide-api"\ndefault_rev = "main"\n'
+            '[repos.diskuze-api]\npath = "~/projects/diskuze-api"\nbootstrap = true\n'
+            'mysql_config = "~/.config/cld/d.cnf"\n',
+        )
+        cfg = Config.from_env(user_config=user, project_config=tmp_path / "missing")
+        assert cfg.repos == {
+            "lide-api": RepoEntry(path="~/projects/lide-api", default_rev="main"),
+            "diskuze-api": RepoEntry(path="~/projects/diskuze-api", bootstrap=True,
+                                     mysql_config="~/.config/cld/d.cnf"),
+        }
+
+    def test_repos_table_does_not_warn_unknown(self, tmp_path, capsys):
+        user = _write(tmp_path / "user.toml", '[repos.a]\npath = "/x"\n')
+        Config.from_env(user_config=user, project_config=tmp_path / "missing")
+        assert "unknown key" not in capsys.readouterr().err
+
+    def test_non_table_repos_warns_and_is_dropped(self, tmp_path, capsys):
+        user = _write(tmp_path / "user.toml", 'repos = "nope"\n')
+        cfg = Config.from_env(user_config=user, project_config=tmp_path / "missing")
+        assert cfg.repos == {}
+        assert "table of [repos.<name>] tables" in capsys.readouterr().err
+
+    def test_defaults_to_empty(self, tmp_path):
+        cfg = Config.from_env(user_config=tmp_path / "u", project_config=tmp_path / "p")
+        assert cfg.repos == {}
 
 
 class TestMasterTargets:

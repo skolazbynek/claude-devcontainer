@@ -12,10 +12,11 @@ import logging
 import os
 import shutil
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from cld.log import _CldFormatter, _LazyStderrHandler
+from cld.registry import RepoEntry, parse_repos
 
 _log = logging.getLogger("cld.config")
 if not _log.handlers:
@@ -149,10 +150,17 @@ def _load_toml(path: Path) -> dict:
             "Rename them; the values are still valid as-is. Ignoring them would leave "
             "the broker silently off, which breaks every task-agent launch."
         )
-    unknown = set(data) - _TOML_KEYS
+    unknown = set(data) - _TOML_KEYS - {"repos"}
     for key in sorted(unknown):
         _log.warning("unknown key '%s' in %s", key, path)
-    return {k: v for k, v in data.items() if k in _TOML_KEYS}
+    known = {k: v for k, v in data.items() if k in _TOML_KEYS}
+    repos = data.get("repos")
+    if repos is not None:
+        if isinstance(repos, dict):
+            known["repos"] = repos
+        else:
+            _log.warning("'repos' in %s must be a table of [repos.<name>] tables", path)
+    return known
 
 
 def _load_dotenv(path: Path | None = None) -> None:
@@ -227,6 +235,10 @@ class Config:
     # peer container with -v <path>:/workspace/origin:rw. Master itself never
     # sees or writes to the target repo.
     master_targets: tuple[str, ...] = ()
+
+    # Named repo registry for ticket containers: [repos.<name>] tables in the
+    # user config (PRODUCT_DESIGN.md section 4). Managed with `cld repos`.
+    repos: dict[str, RepoEntry] = field(default_factory=dict)
 
     # Set by the host launcher when running inside a container, so Python
     # code (e.g. nested `cld` invocations) can translate container-side
@@ -336,6 +348,7 @@ class Config:
                 ".gitconfig", ".bashrc", ".config/nvim", ".local/state/nvim", ".cache/nvim",
             ))),
             master_targets=tuple(layered.get("master_targets", ())),
+            repos=parse_repos(layered.get("repos", {})),
             chain_max_parallel=_env_int("CLD_CHAIN_MAX_PARALLEL", int(layered.get("chain_max_parallel", 4))),
             chain_default_model=_env_str("CLD_CHAIN_DEFAULT_MODEL", layered.get("chain_default_model", "")),
             ignore_gitignore=tuple(layered.get("ignore_gitignore", ())),
