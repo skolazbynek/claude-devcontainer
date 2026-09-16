@@ -29,7 +29,7 @@ def _manifest(*entries):
     return TicketManifest(ticket="lide-2600", repos=tuple(entries))
 
 
-def _fake_resolver(path, revision):
+def _fake_resolver(path, revision, mode):
     return f"hash({revision})"
 
 
@@ -147,6 +147,21 @@ class TestResolveManifest:
                 "t", ["lide-api"], self._registry(),
                 shared={"nope"}, resolver=_fake_resolver,
             )
+
+    def test_resolver_receives_per_repo_mode(self, tmp_path):
+        other = tmp_path / "other"
+        other.mkdir()
+        seen = {}
+
+        def resolver(path, revision, mode):
+            seen[path] = mode
+            return "h"
+
+        resolve_manifest(
+            "t", ["lide-api", str(other)], self._registry(),
+            shared={"lide-api"}, resolver=resolver,
+        )
+        assert seen == {"/host/lide-api": "shared", str(other): "isolated"}
 
     def test_registry_tilde_path_expanded(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HOME", str(tmp_path))

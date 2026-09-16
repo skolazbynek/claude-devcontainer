@@ -77,7 +77,7 @@ def launch_run(
 
     session = session_name or build_session_name("run", name)
     mode = "shared" if shared_anchor else "isolated"
-    anchor = resolve_anchor_checked(cfg, repo_root, revision, mode)
+    anchor = resolve_anchor_checked(cfg, repo_root, revision, mode, caller_kind="run")
 
     args = ["--name", session]
     args += build_container_args(repo_root, session, cfg, anchor_hash=anchor, anchor_mode=mode)

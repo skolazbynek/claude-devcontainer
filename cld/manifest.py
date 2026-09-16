@@ -131,8 +131,13 @@ def _split_rev(spec: str) -> tuple[str, str]:
     return base, rev
 
 
-def default_resolver(path: str, revision: str) -> str:
-    """Resolve *revision* to a commit hash in the repo at *path*."""
+def default_resolver(path: str, revision: str, mode: str) -> str:
+    """Resolve *revision* to a commit hash in the repo at *path*.
+
+    *mode* (``isolated`` | ``shared``) is unused here; the overlap-checking
+    resolver (``cld.docker.ticket_anchor_resolver``) needs it, so it is part
+    of the resolver contract.
+    """
     return resolve_anchor(get_backend(Path(path)), revision)
 
 
@@ -142,15 +147,15 @@ def resolve_manifest(
     repos: dict[str, RepoEntry],
     *,
     shared: Iterable[str] = (),
-    resolver: Callable[[str, str], str] = default_resolver,
+    resolver: Callable[[str, str, str], str] = default_resolver,
 ) -> TicketManifest:
     """Resolve launch args + registry into a manifest.
 
     Each spec is a registry name or ad-hoc path with an optional ``@rev``
     anchor override; without one the registry ``default_rev`` applies, falling
     back to ``trunk()``. *shared* names the repos launched with
-    ``--shared-anchor``. *resolver* pins each revision to a commit hash --- the
-    launch path passes the overlap-checking resolver here.
+    ``--shared-anchor``. *resolver* pins each ``(path, revision, mode)`` to a
+    commit hash --- the launch path passes the overlap-checking resolver here.
     """
     bare: list[str] = []
     overrides: list[str] = []
@@ -176,11 +181,12 @@ def resolve_manifest(
         # Expanded exactly like registry.tickets_referencing expands for its
         # comparison, so `repos rm` protection matches the labeled path.
         path = str(Path(entry.path).expanduser())
+        mode = "shared" if name in shared_set else "isolated"
         entries.append(RepoManifestEntry(
             name=name,
             path=path,
-            anchor_base=resolver(path, revision),
-            anchor_mode="shared" if name in shared_set else "isolated",
+            anchor_base=resolver(path, revision, mode),
+            anchor_mode=mode,
             rev_source=source,
         ))
     return TicketManifest(ticket=ticket, repos=tuple(entries))

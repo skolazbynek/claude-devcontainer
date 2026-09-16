@@ -8,12 +8,12 @@ import secrets
 import shutil
 import subprocess
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from cld.config import Config, _load_toml
-from cld.manifest import TicketManifest, manifest_labels
+from cld.manifest import TicketManifest, manifest_labels, read_manifest
 from cld.log import get_logger, log_subprocess, mask_secrets
 from cld.vcs import get_backend
 
@@ -448,7 +448,7 @@ def build_container_args(
     the plain ``cld run`` one-shot agent -- see ``resolve_anchor_checked`` and
     docs/design-anchor-modes.md. Immutable for the container's lifetime, so
     they're the source of truth the overlap check reads back via
-    ``docker_anchor_list``.
+    ``docker_occupant_list``.
     """
     if sum((master, agent, bool(task_agent))) > 1:
         raise ValueError("master, agent and task_agent are mutually exclusive roles")
@@ -518,7 +518,7 @@ def build_container_args(
         elif anchor_hash:
             # `cld run`: no other org.cld.* labels today (its `--name` is set by
             # the caller in cld/run.py), but it still needs repo-root + anchor so
-            # docker_anchor_list can see it in the overlap check.
+            # docker_occupant_list can see it in the overlap check.
             args += [
                 "--label", "org.cld.kind=run",
                 "--label", f"org.cld.repo-root={host_repo_root}",
@@ -992,90 +992,165 @@ def assert_task_agent_capacity(cfg: Config, parent_master: str) -> None:
 ANCHOR_LABEL = "org.cld.anchor"
 ANCHOR_MODE_LABEL = "org.cld.anchor-mode"
 
-_ANCHOR_INSPECT_FORMAT = (
+_OCCUPANT_INSPECT_FORMAT = (
     '{{index .Config.Labels "org.cld.repo-root"}}|'
     '{{index .Config.Labels "org.cld.anchor"}}|'
     '{{index .Config.Labels "org.cld.anchor-mode"}}|'
-    '{{index .Config.Labels "org.cld.kind"}}'
+    '{{index .Config.Labels "org.cld.kind"}}|'
+    '{{index .Config.Labels "org.cld.session"}}'
 )
 
-# Kinds whose live reach can block another container's anchor. Interactive
+# Kinds whose reach strictly blocks another container's anchor. Interactive
 # roles (master, the bare `cld` devcontainer) are deliberately excluded: a
 # master must be able to spawn task-agents into its own tree, that's the
 # normal nesting, not a hazard. Headless roles (agent, task-agent, run) can
 # still silently rewrite their stack with nobody watching, so they keep
-# blocking -- see resolve_anchor_checked.
+# blocking. Tickets occupy trees too, but only at warn strength against other
+# tickets (stacked tickets are legitimate) -- see resolve_anchor_checked.
 ANCHOR_BLOCKING_KINDS = {"agent", "task-agent", "run"}
 
 
-def docker_anchor_list(*, running_only: bool = True) -> list[dict]:
-    """Every running container (any role) carrying an ``org.cld.anchor`` label.
-
-    Host-wide, not scoped to one kind or one master's fleet: two agents
-    anchored in the same store, launched by different callers, are exactly
-    the hazard this exists to catch. Records are
-    ``{name, repo_root, anchor, anchor_mode, kind}``.
-    """
-    filters = ["--filter", f"label={ANCHOR_LABEL}"]
-    if running_only:
-        filters += ["--filter", "status=running"]
-    result = subprocess.run(
-        ["docker", "ps", "-a", *filters, "--format", "{{.Names}}"],
-        capture_output=True, text=True,
-    )
-    log_subprocess(log, ["docker", "ps", "-a", *filters], result)
+def _docker_names_with_state(label_filter: str) -> list[tuple[str, str]]:
+    """``(name, state)`` of every container -- running or stopped -- carrying
+    *label_filter*. A docker failure reads as no containers, like every other
+    lister here: without a daemon there is nothing to launch against either."""
+    cmd = ["docker", "ps", "-a", "--filter", f"label={label_filter}",
+           "--format", "{{.Names}}\t{{.State}}"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    log_subprocess(log, cmd, result)
     if result.returncode != 0:
         return []
-    containers: list[dict] = []
-    for name in result.stdout.strip().splitlines():
-        if not name:
-            continue
+    rows: list[tuple[str, str]] = []
+    for line in result.stdout.strip().splitlines():
+        name, _, state = line.partition("\t")
+        if name:
+            rows.append((name, state))
+    return rows
+
+
+def docker_occupant_list() -> list[dict]:
+    """Every per-repo tree occupant the overlap check must consider, host-wide.
+
+    Two sources, one record shape
+    ``{name, repo_root, anchor_base, session, mode, kind}``: v1 headless kinds
+    via their ``org.cld.anchor`` labels, and ticket containers via their
+    manifest label expanded into one record per mounted repo.
+
+    Stopped persistent containers (ticket, agent, task-agent) still own their
+    bookmarks and can be restarted into their trees, so they are included;
+    stopped ``run`` corpses cannot return (``--rm``) and are not. Interactive
+    kinds (master, bare devcontainer) never occupy a tree. ``repo_root`` is
+    realpath-normalized at record-build time so a symlinked launch path cannot
+    bypass the check.
+    """
+    records: list[dict] = []
+    for name, state in _docker_names_with_state(ANCHOR_LABEL):
         inspect = subprocess.run(
-            ["docker", "inspect", name, "--format", _ANCHOR_INSPECT_FORMAT],
+            ["docker", "inspect", name, "--format", _OCCUPANT_INSPECT_FORMAT],
             capture_output=True, text=True,
         )
         log_subprocess(log, ["docker", "inspect", name], inspect)
         if inspect.returncode != 0:
             continue
-        repo_root, anchor, anchor_mode, kind = (inspect.stdout.strip().split("|") + ["", "", "", ""])[:4]
-        containers.append({
-            "name": name, "repo_root": repo_root,
-            "anchor": anchor, "anchor_mode": anchor_mode or "isolated",
-            "kind": kind,
+        repo_root, anchor, anchor_mode, kind, session = (
+            inspect.stdout.strip().split("|") + [""] * 5
+        )[:5]
+        if kind not in ANCHOR_BLOCKING_KINDS:
+            continue
+        if kind == "run" and state != "running":
+            continue
+        records.append({
+            "name": name, "repo_root": str(Path(repo_root).resolve()),
+            "anchor_base": anchor, "session": session or name,
+            "mode": anchor_mode or "isolated", "kind": kind,
         })
-    return containers
+    for name, _state in _docker_names_with_state("org.cld.kind=ticket"):
+        try:
+            manifest = read_manifest(name)
+        except (RuntimeError, ValueError, KeyError) as e:
+            log.warning(
+                "overlap check: cannot read the manifest of '%s', its trees are "
+                "invisible to the check: %s", name, e,
+            )
+            continue
+        for repo in manifest.repos:
+            records.append({
+                "name": name, "repo_root": str(Path(repo.path).resolve()),
+                "anchor_base": repo.anchor_base, "session": name,
+                "mode": repo.anchor_mode, "kind": "ticket",
+            })
+    return records
 
 
-def resolve_anchor_checked(cfg: Config, repo_root: Path, revision: str, mode: str = "isolated") -> str:
-    """Resolve *revision* to a commit hash, refusing overlap with another live anchor's reach.
+def _effective_anchor(vcs, occupant: dict) -> str:
+    """Map an occupant record to its effective anchor.
 
-    A live container's "reach" -- the set of commits it may touch -- is the
-    descendant tree of its own recorded anchor (docs/design-anchor-modes.md).
-    Two refusals, checked against every other running cld container host-wide
-    (not just one master's fleet or one role -- the hazard is store-level):
+    In isolated mode the editable boundary is the scratch commit B, staged
+    in-container as a child of the labeled base A *after* launch -- labels are
+    immutable, so B is derived from the jj store at check time using the same
+    description revset the entrypoint's restart recovery uses
+    (cld_recover_anchor, imgs/claude-devcontainer/vcs-lib.sh). An empty result
+    is the transient window between ``docker run`` and staging; falling back
+    to A only ever over-blocks, since A's reach is a superset of B's. Shared
+    mode edits descendants of A itself, so A *is* the effective anchor there.
+    """
+    if occupant["mode"] != "isolated":
+        return occupant["anchor_base"]
+    revset = (
+        f"heads({occupant['anchor_base']}+ & "
+        f"description(glob:'cld anchor: {occupant['session']}*'))"
+    )
+    result = vcs.run(["log", "-r", revset, "--no-graph", "-T", "commit_id", "-n", "1"])
+    if result.returncode != 0:
+        log.warning(
+            "could not derive the effective anchor of %s, falling back to its base %s: %s",
+            occupant["name"], occupant["anchor_base"][:12], (result.stderr or "").strip(),
+        )
+        return occupant["anchor_base"]
+    return result.stdout.strip() or occupant["anchor_base"]
 
-    1. Always: refuse if *revision* resolves to a commit already inside
-       another live container's reach. A live container may squash or rebase
-       its own stack at any moment, so anchoring inside it pins the new
-       container to a base its owner has since revised -- silently, and
-       unfixable without re-anchoring from scratch.
-    2. Only when ``mode == "shared"``: refuse if another live container's own
-       anchor falls inside *this* anchor's reach (``descendants(revision)``).
-       A shared anchor's reach is its own full descendant tree, so a shared
-       spawn must not claim a tree with a live occupant already inside it --
-       two isolated siblings spawned off the same base are unaffected, since
-       an isolated container's reach starts one commit below the shared base,
-       disjoint from a sibling's own line.
 
-    Only headless roles (``ANCHOR_BLOCKING_KINDS`` -- agent, task-agent, run)
-    occupy a tree for the purposes of this check. A live master or bare `cld`
-    devcontainer never blocks: spawning task-agents into its own tree is the
-    normal nesting, not the hazard this guards against. A live task-agent
-    still blocks another container (including one spawned by the same
-    master) from anchoring on top of it.
+def resolve_anchor_checked(
+    cfg: Config,
+    repo_root: Path,
+    revision: str,
+    mode: str = "isolated",
+    caller_kind: str = "devcontainer",
+) -> str:
+    """Resolve *revision* to a commit hash, checking overlap with every other
+    cld container's reach in the same repo.
 
-    jj-only -- peer-side anchor staging has no git equivalent. Anchoring on a
-    finished (reaped) sibling's deliverable branch still passes in either mode.
+    A container's "reach" -- the set of commits it may touch -- is the
+    descendant tree of its *effective* anchor: scratch commit B in isolated
+    mode, the base A in shared mode (``_effective_anchor``). Occupants are
+    every headless container plus every ticket container mounting this repo,
+    running or stopped-but-restartable (``docker_occupant_list``); repo
+    identity is realpath-normalized on both sides. Two overlap conditions:
+
+    1. Always: *revision* resolves to a commit inside an occupant's reach. An
+       occupant may squash or rebase its own stack at any moment, so anchoring
+       inside it pins the new container to a base its owner has since revised
+       -- silently, and unfixable without re-anchoring from scratch.
+    2. Only when ``mode == "shared"``: an occupant's effective anchor falls
+       inside *this* anchor's reach (``descendants(revision)``). A shared
+       anchor's reach is its own full descendant tree, so a shared spawn must
+       not claim a tree with an occupant already inside it -- two isolated
+       siblings off the same base are unaffected, since an isolated
+       container's reach starts one commit below the shared base.
+
+    The outcome depends on the (caller, occupant) kind pair: ticket vs ticket
+    overlap warns and proceeds (stacked tickets are legitimate; silence would
+    hide accidents); every other pairing blocks. A live master or bare
+    devcontainer never occupies: spawning task-agents into its own tree is the
+    normal nesting, not the hazard this guards against.
+
+    Fail-closed: a probe that cannot be evaluated counts as overlap -- block
+    for non-ticket callers, warn ("could not verify") for ticket callers. A
+    check that silently passes on error is worse than none.
+
+    jj-only -- peer-side anchor staging has no git equivalent; git repos keep
+    weaker guarantees. Anchoring on a finished (reaped) sibling's deliverable
+    branch still passes in either mode.
     """
     from cld.vcs import get_backend
     from cld.vcs.anchor import resolve_anchor
@@ -1086,45 +1161,81 @@ def resolve_anchor_checked(cfg: Config, repo_root: Path, revision: str, mode: st
         log.debug("live-anchor overlap check skipped: %s backend has no equivalent", vcs.name)
         return anchor
 
-    host_repo = to_host_path(str(repo_root), cfg)
-    live = {
-        c["anchor"]: c["name"]
-        for c in docker_anchor_list(running_only=True)
-        if c["repo_root"] == host_repo and c["anchor"] and c["kind"] in ANCHOR_BLOCKING_KINDS
-    }
-    if not live:
+    host_repo = str(Path(to_host_path(str(repo_root), cfg)).resolve())
+    occupants = [
+        c for c in docker_occupant_list()
+        if c["repo_root"] == host_repo and c["anchor_base"]
+    ]
+    if not occupants:
         return anchor
 
-    def _probe(revset: str) -> bool:
+    def _probe(revset: str) -> bool | None:
+        """True: overlap. False: disjoint. None: could not evaluate."""
         result = vcs.run(["log", "-r", revset, "--no-graph", "-T", "commit_id", "-n", "1"])
         if result.returncode != 0:
             log.warning(
-                "could not evaluate the live-anchor overlap check (%s): %s",
+                "could not evaluate the anchor overlap check (%s): %s",
                 revset, (result.stderr or "").strip(),
             )
-            return False
+            return None
         return bool(result.stdout.strip())
 
-    others = " | ".join(f"{a}::" for a in live)
-
-    if _probe(f"{anchor} & ({others})"):
-        owner = next(name for a, name in live.items() if _probe(f"{anchor} & {a}::"))
+    def _refuse_or_warn(occupant: dict, message: str) -> None:
+        if caller_kind == "ticket" and occupant["kind"] == "ticket":
+            log.warning("%s Proceeding: stacked tickets are legitimate.", message)
+            return
         raise RuntimeError(
-            f"refusing to anchor on {anchor[:12]}: it is inside the live reach of "
-            f"{owner}. A live container can still rewrite that stack. Reap/stop it "
-            "first -- teardown is what makes its deliverable branch safe to anchor "
-            "on -- or anchor on the shared base instead."
+            f"refusing to anchor on {anchor[:12]}: {message} Reap/stop it first -- "
+            "teardown is what makes its deliverable branch safe to anchor on -- "
+            "or anchor outside its tree instead."
         )
 
-    if mode == "shared" and _probe(f"({' | '.join(live)}) & {anchor}::"):
-        owner = next(name for a, name in live.items() if _probe(f"{a} & {anchor}::"))
-        raise RuntimeError(
-            f"refusing a shared anchor at {anchor[:12]}: {owner} is already live "
-            "somewhere inside that tree, and a shared anchor's reach covers all of "
-            f"it. Reap/stop {owner} first, or anchor in isolated mode instead."
+    def _unverified(occupant: dict, revset: str) -> None:
+        message = (
+            f"could not verify anchor {anchor[:12]} against the reach of "
+            f"{occupant['name']} ({occupant['kind']}, anchor "
+            f"{occupant['anchor_base'][:12]}, revset {revset})."
         )
+        if caller_kind == "ticket":
+            log.warning("%s Proceeding: ticket overlap is warn-strength.", message)
+            return
+        raise RuntimeError(f"refusing to anchor on {anchor[:12]}: {message}")
+
+    for occupant in occupants:
+        effective = _effective_anchor(vcs, occupant)
+        inside = _probe(f"{anchor} & {effective}::")
+        if inside is None:
+            _unverified(occupant, f"{anchor} & {effective}::")
+        elif inside:
+            _refuse_or_warn(occupant, (
+                f"{anchor[:12]} is inside the live reach of {occupant['name']} "
+                f"({occupant['kind']}, effective anchor {effective[:12]}), which "
+                "can still rewrite that stack."
+            ))
+        if mode != "shared":
+            continue
+        occupied = _probe(f"{effective} & {anchor}::")
+        if occupied is None:
+            _unverified(occupant, f"{effective} & {anchor}::")
+        elif occupied:
+            _refuse_or_warn(occupant, (
+                f"a shared anchor at {anchor[:12]} claims the whole tree, and "
+                f"{occupant['name']} ({occupant['kind']}) is already inside it "
+                f"at {effective[:12]}."
+            ))
 
     return anchor
+
+
+def ticket_anchor_resolver(cfg: Config) -> Callable[[str, str, str], str]:
+    """The ``resolve_manifest`` resolver for the ticket launch path: pins each
+    repo's ``(path, revision, mode)`` through the overlap check with ticket
+    semantics -- warn on other tickets' trees, block on headless reach."""
+    def resolve(path: str, revision: str, mode: str) -> str:
+        return resolve_anchor_checked(
+            cfg, Path(path), revision, mode, caller_kind="ticket",
+        )
+    return resolve
 
 
 _CONTAINER_SSH_AUTH_SOCK = "/run/host-ssh-agent.sock"

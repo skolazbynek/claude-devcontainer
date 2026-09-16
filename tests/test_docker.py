@@ -18,6 +18,7 @@ from cld.docker import (
     build_container_args,
     build_session_name,
     build_ticket_container_args,
+    docker_occupant_list,
     docker_task_agent_list,
     find_repo_root,
     in_master_container,
@@ -27,6 +28,7 @@ from cld.docker import (
     stage_home_ro,
     stage_broker,
     task_agent_container_name,
+    ticket_anchor_resolver,
     ticket_container_name,
     ticket_repo_bootstrap,
     ticket_repo_files,
@@ -554,16 +556,20 @@ class TestAssertTaskAgentCapacity:
         assert m.call_args.kwargs == {"running_only": True}
 
 
-def _anchors(*specs, kind="agent"):
-    """Fake docker_anchor_list records: (name, repo_root, anchor, anchor_mode)."""
+def _occupants(*specs, kind="agent"):
+    """Fake docker_occupant_list records: (name, repo_root, anchor_base, mode).
+    Paths are resolved like the real lister resolves them at record-build time."""
     return [
-        {"name": n, "repo_root": r, "anchor": a, "anchor_mode": m, "kind": kind}
+        {
+            "name": n, "repo_root": str(Path(r).resolve()), "anchor_base": a,
+            "session": n, "mode": m, "kind": kind,
+        }
         for n, r, a, m in specs
     ]
 
 
 class TestResolveAnchorChecked:
-    """Live-anchor overlap refusal against a real jj repo; the container list is faked."""
+    """Overlap check against a real jj repo; the occupant list is faked."""
 
     def _commits(self, jj_repo):
         base = jj_repo.resolve_revision("@-")
@@ -578,19 +584,19 @@ class TestResolveAnchorChecked:
 
     def _fleet(self, tmp_path, jj_repo, anchor, name="cld_agent_r_live", anchor_mode="isolated", kind="agent"):
         cfg = Config(mailbox_root=str(tmp_path / "mb"))
-        records = _anchors((name, str(jj_repo.repo_root), anchor, anchor_mode), kind=kind)
+        records = _occupants((name, str(jj_repo.repo_root), anchor, anchor_mode), kind=kind)
         return cfg, records
 
     def test_shared_base_passes_with_live_sibling(self, tmp_path, jj_repo):
         base, live_anchor, _ = self._commits(jj_repo)
         cfg, records = self._fleet(tmp_path, jj_repo, live_anchor)
-        with patch("cld.docker.docker_anchor_list", return_value=records):
+        with patch("cld.docker.docker_occupant_list", return_value=records):
             assert resolve_anchor_checked(cfg, jj_repo.repo_root, base) == base
 
     def test_inside_live_stack_refused_naming_owner(self, tmp_path, jj_repo):
         _, live_anchor, inside = self._commits(jj_repo)
         cfg, records = self._fleet(tmp_path, jj_repo, live_anchor)
-        with patch("cld.docker.docker_anchor_list", return_value=records):
+        with patch("cld.docker.docker_occupant_list", return_value=records):
             with pytest.raises(RuntimeError, match="inside the live reach") as e:
                 resolve_anchor_checked(cfg, jj_repo.repo_root, inside)
         assert "cld_agent_r_live" in str(e.value)
@@ -598,42 +604,61 @@ class TestResolveAnchorChecked:
     def test_equal_to_live_anchor_refused(self, tmp_path, jj_repo):
         _, live_anchor, _ = self._commits(jj_repo)
         cfg, records = self._fleet(tmp_path, jj_repo, live_anchor)
-        with patch("cld.docker.docker_anchor_list", return_value=records):
+        with patch("cld.docker.docker_occupant_list", return_value=records):
             with pytest.raises(RuntimeError, match="inside the live reach"):
                 resolve_anchor_checked(cfg, jj_repo.repo_root, live_anchor)
 
     def test_other_repo_agents_ignored(self, tmp_path, jj_repo):
         _, live_anchor, inside = self._commits(jj_repo)
-        cfg, _records = self._fleet(tmp_path, jj_repo, live_anchor)
-        elsewhere = _anchors(("cld_agent_r_live", "/some/other/repo", live_anchor, "isolated"))
-        with patch("cld.docker.docker_anchor_list", return_value=elsewhere):
+        elsewhere = _occupants(("cld_agent_r_live", "/some/other/repo", live_anchor, "isolated"))
+        cfg = Config(mailbox_root=str(tmp_path / "mb"))
+        with patch("cld.docker.docker_occupant_list", return_value=elsewhere):
             assert resolve_anchor_checked(cfg, jj_repo.repo_root, inside) == inside
+
+    def test_symlinked_repo_path_does_not_bypass_check(self, tmp_path, jj_repo):
+        """The caller's repo path is realpath-normalized before matching records."""
+        _, live_anchor, inside = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, live_anchor)
+        link = tmp_path / "repo-link"
+        link.symlink_to(jj_repo.repo_root)
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live reach"):
+                resolve_anchor_checked(cfg, link, inside)
 
     def test_missing_anchor_label_ignored(self, tmp_path, jj_repo):
         _, _, inside = self._commits(jj_repo)
         cfg, records = self._fleet(tmp_path, jj_repo, "")
-        with patch("cld.docker.docker_anchor_list", return_value=records):
+        with patch("cld.docker.docker_occupant_list", return_value=records):
             assert resolve_anchor_checked(cfg, jj_repo.repo_root, inside) == inside
 
     def test_no_live_agents_passes(self, tmp_path, jj_repo):
         _, _, inside = self._commits(jj_repo)
-        with patch("cld.docker.docker_anchor_list", return_value=[]):
+        with patch("cld.docker.docker_occupant_list", return_value=[]):
             cfg = Config(mailbox_root=str(tmp_path / "mb"))
             assert resolve_anchor_checked(cfg, jj_repo.repo_root, inside) == inside
 
-    def test_stale_anchor_label_warns_and_allows(self, tmp_path, jj_repo, caplog):
-        # An anchor label no longer resolvable in the store is our own bookkeeping
-        # failing, not a real hazard -- warn, don't block.
+    def test_unverifiable_occupant_blocks_headless_caller(self, tmp_path, jj_repo):
+        # Fail-closed: an anchor the store cannot resolve means the check
+        # cannot rule the overlap out -- refuse rather than silently pass.
         _, _, inside = self._commits(jj_repo)
         cfg, records = self._fleet(tmp_path, jj_repo, "dead" * 10)
-        with caplog.at_level("WARNING"), patch("cld.docker.docker_anchor_list", return_value=records):
-            assert resolve_anchor_checked(cfg, jj_repo.repo_root, inside) == inside
-        assert "live-anchor overlap check" in caplog.text
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            with pytest.raises(RuntimeError, match="could not verify"):
+                resolve_anchor_checked(cfg, jj_repo.repo_root, inside, caller_kind="task-agent")
+
+    def test_unverifiable_occupant_warns_ticket_caller(self, tmp_path, jj_repo, caplog):
+        _, _, inside = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, "dead" * 10)
+        with caplog.at_level("WARNING"), patch("cld.docker.docker_occupant_list", return_value=records):
+            assert resolve_anchor_checked(
+                cfg, jj_repo.repo_root, inside, caller_kind="ticket",
+            ) == inside
+        assert "could not verify" in caplog.text
 
     def test_git_backend_skips_check(self, tmp_path, git_repo):
         head = git_repo.resolve_revision("HEAD")
         cfg = Config(mailbox_root=str(tmp_path / "mb"))
-        with patch("cld.docker.docker_anchor_list") as m:
+        with patch("cld.docker.docker_occupant_list") as m:
             assert resolve_anchor_checked(cfg, git_repo.repo_root, head) == head
         m.assert_not_called()
 
@@ -641,50 +666,292 @@ class TestResolveAnchorChecked:
         """Two isolated agents off the same base don't collide (default mode)."""
         base, live_anchor, _ = self._commits(jj_repo)
         cfg, records = self._fleet(tmp_path, jj_repo, live_anchor, anchor_mode="isolated")
-        with patch("cld.docker.docker_anchor_list", return_value=records):
+        with patch("cld.docker.docker_occupant_list", return_value=records):
             assert resolve_anchor_checked(cfg, jj_repo.repo_root, base, "isolated") == base
 
     def test_shared_refused_when_live_occupant_inside_tree(self, tmp_path, jj_repo):
         """A shared anchor claiming a tree with a live occupant already inside it is refused."""
         base, live_anchor, _ = self._commits(jj_repo)
         cfg, records = self._fleet(tmp_path, jj_repo, live_anchor, anchor_mode="isolated")
-        with patch("cld.docker.docker_anchor_list", return_value=records):
-            with pytest.raises(RuntimeError, match="already live"):
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            with pytest.raises(RuntimeError, match="already inside"):
                 resolve_anchor_checked(cfg, jj_repo.repo_root, base, "shared")
 
     def test_shared_passes_with_no_live_occupant(self, tmp_path, jj_repo):
         base, _, _ = self._commits(jj_repo)
-        with patch("cld.docker.docker_anchor_list", return_value=[]):
+        with patch("cld.docker.docker_occupant_list", return_value=[]):
             cfg = Config(mailbox_root=str(tmp_path / "mb"))
             assert resolve_anchor_checked(cfg, jj_repo.repo_root, base, "shared") == base
-
-    def test_live_master_does_not_block_task_agent_nesting(self, tmp_path, jj_repo):
-        """A task-agent may anchor inside its own live master's tree."""
-        _, live_anchor, inside = self._commits(jj_repo)
-        cfg, records = self._fleet(tmp_path, jj_repo, live_anchor, name="cld_master_r", kind="master")
-        with patch("cld.docker.docker_anchor_list", return_value=records):
-            assert resolve_anchor_checked(cfg, jj_repo.repo_root, inside) == inside
-
-    def test_live_devcontainer_does_not_block(self, tmp_path, jj_repo):
-        _, live_anchor, inside = self._commits(jj_repo)
-        cfg, records = self._fleet(tmp_path, jj_repo, live_anchor, name="cld_r", kind="devcontainer")
-        with patch("cld.docker.docker_anchor_list", return_value=records):
-            assert resolve_anchor_checked(cfg, jj_repo.repo_root, inside) == inside
 
     def test_live_task_agent_still_blocks_nested_spawn(self, tmp_path, jj_repo):
         """A live task-agent's own tree still refuses another spawn on top of it."""
         _, live_anchor, inside = self._commits(jj_repo)
         cfg, records = self._fleet(tmp_path, jj_repo, live_anchor, name="cld_task_r_a", kind="task-agent")
-        with patch("cld.docker.docker_anchor_list", return_value=records):
+        with patch("cld.docker.docker_occupant_list", return_value=records):
             with pytest.raises(RuntimeError, match="inside the live reach"):
                 resolve_anchor_checked(cfg, jj_repo.repo_root, inside)
 
     def test_live_run_still_blocks(self, tmp_path, jj_repo):
         _, live_anchor, inside = self._commits(jj_repo)
         cfg, records = self._fleet(tmp_path, jj_repo, live_anchor, name="cld_run_r", kind="run")
-        with patch("cld.docker.docker_anchor_list", return_value=records):
+        with patch("cld.docker.docker_occupant_list", return_value=records):
             with pytest.raises(RuntimeError, match="inside the live reach"):
                 resolve_anchor_checked(cfg, jj_repo.repo_root, inside)
+
+
+class TestEffectiveAnchorDerivation:
+    """The occupant's editable boundary is scratch commit B, derived from the
+    store at check time; the labeled base A is only the boot-window fallback."""
+
+    SESSION = "cld_agent_r_live"
+
+    def _staged(self, jj_repo):
+        """base A, its staged scratch child B (session-marked), and B's child."""
+        base = jj_repo.resolve_revision("@-")
+        jj_repo.run(["new", base])
+        (jj_repo.repo_root / ".cld-run").mkdir()
+        (jj_repo.repo_root / ".cld-run" / "anchor.json").write_text("{}\n")
+        jj_repo.run(["commit", "-m", f"cld anchor: {self.SESSION} mode=isolated"])
+        scratch = jj_repo.resolve_revision("@-")
+        (jj_repo.repo_root / "work.txt").write_text("work\n")
+        jj_repo.run(["commit", "-m", "live agent work"])
+        inside_b = jj_repo.resolve_revision("@-")
+        return base, scratch, inside_b
+
+    def _fleet(self, tmp_path, jj_repo, base, kind="agent"):
+        cfg = Config(mailbox_root=str(tmp_path / "mb"))
+        records = _occupants((self.SESSION, str(jj_repo.repo_root), base, "isolated"), kind=kind)
+        return cfg, records
+
+    def test_base_itself_passes_once_scratch_is_staged(self, tmp_path, jj_repo):
+        """The v1 over-block: labeling A blocked anchoring on A itself even
+        though the occupant's reach starts at B. Derivation fixes it."""
+        base, _, _ = self._staged(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, base)
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            assert resolve_anchor_checked(cfg, jj_repo.repo_root, base) == base
+
+    def test_descendant_of_scratch_still_refused(self, tmp_path, jj_repo):
+        base, _, inside_b = self._staged(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, base)
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live reach") as e:
+                resolve_anchor_checked(cfg, jj_repo.repo_root, inside_b)
+        assert "effective anchor" in str(e.value)
+
+    def test_scratch_commit_itself_refused(self, tmp_path, jj_repo):
+        base, scratch, _ = self._staged(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, base)
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live reach"):
+                resolve_anchor_checked(cfg, jj_repo.repo_root, scratch)
+
+    def test_other_sessions_scratch_is_not_mine(self, tmp_path, jj_repo):
+        """The derivation is session-scoped: a sibling's scratch child of the
+        same base must not be mistaken for this occupant's boundary."""
+        base, scratch, _ = self._staged(jj_repo)
+        records = _occupants((("cld_agent_r_other"), str(jj_repo.repo_root), base, "isolated"))
+        cfg = Config(mailbox_root=str(tmp_path / "mb"))
+        # The other session has no scratch commit -> fallback to base A, whose
+        # reach covers our session's scratch commit.
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live reach"):
+                resolve_anchor_checked(cfg, jj_repo.repo_root, scratch)
+
+    def test_shared_occupant_keeps_base_reach(self, tmp_path, jj_repo):
+        """A shared-mode occupant's effective anchor is the base itself."""
+        base, _, _ = self._staged(jj_repo)
+        records = _occupants((self.SESSION, str(jj_repo.repo_root), base, "shared"))
+        cfg = Config(mailbox_root=str(tmp_path / "mb"))
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live reach"):
+                resolve_anchor_checked(cfg, jj_repo.repo_root, base)
+
+
+class TestOverlapKindMatrix:
+    """Outcome per (caller kind, occupant kind): ticket vs ticket warns and
+    proceeds, everything else involving an occupant blocks."""
+
+    def _commits(self, jj_repo):
+        base = jj_repo.resolve_revision("@-")
+        jj_repo.run(["new", base])
+        (jj_repo.repo_root / "live.txt").write_text("live\n")
+        jj_repo.run(["commit", "-m", "occupant anchor"])
+        occupant_anchor = jj_repo.resolve_revision("@-")
+        (jj_repo.repo_root / "more.txt").write_text("more\n")
+        jj_repo.run(["commit", "-m", "occupant work"])
+        inside = jj_repo.resolve_revision("@-")
+        return occupant_anchor, inside
+
+    def _fleet(self, tmp_path, jj_repo, anchor, kind, name="cld_occupant"):
+        cfg = Config(mailbox_root=str(tmp_path / "mb"))
+        records = _occupants((name, str(jj_repo.repo_root), anchor, "isolated"), kind=kind)
+        return cfg, records
+
+    def test_ticket_vs_ticket_warns_and_proceeds(self, tmp_path, jj_repo, caplog):
+        occupant_anchor, inside = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, occupant_anchor, "ticket", name="cld_ticket_other")
+        with caplog.at_level("WARNING"), patch("cld.docker.docker_occupant_list", return_value=records):
+            assert resolve_anchor_checked(
+                cfg, jj_repo.repo_root, inside, caller_kind="ticket",
+            ) == inside
+        assert "cld_ticket_other" in caplog.text
+        assert inside[:12] in caplog.text
+
+    def test_ticket_vs_headless_blocks(self, tmp_path, jj_repo):
+        occupant_anchor, inside = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, occupant_anchor, "task-agent")
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live reach"):
+                resolve_anchor_checked(cfg, jj_repo.repo_root, inside, caller_kind="ticket")
+
+    @pytest.mark.parametrize("caller", ["agent", "task-agent", "run"])
+    def test_headless_vs_ticket_blocks(self, tmp_path, jj_repo, caller):
+        occupant_anchor, inside = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, occupant_anchor, "ticket")
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live reach"):
+                resolve_anchor_checked(cfg, jj_repo.repo_root, inside, caller_kind=caller)
+
+    def test_headless_vs_headless_blocks(self, tmp_path, jj_repo):
+        occupant_anchor, inside = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, occupant_anchor, "agent")
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live reach"):
+                resolve_anchor_checked(cfg, jj_repo.repo_root, inside, caller_kind="task-agent")
+
+    def test_interactive_v1_caller_vs_ticket_blocks(self, tmp_path, jj_repo):
+        occupant_anchor, inside = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, occupant_anchor, "ticket")
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live reach"):
+                resolve_anchor_checked(cfg, jj_repo.repo_root, inside, caller_kind="devcontainer")
+
+    def test_shared_ticket_vs_ticket_still_warns(self, tmp_path, jj_repo, caplog):
+        base = jj_repo.resolve_revision("@-")
+        occupant_anchor, _ = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, occupant_anchor, "ticket", name="cld_ticket_other")
+        with caplog.at_level("WARNING"), patch("cld.docker.docker_occupant_list", return_value=records):
+            assert resolve_anchor_checked(
+                cfg, jj_repo.repo_root, base, "shared", caller_kind="ticket",
+            ) == base
+        assert "shared anchor" in caplog.text
+
+
+class TestDockerOccupantList:
+    """Record building: label parsing, kind and run-state filtering, ticket
+    manifest expansion, realpath normalization."""
+
+    def _v1(self, rows, inspects):
+        return patch("cld.docker._docker_names_with_state", side_effect=[rows, []]), \
+            patch("cld.docker.subprocess.run", side_effect=inspects)
+
+    def test_stopped_agent_included_stopped_run_excluded(self):
+        rows = [("cld_run_x", "exited"), ("cld_agent_y", "exited")]
+        inspects = [
+            _ps("/r|aaa|isolated|run|cld_run_x\n"),
+            _ps("/r|bbb|isolated|agent|cld_agent_y\n"),
+        ]
+        names_patch, run_patch = self._v1(rows, inspects)
+        with names_patch, run_patch:
+            records = docker_occupant_list()
+        assert [r["name"] for r in records] == ["cld_agent_y"]
+        assert records[0]["anchor_base"] == "bbb"
+        assert records[0]["session"] == "cld_agent_y"
+
+    def test_running_run_included(self):
+        names_patch, run_patch = self._v1(
+            [("cld_run_x", "running")], [_ps("/r|aaa|isolated|run|cld_run_x\n")],
+        )
+        with names_patch, run_patch:
+            assert [r["kind"] for r in docker_occupant_list()] == ["run"]
+
+    @pytest.mark.parametrize("kind", ["master", "devcontainer"])
+    def test_interactive_kinds_never_occupy(self, kind):
+        names_patch, run_patch = self._v1(
+            [("cld_x", "running")], [_ps(f"/r|aaa|isolated|{kind}|cld_x\n")],
+        )
+        with names_patch, run_patch:
+            assert docker_occupant_list() == []
+
+    def test_ticket_manifest_expands_per_repo_with_normalized_paths(self):
+        manifest = TicketManifest(ticket="lide-2600", repos=(
+            RepoManifestEntry(name="lide-api", path="/host/repos/../repos/lide-api",
+                              anchor_base="a" * 40),
+            RepoManifestEntry(name="diskuze-api", path="/host/repos/diskuze-api",
+                              anchor_base="b" * 40, anchor_mode="shared"),
+        ))
+        with patch("cld.docker._docker_names_with_state",
+                   side_effect=[[], [("cld_ticket_lide-2600", "exited")]]), \
+             patch("cld.docker.read_manifest", return_value=manifest):
+            records = docker_occupant_list()
+        assert len(records) == 2
+        assert all(r["kind"] == "ticket" for r in records)
+        assert all(r["name"] == r["session"] == "cld_ticket_lide-2600" for r in records)
+        assert records[0]["repo_root"] == "/host/repos/lide-api"
+        assert (records[1]["anchor_base"], records[1]["mode"]) == ("b" * 40, "shared")
+
+    def test_unreadable_manifest_skipped_with_warning(self, caplog):
+        with caplog.at_level("WARNING"), \
+             patch("cld.docker._docker_names_with_state",
+                   side_effect=[[], [("cld_ticket_broken", "running")]]), \
+             patch("cld.docker.read_manifest", side_effect=RuntimeError("no label")):
+            assert docker_occupant_list() == []
+        assert "cld_ticket_broken" in caplog.text
+
+    def test_lists_stopped_containers_docker_side(self):
+        calls = []
+
+        def spy(cmd, **_kwargs):
+            calls.append(cmd)
+            return _ps("")
+
+        with patch("cld.docker.subprocess.run", side_effect=spy):
+            docker_occupant_list()
+        assert all("-a" in cmd for cmd in calls)
+        assert not any("status=running" in arg for cmd in calls for arg in cmd)
+
+
+class TestTicketAnchorResolver:
+    """The resolve_manifest hook: ticket caller semantics and mode passthrough."""
+
+    def _occupied(self, jj_repo, kind):
+        base = jj_repo.resolve_revision("@-")
+        jj_repo.run(["new", base])
+        (jj_repo.repo_root / "live.txt").write_text("live\n")
+        jj_repo.run(["commit", "-m", "occupant anchor"])
+        occupant_anchor = jj_repo.resolve_revision("@-")
+        return base, occupant_anchor, _occupants(
+            ("cld_occupant", str(jj_repo.repo_root), occupant_anchor, "isolated"), kind=kind,
+        )
+
+    def test_warns_on_ticket_occupant_and_resolves(self, tmp_path, jj_repo, caplog):
+        _, occupant_anchor, records = self._occupied(jj_repo, "ticket")
+        cfg = Config(mailbox_root=str(tmp_path / "mb"))
+        resolver = ticket_anchor_resolver(cfg)
+        with caplog.at_level("WARNING"), patch("cld.docker.docker_occupant_list", return_value=records):
+            assert resolver(str(jj_repo.repo_root), occupant_anchor, "isolated") == occupant_anchor
+        assert "cld_occupant" in caplog.text
+
+    def test_blocks_on_headless_occupant(self, tmp_path, jj_repo):
+        _, occupant_anchor, records = self._occupied(jj_repo, "agent")
+        cfg = Config(mailbox_root=str(tmp_path / "mb"))
+        resolver = ticket_anchor_resolver(cfg)
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live reach"):
+                resolver(str(jj_repo.repo_root), occupant_anchor, "isolated")
+
+    def test_shared_mode_passes_through_to_the_check(self, tmp_path, jj_repo):
+        """--shared-anchor for a repo must trigger the whole-tree claim check."""
+        base, _, records = self._occupied(jj_repo, "agent")
+        cfg = Config(mailbox_root=str(tmp_path / "mb"))
+        resolver = ticket_anchor_resolver(cfg)
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            # isolated: sibling off the same base is fine
+            assert resolver(str(jj_repo.repo_root), base, "isolated") == base
+            # shared: claiming the occupied tree is refused
+            with pytest.raises(RuntimeError, match="already inside"):
+                resolver(str(jj_repo.repo_root), base, "shared")
 
 
 class TestParsePeersEnv:

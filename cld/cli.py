@@ -216,7 +216,7 @@ def _run_devcontainer(
     session = build_session_name("cld", name)
     repo_root = find_target_repo(cfg)
     mode = _anchor_mode(shared_anchor)
-    anchor = resolve_anchor_checked(cfg, repo_root, revision, mode)
+    anchor = resolve_anchor_checked(cfg, repo_root, revision, mode, caller_kind="devcontainer")
 
     brief = compose_brief([], prompt) if prompt else ""
 
@@ -337,7 +337,7 @@ def _run_persistent_devcontainer(
     # revision hint + scratch envelope so the peer's entrypoint does the
     # anchor work locally (master has no RW view of a sibling target).
     mode = _anchor_mode(shared_anchor)
-    anchor = resolve_anchor_checked(cfg, repo_root, revision, mode)
+    anchor = resolve_anchor_checked(cfg, repo_root, revision, mode, caller_kind=role)
     args = build_container_args(
         repo_root, session, cfg, interactive=False,
         master=(role == "master"), agent=(role == "agent"),
@@ -741,7 +741,7 @@ def task_agent_start(
     # counts running siblings, the anchor check reads the origin store (§9).
     assert_task_agent_capacity(cfg, parent)
     mode = _anchor_mode(shared_anchor)
-    anchor = resolve_anchor_checked(cfg, repo_root, revision, mode)
+    anchor = resolve_anchor_checked(cfg, repo_root, revision, mode, caller_kind="task-agent")
 
     ensure_image(
         cfg.devcontainer_image,
