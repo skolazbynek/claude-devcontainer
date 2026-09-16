@@ -159,6 +159,19 @@ class TestGraphqlOp:
             broker.graphql_op("start", capture=False)
         assert run.call_args.kwargs["capture_output"] is False
 
+    def test_repo_becomes_a_leading_repo_flag(self, configured):
+        """A ticket container's repo target travels as `--repo <name>` BEFORE the
+        op, where the broker script's parse_repo_arg consumes it (design section 6.1)."""
+        with patch("cld.broker.subprocess.run", return_value=_cp()) as run:
+            broker.graphql_op("status", repo="lide-api")
+        assert _argv_of(run) == ["--repo", "lide-api", "status"]
+
+    def test_no_repo_keeps_v1_argv(self, configured):
+        """Single-repo and v1 callers send exactly the argv they always did."""
+        with patch("cld.broker.subprocess.run", return_value=_cp()) as run:
+            broker.graphql_op("status")
+        assert _argv_of(run) == ["status"]
+
 
 class TestBrokerTaskAgentOp:
     def test_uses_its_own_action_and_forwards_argv(self, configured):

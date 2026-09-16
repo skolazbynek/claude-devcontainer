@@ -44,6 +44,234 @@ def _run_functions(names: list, body_snippet: str, env: dict) -> subprocess.Comp
     )
 
 
+class TestParseRepoArg:
+    """parse_repo_arg consumes a LEADING --repo <name> / --repo=<name> into
+    REPO_NAME + REPO_ARGS -- and only a leading one: a --repo later in the
+    argv belongs to the action's own command (e.g. pytest)."""
+
+    def _parse(self, *argv: str) -> subprocess.CompletedProcess:
+        import os
+
+        quoted = " ".join(f"{a!r}" for a in argv)
+        return _run_function(
+            "parse_repo_arg",
+            f"""
+set -euo pipefail
+parse_repo_arg {quoted}
+printf 'NAME=%s\\n' "$REPO_NAME"
+printf 'ARG=%s\\n' "${{REPO_ARGS[@]:-}}"
+""",
+            dict(os.environ),
+        )
+
+    @pytest.mark.parametrize(
+        "argv,name,rest",
+        [
+            (("--repo", "lide-api", "-k", "login"), "lide-api", ["-k", "login"]),
+            (("--repo=lide-api", "status"), "lide-api", ["status"]),
+            (("-k", "login"), "", ["-k", "login"]),
+            (("-k", "x", "--repo", "y"), "", ["-k", "x", "--repo", "y"]),
+        ],
+        ids=["separate-token", "equals-form", "absent", "non-leading-untouched"],
+    )
+    def test_parse(self, argv, name, rest):
+        result = self._parse(*argv)
+        assert result.returncode == 0, result.stderr
+        lines = result.stdout.splitlines()
+        assert lines[0] == f"NAME={name}"
+        assert lines[1:] == [f"ARG={a}" for a in rest]
+
+    @pytest.mark.parametrize("argv", [("--repo",), ("--repo=",)], ids=["bare", "empty-equals"])
+    def test_missing_name_denied(self, argv):
+        result = self._parse(*argv)
+        assert result.returncode == 2
+        assert "denied" in result.stderr
+
+
+class TestResolveRepoTarget:
+    """resolve_repo_target maps a --repo name to $REPO via the caller's
+    host-set flat org.cld.repo.<name> labels: ticket callers get per-name
+    validation plus the single-repo default; v1 callers keep the
+    dispatcher-set $REPO and refuse --repo (design section 6.1)."""
+
+    @pytest.fixture
+    def fakebin(self, tmp_path):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        (bindir / "docker").write_text("""#!/usr/bin/env bash
+cmd="$1"; shift
+[ "$cmd" = inspect ] || exit 1
+printf '%s' "${FAKE_LABELS:-}"
+""")
+        (bindir / "docker").chmod(0o755)
+        return bindir
+
+    @pytest.fixture
+    def repos(self, tmp_path):
+        for name in ("lide-api", "diskuze-api"):
+            (tmp_path / name / ".jj").mkdir(parents=True)
+        return tmp_path
+
+    def _resolve(self, fakebin, labels: str, kind: str, name: str,
+                 repo_preset: str = "/preset") -> subprocess.CompletedProcess:
+        import os
+
+        env = dict(os.environ)
+        env["PATH"] = f"{fakebin}:{env['PATH']}"
+        env["FAKE_LABELS"] = labels
+        return _run_function(
+            "resolve_repo_target",
+            f"""
+set -euo pipefail
+session=cld_ticket_x
+KIND={kind!r}
+REPO={repo_preset!r}
+resolve_repo_target {name!r}
+printf 'REPO=%s\\n' "$REPO"
+""",
+            env,
+        )
+
+    def _labels(self, repos) -> str:
+        return (
+            "org.cld.kind=ticket\n"
+            f"org.cld.repo.lide-api={repos}/lide-api\n"
+            f"org.cld.repo.diskuze-api={repos}/diskuze-api\n"
+        )
+
+    def test_named_repo_resolves_to_its_labeled_path(self, fakebin, repos):
+        result = self._resolve(fakebin, self._labels(repos), "ticket", "lide-api")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == f"REPO={repos}/lide-api"
+
+    def test_unknown_repo_denied_listing_mounted_names(self, fakebin, repos):
+        result = self._resolve(fakebin, self._labels(repos), "ticket", "nope")
+        assert result.returncode == 3
+        assert "not mounted" in result.stderr
+        assert "lide-api" in result.stderr and "diskuze-api" in result.stderr
+
+    def test_multi_repo_without_name_denied(self, fakebin, repos):
+        result = self._resolve(fakebin, self._labels(repos), "ticket", "")
+        assert result.returncode == 3
+        assert "pass --repo" in result.stderr
+
+    def test_single_repo_defaults_without_name(self, fakebin, repos):
+        labels = f"org.cld.repo.lide-api={repos}/lide-api\n"
+        result = self._resolve(fakebin, labels, "ticket", "")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == f"REPO={repos}/lide-api"
+
+    def test_labeled_path_must_be_a_repo(self, fakebin, tmp_path):
+        (tmp_path / "bare").mkdir()
+        labels = f"org.cld.repo.bare={tmp_path}/bare\n"
+        result = self._resolve(fakebin, labels, "ticket", "bare")
+        assert result.returncode == 3
+        assert "is not a repo" in result.stderr
+
+    def test_v1_kind_refuses_repo_flag(self, fakebin, repos):
+        result = self._resolve(fakebin, self._labels(repos), "master", "lide-api")
+        assert result.returncode == 2
+        assert "only for ticket containers" in result.stderr
+
+    def test_v1_kind_keeps_dispatcher_repo(self, fakebin, repos):
+        result = self._resolve(fakebin, "", "master", "", repo_preset="/v1/repo")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "REPO=/v1/repo"
+
+
+class TestDispatchRunTests:
+    """Full-script dispatch: SSH_ORIGINAL_COMMAND in, `docker run` argv out --
+    proves the dispatcher's kind branch, resolve_repo_target and the --repo
+    argv consumption compose for both ticket and v1 callers."""
+
+    @pytest.fixture
+    def fakebin(self, tmp_path):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        (bindir / "docker").write_text("""#!/usr/bin/env bash
+cmd="$1"; shift
+case "$cmd" in
+  inspect)
+    fmt=""
+    while [ $# -gt 0 ]; do
+      case "$1" in --format) fmt="$2"; shift 2 ;; *) shift ;; esac
+    done
+    case "$fmt" in
+      *org.cld.kind*)      printf '%s\\n' "${FAKE_KIND:-}" ;;
+      *org.cld.repo-root*) printf '%s\\n' "${FAKE_REPO_ROOT:-}" ;;
+      *range*)             printf '%s' "${FAKE_LABELS:-}" ;;
+    esac
+    ;;
+  run) echo "DOCKER_RUN $*" ;;
+esac
+""")
+        (bindir / "jj").write_text("#!/usr/bin/env bash\necho rev123\n")
+        (bindir / "docker").chmod(0o755)
+        (bindir / "jj").chmod(0o755)
+        return bindir
+
+    @pytest.fixture
+    def repos(self, tmp_path):
+        for name in ("lide-api", "diskuze-api"):
+            (tmp_path / name / ".jj").mkdir(parents=True)
+        return tmp_path
+
+    def _dispatch(self, fakebin, session: str, argv: list, env_overrides: dict) -> subprocess.CompletedProcess:
+        import base64
+        import os
+
+        payload = base64.b64encode(b"".join(a.encode() + b"\0" for a in argv)).decode()
+        env = dict(os.environ)
+        env["PATH"] = f"{fakebin}:{env['PATH']}"
+        env["CLD_BROKER_CONF"] = "/nonexistent"
+        env["SSH_ORIGINAL_COMMAND"] = f"run-tests {session} {payload}"
+        env.update(env_overrides)
+        return subprocess.run(["bash", str(BROKER_SH)], capture_output=True, text=True, env=env)
+
+    def test_ticket_caller_with_repo_flag(self, fakebin, repos):
+        labels = (
+            f"org.cld.repo.lide-api={repos}/lide-api\n"
+            f"org.cld.repo.diskuze-api={repos}/diskuze-api\n"
+        )
+        result = self._dispatch(
+            fakebin, "cld_ticket_x", ["--repo", "diskuze-api", "-k", "login"],
+            {"FAKE_KIND": "ticket", "FAKE_LABELS": labels},
+        )
+        assert result.returncode == 0, result.stderr
+        assert f"-v {repos}/diskuze-api:/repo" in result.stdout
+        assert result.stdout.rstrip().endswith("runtests:latest -k login")
+        assert "--repo" not in result.stdout
+
+    def test_ticket_caller_multi_repo_without_flag_denied(self, fakebin, repos):
+        labels = (
+            f"org.cld.repo.lide-api={repos}/lide-api\n"
+            f"org.cld.repo.diskuze-api={repos}/diskuze-api\n"
+        )
+        result = self._dispatch(
+            fakebin, "cld_ticket_x", ["-k", "login"],
+            {"FAKE_KIND": "ticket", "FAKE_LABELS": labels},
+        )
+        assert result.returncode == 3
+        assert "pass --repo" in result.stderr
+
+    def test_v1_caller_unchanged(self, fakebin, repos):
+        result = self._dispatch(
+            fakebin, "cld_master_x_ab12", ["-k", "login"],
+            {"FAKE_KIND": "master", "FAKE_REPO_ROOT": f"{repos}/lide-api"},
+        )
+        assert result.returncode == 0, result.stderr
+        assert f"-v {repos}/lide-api:/repo" in result.stdout
+        assert result.stdout.rstrip().endswith("runtests:latest -k login")
+
+    def test_v1_caller_repo_flag_denied(self, fakebin, repos):
+        result = self._dispatch(
+            fakebin, "cld_master_x_ab12", ["--repo", "lide-api", "-k", "login"],
+            {"FAKE_KIND": "master", "FAKE_REPO_ROOT": f"{repos}/lide-api"},
+        )
+        assert result.returncode == 2
+        assert "only for ticket containers" in result.stderr
+
+
 class TestCheckUrlAllowlisted:
     """C1: userinfo (user:pass@) must be stripped before the port, or
     'allowed.example:80@evil.com' passes the allowlist while curl actually

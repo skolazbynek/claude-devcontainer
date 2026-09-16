@@ -6,11 +6,14 @@ like the MCP tool (docs/design-task-agents.md §10, "both send paths").
 """
 
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from cld.messenger import identity as identity_mod
 from cld.messenger import send as send_cli
+from cld.messenger.identity import resolve_self
 from cld.messenger.mailbox import ensure_mailbox, ensure_meta, list_inbox, read_message
 
 _SPAWN = {
@@ -89,3 +92,73 @@ class TestSendCli:
         with pytest.raises(SystemExit) as exc:
             send_cli.main()
         assert exc.value.code == 2
+
+
+class TestResolveSelf:
+    """Host-side identity chain (design-ticket-containers.md section 6.5):
+    SESSION_NAME (in-container) > explicit ticket (arg or CLD_TICKET) > the
+    single running ticket container > the v1 cwd-repo master > error."""
+
+    @pytest.fixture(autouse=True)
+    def _host(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("SESSION_NAME", raising=False)
+        monkeypatch.delenv("CLD_TICKET", raising=False)
+        monkeypatch.setenv("CLD_MAILBOX_ROOT", str(tmp_path))
+        self.mailbox_root = tmp_path
+
+    def _ticket(self, name, status="running"):
+        return {"name": name, "kind": "ticket", "repo": "", "status": status}
+
+    def test_in_container_session_name_wins(self, monkeypatch):
+        monkeypatch.setenv("SESSION_NAME", "cld_ticket_lide-1")
+        assert resolve_self() == ("cld_ticket_lide-1", Path("/var/cld/mailboxes"))
+
+    def test_explicit_ticket_argument(self):
+        assert resolve_self("LIDE-2600") == ("cld_ticket_lide-2600", self.mailbox_root)
+
+    def test_cld_ticket_env(self, monkeypatch):
+        monkeypatch.setenv("CLD_TICKET", "LIDE-2600")
+        assert resolve_self() == ("cld_ticket_lide-2600", self.mailbox_root)
+
+    def test_argument_beats_env(self, monkeypatch):
+        monkeypatch.setenv("CLD_TICKET", "LIDE-1")
+        assert resolve_self("LIDE-2")[0] == "cld_ticket_lide-2"
+
+    def test_single_running_ticket_is_self(self, monkeypatch):
+        monkeypatch.setattr(
+            identity_mod, "list_cld_containers",
+            lambda kind: [self._ticket("cld_ticket_lide-9")],
+        )
+        assert resolve_self() == ("cld_ticket_lide-9", self.mailbox_root)
+
+    def test_stopped_tickets_do_not_count(self, monkeypatch):
+        """One stopped + one running = exactly one RUNNING ticket -- it is self."""
+        monkeypatch.setattr(
+            identity_mod, "list_cld_containers",
+            lambda kind: [self._ticket("cld_ticket_a", status="stopped"),
+                          self._ticket("cld_ticket_b")],
+        )
+        assert resolve_self() == ("cld_ticket_b", self.mailbox_root)
+
+    def test_no_tickets_falls_back_to_cwd_master(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(identity_mod, "list_cld_containers", lambda kind: [])
+        repo_root = tmp_path / "repo"
+        monkeypatch.setattr(
+            identity_mod, "get_backend",
+            lambda: type("B", (), {"repo_root": repo_root})(),
+        )
+        assert resolve_self()[0] == identity_mod.master_container_name(repo_root)
+
+    def test_ambiguous_tickets_outside_a_repo_error_lists_them(self, monkeypatch):
+        monkeypatch.setattr(
+            identity_mod, "list_cld_containers",
+            lambda kind: [self._ticket("cld_ticket_a"), self._ticket("cld_ticket_b")],
+        )
+        def _no_repo():
+            raise RuntimeError("not a repo")
+        monkeypatch.setattr(identity_mod, "get_backend", _no_repo)
+        with pytest.raises(RuntimeError) as exc:
+            resolve_self()
+        assert "cld_ticket_a" in str(exc.value)
+        assert "cld_ticket_b" in str(exc.value)
+        assert "CLD_TICKET" in str(exc.value)

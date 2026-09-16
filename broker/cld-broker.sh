@@ -5,11 +5,14 @@
 #
 #     <action> <session> <base64-argv>
 #
-# The broker serves ANY repo that has a running master, agent, or task-agent --
-# no per-repo config, no whitelist. It resolves the target repo from the
-# calling container's host-set `org.cld.repo-root` label (established at
-# launch, not caller input), so the caller controls only: the action, a
-# validated session id, and the decoded argv. Nothing is ever eval'd.
+# The broker serves ANY repo that has a running master, agent, task-agent or
+# ticket container -- no per-repo config, no whitelist. It resolves the target
+# repo from the calling container's host-set labels (established at launch,
+# not caller input): the single `org.cld.repo-root` for v1 kinds, or -- for a
+# multi-repo ticket container -- the flat `org.cld.repo.<name>` labels, picked
+# by a leading `--repo <name>` in the run-tests/graphql argv
+# (resolve_repo_target). The caller controls only: the action, a validated
+# session id, and the decoded argv. Nothing is ever eval'd.
 #
 # Sessions come in three shapes: `cld_master_*` (a `cld master`), `cld_agent_*`
 # (both the standing repo agent and task-agents -- kind is a label, not a
@@ -106,6 +109,9 @@ resolve_test_context() {
 }
 
 action_run_tests() {
+    parse_repo_arg "$@"
+    set -- "${REPO_ARGS[@]}"
+    resolve_repo_target "$REPO_NAME"
     resolve_test_context
     local secret_args=()
     [ -f "$SECRETS_ENV_FILE" ] && secret_args=(-v "$SECRETS_ENV_FILE:/secrets/.env:ro")
@@ -152,6 +158,71 @@ stage_agent_socket() {
              "launching without agent forwarding" >&2
         unset SSH_AUTH_SOCK
     fi
+}
+
+# Repo selection for run-tests / graphql (docs/design-ticket-containers.md
+# section 6.1): a ticket container mounts several repos, so those actions take
+# an optional leading `--repo <name>`, resolved here against the caller's
+# host-set flat `org.cld.repo.<name>` labels -- labels, not caller input, gate
+# repo access, and the flat encoding means no JSON parsing in this script. No
+# --repo with exactly one labeled repo uses it (the single-repo convenience);
+# several without --repo is an error. A v1 kind keeps the dispatcher-set $REPO
+# and refuses --repo. Names are matched against enumerated labels, never
+# spliced into an inspect format string, so a hostile name cannot template-
+# inject.
+resolve_repo_target() {
+    local name="$1" line lname names=() paths=()
+    if [ "${KIND:-}" != ticket ]; then
+        [ -z "$name" ] || {
+            echo "denied: --repo is only for ticket containers ($session is '${KIND:-unlabeled}')" >&2
+            exit 2
+        }
+        return 0
+    fi
+    REPO=""
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        lname="${line%%=*}"; lname="${lname#org.cld.repo.}"
+        names+=("$lname"); paths+=("${line#*=}")
+        [ -n "$name" ] && [ "$lname" = "$name" ] && REPO="${line#*=}"
+    done < <(docker inspect "$session" --format \
+        '{{range $k, $v := .Config.Labels}}{{$k}}={{$v}}{{println}}{{end}}' 2>/dev/null \
+        | grep '^org\.cld\.repo\.' || true)
+    if [ -z "$name" ]; then
+        if [ "${#names[@]}" = 1 ]; then
+            REPO="${paths[0]}"
+        else
+            echo "denied: $session mounts ${#names[@]} repos -- pass --repo <name>" \
+                 "(mounted: ${names[*]:-none})" >&2
+            exit 3
+        fi
+    fi
+    [ -n "$REPO" ] || {
+        echo "denied: repo '$name' is not mounted in $session (mounted: ${names[*]:-none})" >&2
+        exit 3
+    }
+    { [ -d "$REPO/.jj" ] || [ -d "$REPO/.git" ]; } \
+        || { echo "denied: repo path '$REPO' for $session is not a repo" >&2; exit 3; }
+}
+
+# Consume a leading `--repo <name>` / `--repo=<name>` off an action's argv into
+# $REPO_NAME, leaving the rest in $REPO_ARGS. Split from resolve_repo_target so
+# the parse stays testable without docker.
+parse_repo_arg() {
+    REPO_NAME=""
+    REPO_ARGS=("$@")
+    case "${1:-}" in
+        --repo)
+            REPO_NAME="${2:-}"
+            [ -n "$REPO_NAME" ] || { echo "denied: --repo needs a repo name" >&2; exit 2; }
+            REPO_ARGS=("${@:3}")
+            ;;
+        --repo=*)
+            REPO_NAME="${1#--repo=}"
+            [ -n "$REPO_NAME" ] || { echo "denied: --repo needs a repo name" >&2; exit 2; }
+            REPO_ARGS=("${@:2}")
+            ;;
+    esac
 }
 
 # Shared by both launcher actions: <target> is validated against the master's
@@ -592,10 +663,15 @@ do_graphql_status() {
 # resolve_graphql_context / resolve_graphql_config -- teardown must work even
 # for a repo whose graphql_command was since unset or removed.
 do_graphql_stop() {
-    local cname="cld_gql_$session" wsname="gql-$session"
+    local cname="cld_gql_$session" wsname="gql-$session" gql_repo
+    # Forget the workspace in the repo the server was STARTED for (its own
+    # org.cld.gql-repo label), not $REPO: a multi-repo ticket can pass a
+    # different --repo to stop than it did to start. Falls back to $REPO for
+    # a container without the label (or already gone).
+    gql_repo=$(docker inspect "$cname" --format '{{index .Config.Labels "org.cld.gql-repo"}}' 2>/dev/null) || true
     docker stop -t 10 "$cname" >/dev/null 2>&1 || true
     docker rm -f "$cname" >/dev/null 2>&1 || true
-    jj -R "$REPO" --ignore-working-copy workspace forget "$wsname" >/dev/null 2>&1 || true
+    jj -R "${gql_repo:-$REPO}" --ignore-working-copy workspace forget "$wsname" >/dev/null 2>&1 || true
     echo "stopped"
 }
 
@@ -695,6 +771,9 @@ do_graphql_start() {
 }
 
 action_graphql() {
+    parse_repo_arg "$@"
+    set -- "${REPO_ARGS[@]}"
+    resolve_repo_target "$REPO_NAME"
     local op="${1:-}"
     shift 2>/dev/null || true
     case "$op" in
@@ -742,13 +821,21 @@ declare -F "$fn" >/dev/null || { echo "denied: unknown action '$action'" >&2; ex
 
 [[ "$session" =~ ^cld_[A-Za-z0-9_-]+$ ]] || { echo "denied: bad session id" >&2; exit 2; }
 
-# Resolve the target repo from the calling container's host-set label. The
-# container name == session, and the label is set at launch (trusted), so the
-# caller cannot point at an arbitrary host path -- only a real master's, an
-# agent's, or a task-agent's own repo.
-REPO=$(docker inspect "$session" --format '{{index .Config.Labels "org.cld.repo-root"}}' 2>/dev/null) || true
-[ -n "$REPO" ] && { [ -d "$REPO/.jj" ] || [ -d "$REPO/.git" ]; } \
-    || { echo "no master/agent/task-agent/devcontainer container for session $session" >&2; exit 3; }
+# Resolve the target repo from the calling container's host-set labels. The
+# container name == session, and the labels are set at launch (trusted), so the
+# caller cannot point at an arbitrary host path -- only a repo the host mounted
+# for it. A v1 kind carries a single org.cld.repo-root; a ticket container
+# carries one org.cld.repo.<name> label per mounted repo instead, so $REPO
+# stays empty here and run-tests/graphql resolve it per call via
+# resolve_repo_target (--repo <name>, or the single mounted repo).
+KIND=$(docker inspect "$session" --format '{{index .Config.Labels "org.cld.kind"}}' 2>/dev/null) \
+    || { echo "no cld container for session $session" >&2; exit 3; }
+REPO=""
+if [ "$KIND" != ticket ]; then
+    REPO=$(docker inspect "$session" --format '{{index .Config.Labels "org.cld.repo-root"}}' 2>/dev/null) || true
+    [ -n "$REPO" ] && { [ -d "$REPO/.jj" ] || [ -d "$REPO/.git" ]; } \
+        || { echo "no master/agent/task-agent/devcontainer container for session $session" >&2; exit 3; }
+fi
 
 # Per-action context (REV, secrets, target validation) is resolved inside each
 # action_* function now, so read-only actions don't pay for -- or fail on --

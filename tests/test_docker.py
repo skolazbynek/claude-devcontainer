@@ -140,6 +140,46 @@ class TestToHostPath:
         cfg = Config(host_project_dir="/host/proj")
         assert to_host_path("/unrelated/path", cfg) == "/unrelated/path"
 
+    def test_path_map_translates_per_repo_prefixes(self):
+        cfg = Config(path_map={
+            "/workspace/origin/lide-api": "/host/projects/lide-api",
+            "/workspace/lide-2600/lide-api": "/host/projects/lide-api",
+            "/home/claude": "/host/home",
+        })
+        assert to_host_path("/workspace/origin/lide-api/src/a.py", cfg) == "/host/projects/lide-api/src/a.py"
+        assert to_host_path("/workspace/lide-2600/lide-api/src/a.py", cfg) == "/host/projects/lide-api/src/a.py"
+        assert to_host_path("/home/claude/.claude", cfg) == "/host/home/.claude"
+
+    def test_path_map_exact_prefix_match(self):
+        cfg = Config(path_map={"/workspace/origin/lide-api": "/host/lide-api"})
+        assert to_host_path("/workspace/origin/lide-api", cfg) == "/host/lide-api"
+
+    def test_path_map_longest_prefix_wins(self):
+        cfg = Config(path_map={
+            "/workspace/origin": "/host/wrong",
+            "/workspace/origin/lide-api": "/host/lide-api",
+        })
+        assert to_host_path("/workspace/origin/lide-api/x", cfg) == "/host/lide-api/x"
+
+    def test_path_map_prefix_is_a_path_boundary(self):
+        # A sibling repo whose name extends another's must not be hijacked.
+        cfg = Config(path_map={"/workspace/origin/lide": "/host/lide"})
+        assert to_host_path("/workspace/origin/lide-api/x", cfg) == "/workspace/origin/lide-api/x"
+
+    def test_path_map_wins_over_scalar_pair(self):
+        cfg = Config(
+            host_project_dir="/host/scalar",
+            path_map={"/workspace/origin": "/host/mapped"},
+        )
+        assert to_host_path("/workspace/origin/x", cfg) == "/host/mapped/x"
+
+    def test_scalar_fallback_when_map_misses(self):
+        cfg = Config(
+            host_project_dir="/host/proj",
+            path_map={"/workspace/lide-2600/lide-api": "/host/lide-api"},
+        )
+        assert to_host_path("/workspace/origin/x", cfg) == "/host/proj/x"
+
 
 class TestStageHomeRo:
     def test_missing_returns_empty(self, tmp_path, monkeypatch):

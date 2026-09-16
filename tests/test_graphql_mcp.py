@@ -37,48 +37,60 @@ class TestLifecycleArgv:
     def test_start_server_no_args(self):
         with patch("cld.mcp.graphql.graphql_op", return_value=_cp(stdout="running\t8000\thttp://x\tabc\tcld_gql_x\n")) as op:
             start_server()
-        op.assert_called_once_with("start")
+        op.assert_called_once_with("start", repo="")
 
     def test_stop_server_no_args(self):
         with patch("cld.mcp.graphql.graphql_op", return_value=_cp(stdout="stopped\n")) as op:
             stop_server()
-        op.assert_called_once_with("stop")
+        op.assert_called_once_with("stop", repo="")
 
     def test_restart_server_no_args(self):
         with patch("cld.mcp.graphql.graphql_op", return_value=_cp(stdout="running\t8000\thttp://x\tabc\tcld_gql_x\n")) as op:
             restart_server()
-        op.assert_called_once_with("restart")
+        op.assert_called_once_with("restart", repo="")
 
     def test_server_status_no_args(self):
         with patch("cld.mcp.graphql.graphql_op", return_value=_cp(stdout="not_started\t\t\t\t\n")) as op:
             server_status()
-        op.assert_called_once_with("status")
+        op.assert_called_once_with("status", repo="")
 
     def test_get_server_logs_forwards_tail(self):
         with patch("cld.mcp.graphql.graphql_op", return_value=_cp(stdout="a\nb\n")) as op:
             get_server_logs(tail=20)
-        op.assert_called_once_with("logs", "20")
+        op.assert_called_once_with("logs", "20", repo="")
 
     def test_list_endpoints_no_args(self):
         with patch("cld.mcp.graphql.graphql_op", return_value=_cp(stdout="dev\nstaging\n")) as op:
             out = list_endpoints()
-        op.assert_called_once_with("endpoints")
+        op.assert_called_once_with("endpoints", repo="")
         assert out == ["dev", "staging"]
 
     def test_query_forwards_target_query_and_json_variables(self):
         with patch("cld.mcp.graphql.graphql_op", return_value=_cp(stdout='{"data": {}}')) as op:
             query("query { me }", variables={"id": 1}, target="dev")
-        op.assert_called_once_with("query", "dev", "query { me }", json.dumps({"id": 1}))
+        op.assert_called_once_with("query", "dev", "query { me }", json.dumps({"id": 1}), repo="")
 
     def test_query_defaults_target_local_and_empty_variables(self):
         with patch("cld.mcp.graphql.graphql_op", return_value=_cp(stdout='{"data": {}}')) as op:
             query("{ __typename }")
-        op.assert_called_once_with("query", "local", "{ __typename }", "{}")
+        op.assert_called_once_with("query", "local", "{ __typename }", "{}", repo="")
 
     def test_introspect_forwards_target(self):
         with patch("cld.mcp.graphql.graphql_op", return_value=_cp(stdout='{"data": {"__schema": {"types": []}}}')) as op:
             introspect(target="staging")
-        op.assert_called_once_with("introspect", "staging")
+        op.assert_called_once_with("introspect", "staging", repo="")
+
+    def test_repo_reaches_the_broker_client(self):
+        """A multi-repo ticket names its target repo; the MCP threads it to
+        graphql_op, which turns it into the broker's leading --repo flag."""
+        with patch("cld.mcp.graphql.graphql_op", return_value=_cp(stdout='{"data": {}}')) as op:
+            query("{ __typename }", repo="lide-api")
+        op.assert_called_once_with("query", "local", "{ __typename }", "{}", repo="lide-api")
+
+    def test_lifecycle_repo_reaches_the_broker_client(self):
+        with patch("cld.mcp.graphql.graphql_op", return_value=_cp(stdout="not_started\t\t\t\t\n")) as op:
+            server_status(repo="diskuze-api")
+        op.assert_called_once_with("status", repo="diskuze-api")
 
 
 class TestBrokerFailurePropagates:

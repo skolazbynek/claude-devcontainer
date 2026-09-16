@@ -8,6 +8,7 @@ mount layouts) stay as module constants in their owning files -- they're
 not user-tunable and are coupled to Dockerfile/shell-script invariants.
 """
 
+import json
 import logging
 import os
 import shutil
@@ -246,6 +247,12 @@ class Config:
     host_project_dir: str = ""
     host_home: str = ""
 
+    # Ticket containers get the per-repo prefix map instead of the scalar
+    # pair: CLD_PATH_MAP is a JSON object {container prefix: host prefix},
+    # longest prefix wins (design-ticket-containers.md section 6.4). Empty on
+    # the host and in v1 kinds.
+    path_map: dict[str, str] = field(default_factory=dict)
+
     # Agent-wait tunables (used by chain orchestrator)
     agent_timeout: int = 1800
     poll_interval: int = 30
@@ -336,6 +343,7 @@ class Config:
             ssl_certs_path=_env_str("CLD_SSL_CERTS_PATH", layered.get("ssl_certs_path", "")),
             host_project_dir=_env_str("CLD_HOST_PROJECT_DIR"),
             host_home=_env_str("CLD_HOST_HOME"),
+            path_map=json.loads(_env_str("CLD_PATH_MAP") or "{}"),
             agent_timeout=_env_int("CLD_AGENT_TIMEOUT", int(layered.get("agent_timeout", 1800))),
             poll_interval=_env_int("CLD_POLL_INTERVAL", int(layered.get("poll_interval", 30))),
             debug=_env_bool("CLD_DEBUG", bool(layered.get("debug", False))),

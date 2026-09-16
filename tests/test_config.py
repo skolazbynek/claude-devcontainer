@@ -185,6 +185,24 @@ class TestReposTable:
         assert cfg.repos == {}
 
 
+class TestPathMap:
+    def test_parsed_from_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(
+            "CLD_PATH_MAP",
+            '{"/workspace/origin/lide-api": "/host/lide-api", "/home/claude": "/host/home"}',
+        )
+        cfg = Config.from_env(user_config=tmp_path / "u", project_config=tmp_path / "p")
+        assert cfg.path_map == {
+            "/workspace/origin/lide-api": "/host/lide-api",
+            "/home/claude": "/host/home",
+        }
+
+    def test_defaults_to_empty(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CLD_PATH_MAP", raising=False)
+        cfg = Config.from_env(user_config=tmp_path / "u", project_config=tmp_path / "p")
+        assert cfg.path_map == {}
+
+
 class TestMasterTargets:
     def test_master_targets_loaded(self, tmp_path):
         proj = _write(

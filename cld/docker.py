@@ -358,11 +358,16 @@ def resolve_master_target(cwd: Path, cfg: Config) -> str:
 def to_host_path(path: str, cfg: Config) -> str:
     """Translate a container-internal path to the corresponding host path.
 
-    Uses ``cfg.host_project_dir`` / ``cfg.host_home`` (populated from the
-    ``CLD_HOST_PROJECT_DIR`` / ``CLD_HOST_HOME`` env vars set by the host
-    launcher when running inside a container) to map ``/workspace/*`` and
-    ``$HOME`` paths back to their host-side locations. No-op on the host.
+    Consults ``cfg.path_map`` first (the ``CLD_PATH_MAP`` prefix map ticket
+    containers get, longest prefix wins -- design-ticket-containers.md
+    section 6.4), then falls back to ``cfg.host_project_dir`` /
+    ``cfg.host_home`` (the scalar ``CLD_HOST_PROJECT_DIR`` /
+    ``CLD_HOST_HOME`` pair v1 kinds keep setting) to map ``/workspace/*``
+    and ``$HOME`` paths back to their host-side locations. No-op on the host.
     """
+    for prefix in sorted(cfg.path_map, key=len, reverse=True):
+        if path == prefix or path.startswith(prefix + "/"):
+            return cfg.path_map[prefix] + path[len(prefix):]
     if cfg.host_project_dir:
         # /workspace/current is container-ephemeral (no host equivalent under
         # the new layout); only /workspace/origin maps back to the host repo.

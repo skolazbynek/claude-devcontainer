@@ -36,18 +36,18 @@ def _set_cached_schema(schema: dict) -> None:
     _cached_schema = schema
 
 
-def _run_result(op: str, *args: str):
+def _run_result(op: str, *args: str, repo: str = ""):
     """Run a `graphql` broker op, returning the raw completed-process result."""
-    result = graphql_op(op, *args)
+    result = graphql_op(op, *args, repo=repo)
     if result.returncode != 0:
         detail = (result.stderr or "").strip() or (result.stdout or "").strip()
         raise ToolError(f"graphql {op} failed: {detail}")
     return result
 
 
-def _run(op: str, *args: str) -> str:
+def _run(op: str, *args: str, repo: str = "") -> str:
     """Run a `graphql` broker op, returning its captured stdout or raising ToolError."""
-    return _run_result(op, *args).stdout
+    return _run_result(op, *args, repo=repo).stdout
 
 
 def _parse_json_response(op: str, result) -> dict:
@@ -86,7 +86,7 @@ def _parse_status_line(line: str) -> dict:
 
 
 @mcp.tool()
-def start_server() -> dict:
+def start_server(repo: str = "") -> dict:
     """Start the GraphQL server for this session's repo, at its current revision.
 
     Runs on the host broker from the real repo checkout with the real .env
@@ -97,43 +97,55 @@ def start_server() -> dict:
     up to date. The repo must set `graphql_command` in its `.cld/config.toml`
     (see docs/graphql-mcp.md); this is a slow path, every start/restart pays
     a fresh `poetry install`.
+
+    repo: in a multi-repo ticket container, the name of the mounted repo to
+    act on (required there; a single-repo session may omit it).
     """
-    return _parse_status_line(_run("start"))
+    return _parse_status_line(_run("start", repo=repo))
 
 
 @mcp.tool()
-def stop_server() -> dict:
-    """Stop this session's GraphQL server, if one is running."""
-    return {"status": _run("stop").strip() or "stopped"}
+def stop_server(repo: str = "") -> dict:
+    """Stop this session's GraphQL server, if one is running.
+
+    repo: the mounted repo name in a multi-repo ticket container.
+    """
+    return {"status": _run("stop", repo=repo).strip() or "stopped"}
 
 
 @mcp.tool()
-def restart_server() -> dict:
-    """Restart this session's GraphQL server -- use this after editing code or config it serves."""
-    return _parse_status_line(_run("restart"))
+def restart_server(repo: str = "") -> dict:
+    """Restart this session's GraphQL server -- use this after editing code or config it serves.
+
+    repo: the mounted repo name in a multi-repo ticket container.
+    """
+    return _parse_status_line(_run("restart", repo=repo))
 
 
 @mcp.tool()
-def server_status() -> dict:
+def server_status(repo: str = "") -> dict:
     """Check this session's GraphQL server: not_started / starting / running / exited.
 
     `stale` is true when a running/starting server's revision no longer
     matches this session's current tip (you've kept editing since it
     started) -- call `restart_server` to fix it. False when it matches, null
     when there's nothing running to compare or the tip couldn't be resolved.
+
+    repo: the mounted repo name in a multi-repo ticket container.
     """
-    return _parse_status_line(_run("status"))
+    return _parse_status_line(_run("status", repo=repo))
 
 
 @mcp.tool()
-def get_server_logs(tail: int = 50, filter_pattern: str = "") -> list[str]:
+def get_server_logs(tail: int = 50, filter_pattern: str = "", repo: str = "") -> list[str]:
     """Get recent server log lines.
 
     tail: number of lines to return (default 50).
     filter_pattern: optional regex to filter lines, applied client-side to the
     lines the broker returns.
+    repo: the mounted repo name in a multi-repo ticket container.
     """
-    lines = _run("logs", str(tail)).splitlines()
+    lines = _run("logs", str(tail), repo=repo).splitlines()
     if filter_pattern:
         try:
             pat = re.compile(filter_pattern, re.IGNORECASE)
@@ -144,13 +156,14 @@ def get_server_logs(tail: int = 50, filter_pattern: str = "") -> list[str]:
 
 
 @mcp.tool()
-def list_endpoints() -> list[str]:
+def list_endpoints(repo: str = "") -> list[str]:
     """List configured GraphQL aliases (set in the repo's .env as CLD_GRAPHQL_URL_<ALIAS>).
 
     Use an alias as `target` in `query`/`introspect` to reach it with its
     attached credentials, without this container ever holding them.
+    repo: the mounted repo name in a multi-repo ticket container.
     """
-    return [line for line in _run("endpoints").splitlines() if line]
+    return [line for line in _run("endpoints", repo=repo).splitlines() if line]
 
 
 # --- Client tools ---
@@ -201,7 +214,7 @@ def _summarize_schema(raw: dict) -> dict:
 
 
 @mcp.tool()
-def introspect(target: str = "local") -> dict:
+def introspect(target: str = "local", repo: str = "") -> dict:
     """Fetch the GraphQL schema and return a compact summary (type names, field signatures).
 
     Full schema is cached -- use describe_type to get details on a specific type.
@@ -209,8 +222,9 @@ def introspect(target: str = "local") -> dict:
     configured in the repo's .env (CLD_GRAPHQL_URL_<ALIAS>, credentialed by
     the broker), or a raw http(s):// URL (only reachable if allowlisted in
     broker.conf; no credentials are attached to a raw URL).
+    repo: the mounted repo name in a multi-repo ticket container.
     """
-    result = _parse_json_response("introspection", _run_result("introspect", target))
+    result = _parse_json_response("introspection", _run_result("introspect", target, repo=repo))
     _set_cached_schema(result)
     return _summarize_schema(result)
 
@@ -233,7 +247,7 @@ def describe_type(type_name: str) -> dict:
 
 
 @mcp.tool()
-def query(query: str, variables: dict | None = None, target: str = "local") -> dict:
+def query(query: str, variables: dict | None = None, target: str = "local", repo: str = "") -> dict:
     """Execute a GraphQL query or mutation.
 
     query: the GraphQL query/mutation string.
@@ -242,8 +256,9 @@ def query(query: str, variables: dict | None = None, target: str = "local") -> d
     configured in the repo's .env (CLD_GRAPHQL_URL_<ALIAS>, credentialed by
     the broker), or a raw http(s):// URL (only reachable if allowlisted in
     broker.conf; no credentials are attached to a raw URL).
+    repo: the mounted repo name in a multi-repo ticket container.
     """
-    result = _run_result("query", target, query, json.dumps(variables or {}))
+    result = _run_result("query", target, query, json.dumps(variables or {}), repo=repo)
     return _parse_json_response("query", result)
 
 

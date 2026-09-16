@@ -6,12 +6,34 @@ export WORKSPACE_CURRENT="/workspace/current"
 mkdir -p /tmp/bin
 export PATH="/tmp/bin:$PATH"
 
-# Wrap mysql to use mounted credentials file automatically
-if [ -n "${MYSQL_DEFAULTS_FILE:-}" ] && [ -f "$MYSQL_DEFAULTS_FILE" ]; then
-    MYSQL_BIN=$(which mysql)
-    printf '#!/bin/bash\nexec %s --defaults-extra-file=%s "$@"\n' "$MYSQL_BIN" "$MYSQL_DEFAULTS_FILE" > /tmp/bin/mysql
-    chmod +x /tmp/bin/mysql
-fi
+# Wrap mysql to use mounted credentials automatically. v1 kinds mount one
+# global file (MYSQL_DEFAULTS_FILE); ticket containers mount one
+# /run/secrets/mysql-<name>.cnf per repo with a registry mysql_config, each
+# getting a `mysql-<name>` wrapper -- plain `mysql` is generated only when
+# exactly one repo has a config (design-ticket-containers.md section 6.2).
+write_mysql_wrapper() {
+    printf '#!/bin/bash\nexec %s --defaults-extra-file=%s "$@"\n' \
+        "$(command -v mysql)" "$2" > "$1"
+    chmod +x "$1"
+}
+generate_mysql_wrappers() {
+    local secrets_dir="${1:-/run/secrets}" bin_dir="${2:-/tmp/bin}"
+    local cnf name count=0 single=""
+    if [ -n "${MYSQL_DEFAULTS_FILE:-}" ] && [ -f "$MYSQL_DEFAULTS_FILE" ]; then
+        write_mysql_wrapper "$bin_dir/mysql" "$MYSQL_DEFAULTS_FILE"
+    fi
+    for cnf in "$secrets_dir"/mysql-*.cnf; do
+        [ -f "$cnf" ] || continue
+        name="${cnf#"$secrets_dir"/mysql-}"
+        write_mysql_wrapper "$bin_dir/mysql-${name%.cnf}" "$cnf"
+        count=$((count + 1))
+        single="$cnf"
+    done
+    if [ "$count" = 1 ] && [ ! -e "$bin_dir/mysql" ]; then
+        write_mysql_wrapper "$bin_dir/mysql" "$single"
+    fi
+}
+generate_mysql_wrappers
 
 # The broker client is `cld broker <action>` (cld/broker.py), not a wrapper script:
 # one implementation of the ssh call, shared by the CLI and by everything that
