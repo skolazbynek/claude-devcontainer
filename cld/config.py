@@ -43,6 +43,28 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return val in ("1", "true", "yes", "on")
 
 
+def _parse_path_map(raw: str) -> dict[str, str]:
+    """Parse ``CLD_PATH_MAP`` (a JSON object set by the cld launcher).
+
+    Config loading must not die on a malformed value: warn and fall back to no
+    map -- path translation then uses the scalar host_project_dir/host_home pair.
+    """
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError as e:
+        _log.warning("CLD_PATH_MAP is not valid JSON (%s); ignoring it", e)
+        return {}
+    if not isinstance(parsed, dict):
+        _log.warning(
+            "CLD_PATH_MAP must be a JSON object, got %s; ignoring it",
+            type(parsed).__name__,
+        )
+        return {}
+    return parsed
+
+
 _TOML_KEYS = {
     "base_image",
     "devcontainer_image",
@@ -129,8 +151,15 @@ def _find_project_config(start: Path | None = None) -> Path | None:
     return None
 
 
-def _load_toml(path: Path) -> dict:
-    """Read a TOML file, warn on parse errors or unknown keys; return known keys only."""
+def _load_toml(path: Path, registry_layer: bool = False) -> dict:
+    """Read a TOML file, warn on parse errors or unknown keys; return known keys only.
+
+    ``registry_layer`` marks the one file allowed to define ``[repos.*]``
+    tables: the user config (PRODUCT_DESIGN.md section 4 puts the registry
+    solely there). Every other layer -- a repo's ``.cld/config.toml`` in
+    particular -- has its ``repos`` ignored with a warning, so a checked-out
+    repo cannot inject or override registry entries.
+    """
     try:
         with path.open("rb") as f:
             data = tomllib.load(f)
@@ -157,7 +186,12 @@ def _load_toml(path: Path) -> dict:
     known = {k: v for k, v in data.items() if k in _TOML_KEYS}
     repos = data.get("repos")
     if repos is not None:
-        if isinstance(repos, dict):
+        if not registry_layer:
+            _log.warning(
+                "'repos' in %s is ignored: the registry lives only in the user "
+                "config (~/.config/cld/config.toml)", path,
+            )
+        elif isinstance(repos, dict):
             known["repos"] = repos
         else:
             _log.warning("'repos' in %s must be a table of [repos.<name>] tables", path)
@@ -331,7 +365,7 @@ class Config:
         up = user_config if user_config is not None else _user_config_path()
         _ensure_user_config(up)
         if up.is_file():
-            layered.update(_load_toml(up))
+            layered.update(_load_toml(up, registry_layer=True))
         pp = project_config if project_config is not None else _find_project_config()
         if pp and pp.is_file():
             layered.update(_load_toml(pp))
@@ -343,7 +377,7 @@ class Config:
             ssl_certs_path=_env_str("CLD_SSL_CERTS_PATH", layered.get("ssl_certs_path", "")),
             host_project_dir=_env_str("CLD_HOST_PROJECT_DIR"),
             host_home=_env_str("CLD_HOST_HOME"),
-            path_map=json.loads(_env_str("CLD_PATH_MAP") or "{}"),
+            path_map=_parse_path_map(_env_str("CLD_PATH_MAP")),
             agent_timeout=_env_int("CLD_AGENT_TIMEOUT", int(layered.get("agent_timeout", 1800))),
             poll_interval=_env_int("CLD_POLL_INTERVAL", int(layered.get("poll_interval", 30))),
             debug=_env_bool("CLD_DEBUG", bool(layered.get("debug", False))),

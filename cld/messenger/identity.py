@@ -4,10 +4,12 @@ In a cld container the identity is trivial: ``SESSION_NAME`` and the fixed
 ``MAILBOX_MOUNT``. On the host we act *as* a container -- reads and writes
 target that mailbox, and outgoing messages list it as the sender. Which one
 (design-ticket-containers.md section 6.5): an explicit ticket (``CLD_TICKET``
-env or the *ticket* argument) wins; else the single running ticket container,
-if there is exactly one; else the v1 fallback, the cwd repo's master. A
-cwd-walk mapping cwd to tickets is deliberately not attempted -- several
-tickets can mount one repo, so cwd is not an identity.
+env or the *ticket* argument) wins, but only if its container actually exists
+(running or stopped) -- otherwise sends would be attributed to a mailbox
+nothing ever reads; else the single running ticket container, if there is
+exactly one; else the v1 fallback, the cwd repo's master. A cwd-walk mapping
+cwd to tickets is deliberately not attempted -- several tickets can mount one
+repo, so cwd is not an identity.
 """
 
 import os
@@ -26,10 +28,18 @@ def resolve_self(ticket: str = "") -> tuple[str, Path]:
 
     mailbox_root = Path(Config.from_env().mailbox_root).expanduser()
     ticket = ticket or os.environ.get("CLD_TICKET", "")
+    tickets = list_cld_containers("ticket")
     if ticket:
-        return ticket_container_name(ticket), mailbox_root
+        container = ticket_container_name(ticket)
+        if container not in {c["name"] for c in tickets}:
+            listing = ", ".join(sorted(c["name"] for c in tickets)) or "none"
+            raise RuntimeError(
+                f"no ticket container '{container}' exists (running or stopped); "
+                f"existing tickets: {listing}"
+            )
+        return container, mailbox_root
 
-    running = [c["name"] for c in list_cld_containers("ticket") if c["status"] == "running"]
+    running = [c["name"] for c in tickets if c["status"] == "running"]
     if len(running) == 1:
         return running[0], mailbox_root
 

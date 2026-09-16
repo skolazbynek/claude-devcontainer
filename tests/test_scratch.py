@@ -113,6 +113,52 @@ class TestStageInWorkspace:
         assert anchor in parents
 
 
+_VCS_LIB = Path(__file__).resolve().parent.parent / "imgs/claude-devcontainer/vcs-lib.sh"
+
+
+class TestRecoverAnchorSessionGlob:
+    """cld_recover_anchor (vcs-lib.sh) globs for its own session's scratch
+    description; the glob must not match a sibling session whose name extends
+    this one (cld_ticket_x-1 vs cld_ticket_x-12)."""
+
+    def _recover(self, repo_root: Path, bookmark: str, session: str) -> str:
+        result = subprocess.run(
+            ["bash", "-c",
+             f'source "{_VCS_LIB}" && cd "{repo_root}" && '
+             f'cld_recover_anchor "{bookmark}" "{session}"'],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
+
+    def _staged_sibling(self, jj_repo, tmp_path) -> str:
+        """Scratch commit of session cld_ticket_x-12, with a work commit on
+        top carrying bookmark cld_ticket_x-1 -- the sibling's scratch is an
+        ancestor of the probed bookmark. Returns the scratch commit id."""
+        anchor = _add_second_commit(jj_repo.repo_root)
+        peer = _make_peer_workspace(jj_repo, anchor, tmp_path)
+        scratch = stage_in_workspace(peer, "cld_ticket_x-12", {"session": b"cld_ticket_x-12\n"})
+        (peer / "work.txt").write_text("work\n")
+        subprocess.run(
+            ["jj", "commit", "-m", "work"], cwd=peer, check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["jj", "bookmark", "create", "cld_ticket_x-1", "-r", "@-"],
+            cwd=peer, check=True, capture_output=True,
+        )
+        return scratch
+
+    def test_own_session_matches(self, jj_repo, tmp_path):
+        """Positive control: the exact session still recovers its scratch."""
+        scratch = self._staged_sibling(jj_repo, tmp_path)
+        assert self._recover(jj_repo.repo_root, "cld_ticket_x-1", "cld_ticket_x-12") == scratch
+
+    def test_sibling_prefix_session_does_not_match(self, jj_repo, tmp_path):
+        """Session x-1 has no scratch of its own; x-12's must not stand in."""
+        self._staged_sibling(jj_repo, tmp_path)
+        assert self._recover(jj_repo.repo_root, "cld_ticket_x-1", "cld_ticket_x-1") == ""
+
+
 class TestScratchEnvelope:
     def test_roundtrip(self):
         scratch = {"session": b"hello world\n", "extra.md": b"\x00\x01\x02"}

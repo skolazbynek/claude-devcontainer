@@ -51,7 +51,7 @@ fi
 # isolated (default): AGENT_ANCHOR_HASH is B, so only B's own descendants are
 # editable. shared: AGENT_ANCHOR_HASH is A itself, so any pre-existing
 # descendant of A (not just of B) is in the container's editable tree -- see
-# docs/design-anchor-modes.md.
+# docs/design-ticket-containers.md section 3.
 AGENT_ANCHOR_MODE="${AGENT_ANCHOR_MODE:-isolated}"
 if [ "$AGENT_ANCHOR_MODE" = "shared" ]; then
     AGENT_ANCHOR_HASH="$A_HASH"

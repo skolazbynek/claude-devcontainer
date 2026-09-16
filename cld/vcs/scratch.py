@@ -60,7 +60,7 @@ def stage_in_workspace(
         mode: ``"isolated"`` (default) or ``"shared"`` -- embedded in B's
             description so a restart/reattach can recover which anchor
             semantics this session was launched with (see
-            docs/design-anchor-modes.md). Isolated: the caller uses B itself
+            docs/design-ticket-containers.md section 3). Isolated: the caller uses B itself
             as ``AGENT_ANCHOR_HASH``. Shared: the caller uses A (B's parent).
 
     Returns:

@@ -36,6 +36,7 @@ from cld.manifest import (
     ManifestDiff,
     TicketManifest,
     diff_manifests,
+    keep_attached_anchors,
     read_manifest,
     resolve_manifest,
 )
@@ -180,14 +181,19 @@ def _entry_change(old, new) -> str:
         parts.append(f"path {old.path} -> {new.path}")
     if old.anchor_base != new.anchor_base:
         # A kept repo reattaches at its existing bookmark; the new anchor only
-        # takes effect after `cld shutdown` + `cld start`.
+        # takes effect after `cld shutdown` + `cld start`, so the recreated
+        # manifest keeps the old one (keep_attached_anchors).
         parts.append(
             f"anchor {old.anchor_base[:12]} -> {new.anchor_base[:12]} "
-            "(takes effect only after shutdown + start; reattaches at the "
-            "existing bookmark until then)"
+            "(takes effect only after shutdown + start; until then the "
+            f"manifest keeps {old.anchor_base[:12]} and the workspace "
+            "reattaches at the existing bookmark)"
         )
     if old.anchor_mode != new.anchor_mode:
-        parts.append(f"mode {old.anchor_mode} -> {new.anchor_mode}")
+        parts.append(
+            f"mode {old.anchor_mode} -> {new.anchor_mode} "
+            "(takes effect only after shutdown + start)"
+        )
     return ", ".join(parts)
 
 
@@ -248,8 +254,12 @@ def start_ticket(cfg: Config, ticket: str, specs: list[str], shared: list[str]) 
             _stop_and_remove(container)
             for repo in diff.removed:
                 forget_session_state(repo.path, container)
-            _launch(cfg, new)
-            _start_banner(new)
+            # Kept repos reattach at their bookmarks, so the launched manifest
+            # keeps their old anchors -- the newly resolved ones only become
+            # real after shutdown + start (see keep_attached_anchors).
+            kept = keep_attached_anchors(old, new)
+            _launch(cfg, kept)
+            _start_banner(kept)
             return
         # Same resolved set -- fall through to plain create-or-start semantics.
 

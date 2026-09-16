@@ -12,6 +12,7 @@ from cld.manifest import (
     RepoManifestEntry,
     TicketManifest,
     diff_manifests,
+    keep_attached_anchors,
     manifest_labels,
     read_manifest,
     resolve_manifest,
@@ -131,6 +132,16 @@ class TestResolveManifest:
         assert m.repos[0].path == str(repo)
         assert m.repos[0].rev_source == "trunk"
 
+    def test_path_spec_containing_at_is_a_path_not_a_rev(self, tmp_path):
+        """A spec that as a whole names an existing path keeps its '@' -- only
+        a non-path spec splits at the first '@' (the _split_rev rule)."""
+        repo = tmp_path / "assets@2x" / "my-repo"
+        repo.mkdir(parents=True)
+        m = resolve_manifest("t", [str(repo)], {}, resolver=_fake_resolver)
+        assert m.repos[0].name == "my-repo"
+        assert m.repos[0].path == str(repo)
+        assert m.repos[0].rev_source == "trunk"
+
     def test_shared_anchor_marks_only_named_repo(self, tmp_path):
         other = tmp_path / "other"
         other.mkdir()
@@ -213,6 +224,31 @@ class TestDiffManifests:
             _manifest(_entry("a", source="arg")),
         )
         assert not diff
+
+
+class TestKeepAttachedAnchors:
+    """Repo-set recreate: kept repos reattach at their bookmarks, so the
+    launched manifest must keep their old anchors (the new ones only become
+    real after shutdown + start)."""
+
+    def test_kept_repo_keeps_old_anchor_mode_and_source(self):
+        old = _manifest(_entry("keep", anchor="b" * 40, source="trunk"))
+        new = _manifest(
+            _entry("keep", anchor="d" * 40, mode="shared", source="arg"),
+            _entry("added", path="/host/new", anchor="e" * 40),
+        )
+        kept = keep_attached_anchors(old, new)
+        assert kept.ticket == new.ticket
+        by = {r.name: r for r in kept.repos}
+        assert by["keep"] == _entry("keep", anchor="b" * 40, source="trunk")
+        assert by["added"] == new.repos[1]
+
+    def test_kept_name_with_changed_path_takes_the_new_anchor(self):
+        """A path change points at a different store, where no bookmark exists
+        to reattach -- the new anchor is real at once."""
+        old = _manifest(_entry("r", path="/host/a", anchor="b" * 40))
+        new = _manifest(_entry("r", path="/host/b", anchor="d" * 40, source="arg"))
+        assert keep_attached_anchors(old, new) == new
 
 
 class TestReadManifest:

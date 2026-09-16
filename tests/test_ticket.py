@@ -273,6 +273,25 @@ class TestStartRepoSetChange:
         assert "takes effect only after shutdown + start" in out
         assert "reattaches at the existing bookmark" in out
 
+    def test_kept_repo_launches_with_its_old_anchor(self, tmp_path):
+        """A kept repo reattaches at its existing bookmark (a child of the OLD
+        base), so the labels stamped on the recreated container must keep the
+        old anchor_base and mode -- recording the newly resolved ones would
+        make the overlap check probe the wrong base and `cld status` lie."""
+        cfg = self._cfg(tmp_path)
+        with patch("cld.ticket._docker_status", return_value="running"), \
+             patch("cld.ticket.read_manifest", return_value=self._old(tmp_path)), \
+             patch("cld.ticket.ticket_anchor_resolver", lambda cfg: lambda p, r, m: "d" * 40), \
+             patch("cld.ticket.typer.confirm", return_value=True), \
+             patch("cld.ticket._stop_and_remove"), \
+             patch("cld.ticket.forget_session_state"), \
+             patch("cld.ticket._launch") as launch:
+            start_ticket(cfg, "lide-2600", ["lide-api"], ["lide-api"])
+        [repo] = launch.call_args.args[1].repos
+        assert repo.anchor_base == "b" * 40
+        assert repo.anchor_mode == "isolated"
+        assert repo.rev_source == "trunk"
+
     def test_identical_resolved_set_skips_the_recreate(self, tmp_path, capsys):
         """Same specs re-given = plain create-or-start, no diff prompt."""
         cfg = self._cfg(tmp_path)

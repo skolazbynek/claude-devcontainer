@@ -131,7 +131,13 @@ entrypoint's reattach branch anchors on the per-repo bookmark anyway.
 `cld start <ticket> <new set>` against an existing ticket diffs the new
 resolved manifest against the labeled one (keyed by `name`; a changed `path`
 or `anchor_base` for a kept name counts as a change), prints the diff, asks to
-confirm, tears down leaving repos (as in shutdown), recreates.
+confirm, tears down leaving repos (as in shutdown), recreates. The recreated
+manifest keeps each kept repo's old `anchor_base`/`anchor_mode`
+(`keep_attached_anchors`): the workspace reattaches at its existing bookmark,
+so the old anchor is still the reality the overlap check and `cld status` must
+see -- a newly requested anchor only becomes real after shutdown + start. A
+kept name whose `path` changed points at a different store and does take the
+new anchor at once.
 
 ## 3. The effective-anchor problem
 
@@ -153,7 +159,7 @@ The derivation is the revset the entrypoint's own recovery already uses
 live container's `(anchor_base, session, mode)`,
 
 ```
-effective = heads(<anchor_base>+ & description(glob:'cld anchor: <session>*'))
+effective = heads(<anchor_base>+ & description(glob:'cld anchor: <session> *'))
             if mode == isolated and the revset is non-empty
           = anchor_base   otherwise (shared mode, or B not staged yet)
 ```

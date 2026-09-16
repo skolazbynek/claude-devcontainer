@@ -1152,11 +1152,13 @@ def repos_add(
     path: str = typer.Argument(..., help="Host path of the repo"),
     default_rev: str = typer.Option("", "--default-rev", help="Anchor revision offered at launch (default: trunk())"),
     bootstrap: bool = typer.Option(False, "--bootstrap", help="Run poetry install in the repo's pyproject_dir on first boot"),
+    mysql_config: str = typer.Option("", "--mysql-config", help="Host path of a .cnf file staged for this repo's broker/mysql access"),
 ):
     """Register a repo in ~/.config/cld/config.toml."""
     cfg = Config.from_env()  # ensures the user config exists
     setup_logging(cfg)
-    add_repo(_user_config_path(), name, path, default_rev=default_rev, bootstrap=bootstrap)
+    add_repo(_user_config_path(), name, path, default_rev=default_rev,
+             bootstrap=bootstrap, mysql_config=mysql_config)
     typer.echo(f"registered '{name}' -> {path}")
 
 

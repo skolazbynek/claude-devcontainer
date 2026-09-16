@@ -103,6 +103,7 @@ def add_repo(
     path: str,
     default_rev: str = "",
     bootstrap: bool = False,
+    mysql_config: str = "",
 ) -> None:
     """Append a ``[repos.<name>]`` table to the user config, preserving the rest."""
     validate_repo_name(name)
@@ -122,6 +123,8 @@ def add_repo(
         entry["default_rev"] = default_rev
     if bootstrap:
         entry["bootstrap"] = True
+    if mysql_config:
+        entry["mysql_config"] = mysql_config
     repos[name] = entry
     _write_atomic(config_path, doc)
 

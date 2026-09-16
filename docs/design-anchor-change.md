@@ -11,7 +11,7 @@
 >
 > **Note (2026-08-19, corrected 2026-09-16):** the enforced/exported
 > `AGENT_ANCHOR_HASH` depends on the anchor *mode* (PRODUCT_DESIGN.md §8,
-> docs/design-anchor-modes.md). Isolated mode (default): the anchor is the
+> docs/design-ticket-containers.md §3). Isolated mode (default): the anchor is the
 > scratch commit `B` itself, exactly as §4.2/§4.4 below describe -- only B's
 > own descendants are editable. Shared mode (explicit opt-in): the anchor is
 > `A`, so any pre-existing descendant of `A` -- not only descendants of `B`

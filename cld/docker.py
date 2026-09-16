@@ -276,7 +276,8 @@ def anchor_env_args(
     ``mode``: ``"isolated"`` (default) -- the entrypoint exports B itself as
     ``AGENT_ANCHOR_HASH``, so only B's own descendants are editable. ``"shared"``
     -- the entrypoint exports A (B's parent) instead, so any pre-existing
-    descendant of A is editable too (docs/design-anchor-modes.md). *revision*
+    descendant of A is editable too (docs/design-ticket-containers.md
+    section 3). *revision*
     is expected to already be resolved to a concrete hash by the caller (via
     ``resolve_anchor_checked``) when the overlap check matters; passing a
     symbolic revision still works (``resolve_anchor`` is idempotent on a hash).
@@ -451,7 +452,8 @@ def build_container_args(
     ``anchor_hash``/``anchor_mode``, when given, are stamped as host-set
     ``org.cld.anchor``/``org.cld.anchor-mode`` labels on every role including
     the plain ``cld run`` one-shot agent -- see ``resolve_anchor_checked`` and
-    docs/design-anchor-modes.md. Immutable for the container's lifetime, so
+    docs/design-ticket-containers.md section 3. Immutable for the container's
+    lifetime, so
     they're the source of truth the overlap check reads back via
     ``docker_occupant_list``.
     """
@@ -1039,7 +1041,11 @@ def docker_occupant_list() -> list[dict]:
     Two sources, one record shape
     ``{name, repo_root, anchor_base, session, mode, kind}``: v1 headless kinds
     via their ``org.cld.anchor`` labels, and ticket containers via their
-    manifest label expanded into one record per mounted repo.
+    manifest label expanded into one record per mounted repo. A ticket whose
+    manifest cannot be read still occupies its (now unknown) trees, so it
+    yields one *unverifiable* record -- empty ``repo_root``/``anchor_base``
+    plus a ``manifest_error`` -- that ``resolve_anchor_checked`` must treat as
+    a failed probe against every repo, not silently drop (fail-closed).
 
     Stopped persistent containers (ticket, agent, task-agent) still own their
     bookmarks and can be restarted into their trees, so they are included;
@@ -1073,10 +1079,11 @@ def docker_occupant_list() -> list[dict]:
         try:
             manifest = read_manifest(name)
         except (RuntimeError, ValueError, KeyError) as e:
-            log.warning(
-                "overlap check: cannot read the manifest of '%s', its trees are "
-                "invisible to the check: %s", name, e,
-            )
+            records.append({
+                "name": name, "repo_root": "", "anchor_base": "",
+                "session": name, "mode": "isolated", "kind": "ticket",
+                "manifest_error": str(e),
+            })
             continue
         for repo in manifest.repos:
             records.append({
@@ -1103,7 +1110,10 @@ def _effective_anchor(vcs, occupant: dict) -> str:
         return occupant["anchor_base"]
     revset = (
         f"heads({occupant['anchor_base']}+ & "
-        f"description(glob:'cld anchor: {occupant['session']}*'))"
+        # The trailing space before the wildcard is load-bearing: every staged
+        # description is 'cld anchor: <session> mode=<mode>' (stage_in_workspace),
+        # and without it session cld_ticket_x-1 would also match cld_ticket_x-12.
+        f"description(glob:'cld anchor: {occupant['session']} *'))"
     )
     result = vcs.run(["log", "-r", revset, "--no-graph", "-T", "commit_id", "-n", "1"])
     if result.returncode != 0:
@@ -1151,7 +1161,9 @@ def resolve_anchor_checked(
 
     Fail-closed: a probe that cannot be evaluated counts as overlap -- block
     for non-ticket callers, warn ("could not verify") for ticket callers. A
-    check that silently passes on error is worse than none.
+    check that silently passes on error is worse than none. A ticket container
+    whose manifest cannot be read has unknown repo paths, so it counts as
+    unverifiable against *every* repo checked, with the same block/warn split.
 
     jj-only -- peer-side anchor staging has no git equivalent; git repos keep
     weaker guarantees. Anchoring on a finished (reaped) sibling's deliverable
@@ -1169,7 +1181,7 @@ def resolve_anchor_checked(
     host_repo = str(Path(to_host_path(str(repo_root), cfg)).resolve())
     occupants = [
         c for c in docker_occupant_list()
-        if c["repo_root"] == host_repo and c["anchor_base"]
+        if c.get("manifest_error") or (c["repo_root"] == host_repo and c["anchor_base"])
     ]
     if not occupants:
         return anchor
@@ -1195,11 +1207,10 @@ def resolve_anchor_checked(
             "or anchor outside its tree instead."
         )
 
-    def _unverified(occupant: dict, revset: str) -> None:
+    def _unverified(occupant: dict, detail: str) -> None:
         message = (
             f"could not verify anchor {anchor[:12]} against the reach of "
-            f"{occupant['name']} ({occupant['kind']}, anchor "
-            f"{occupant['anchor_base'][:12]}, revset {revset})."
+            f"{occupant['name']} ({occupant['kind']}, {detail})."
         )
         if caller_kind == "ticket":
             log.warning("%s Proceeding: ticket overlap is warn-strength.", message)
@@ -1207,10 +1218,17 @@ def resolve_anchor_checked(
         raise RuntimeError(f"refusing to anchor on {anchor[:12]}: {message}")
 
     for occupant in occupants:
+        if manifest_error := occupant.get("manifest_error"):
+            # An unreadable ticket manifest leaves no repo paths to match, so
+            # this occupant is unverifiable against every repo the caller
+            # checks -- the same fail-closed split as a failed probe.
+            _unverified(occupant, f"unreadable manifest: {manifest_error}")
+            continue
         effective = _effective_anchor(vcs, occupant)
         inside = _probe(f"{anchor} & {effective}::")
         if inside is None:
-            _unverified(occupant, f"{anchor} & {effective}::")
+            _unverified(occupant, f"anchor {occupant['anchor_base'][:12]}, "
+                                  f"revset {anchor} & {effective}::")
         elif inside:
             _refuse_or_warn(occupant, (
                 f"{anchor[:12]} is inside the live reach of {occupant['name']} "
@@ -1221,7 +1239,8 @@ def resolve_anchor_checked(
             continue
         occupied = _probe(f"{effective} & {anchor}::")
         if occupied is None:
-            _unverified(occupant, f"{effective} & {anchor}::")
+            _unverified(occupant, f"anchor {occupant['anchor_base'][:12]}, "
+                                  f"revset {effective} & {anchor}::")
         elif occupied:
             _refuse_or_warn(occupant, (
                 f"a shared anchor at {anchor[:12]} claims the whole tree, and "

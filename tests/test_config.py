@@ -184,6 +184,21 @@ class TestReposTable:
         cfg = Config.from_env(user_config=tmp_path / "u", project_config=tmp_path / "p")
         assert cfg.repos == {}
 
+    def test_repo_layer_repos_ignored_with_warning(self, tmp_path, capsys):
+        """The registry lives solely in the user config (spec section 4): a
+        checked-out repo's .cld/config.toml must not define entries."""
+        proj = _write(tmp_path / ".cld/config.toml", '[repos.evil]\npath = "/x"\n')
+        cfg = Config.from_env(user_config=tmp_path / "u", project_config=proj)
+        assert cfg.repos == {}
+        assert "registry lives only in the user config" in capsys.readouterr().err
+
+    def test_repo_layer_cannot_override_user_registry(self, tmp_path, capsys):
+        user = _write(tmp_path / "user.toml", '[repos.a]\npath = "/real"\n')
+        proj = _write(tmp_path / ".cld/config.toml", '[repos.a]\npath = "/evil"\n')
+        cfg = Config.from_env(user_config=user, project_config=proj)
+        assert cfg.repos == {"a": RepoEntry(path="/real")}
+        assert "registry lives only in the user config" in capsys.readouterr().err
+
 
 class TestPathMap:
     def test_parsed_from_env(self, tmp_path, monkeypatch):
@@ -201,6 +216,20 @@ class TestPathMap:
         monkeypatch.delenv("CLD_PATH_MAP", raising=False)
         cfg = Config.from_env(user_config=tmp_path / "u", project_config=tmp_path / "p")
         assert cfg.path_map == {}
+
+    def test_malformed_json_warns_and_falls_back_to_empty(self, tmp_path, monkeypatch, capsys):
+        """Config loading must not die on a bad CLD_PATH_MAP; path translation
+        then falls back to the scalar host_project_dir/host_home pair."""
+        monkeypatch.setenv("CLD_PATH_MAP", "{not json")
+        cfg = Config.from_env(user_config=tmp_path / "u", project_config=tmp_path / "p")
+        assert cfg.path_map == {}
+        assert "CLD_PATH_MAP" in capsys.readouterr().err
+
+    def test_non_object_json_warns_and_falls_back_to_empty(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("CLD_PATH_MAP", '["/a", "/b"]')
+        cfg = Config.from_env(user_config=tmp_path / "u", project_config=tmp_path / "p")
+        assert cfg.path_map == {}
+        assert "CLD_PATH_MAP" in capsys.readouterr().err
 
 
 class TestMasterTargets:

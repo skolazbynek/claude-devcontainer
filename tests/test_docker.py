@@ -695,6 +695,36 @@ class TestResolveAnchorChecked:
             ) == inside
         assert "could not verify" in caplog.text
 
+    def _broken_ticket_record(self):
+        """The unverifiable record docker_occupant_list builds for a ticket
+        with an unreadable manifest: no repo paths, so it must count against
+        EVERY repo checked."""
+        return {
+            "name": "cld_ticket_broken", "repo_root": "", "anchor_base": "",
+            "session": "cld_ticket_broken", "mode": "isolated", "kind": "ticket",
+            "manifest_error": "no label",
+        }
+
+    def test_unreadable_ticket_manifest_blocks_headless_caller(self, tmp_path, jj_repo):
+        _, _, inside = self._commits(jj_repo)
+        cfg = Config(mailbox_root=str(tmp_path / "mb"))
+        with patch("cld.docker.docker_occupant_list", return_value=[self._broken_ticket_record()]):
+            with pytest.raises(RuntimeError, match="could not verify") as e:
+                resolve_anchor_checked(cfg, jj_repo.repo_root, inside, caller_kind="task-agent")
+        assert "unreadable manifest" in str(e.value)
+        assert "cld_ticket_broken" in str(e.value)
+
+    def test_unreadable_ticket_manifest_warns_ticket_caller(self, tmp_path, jj_repo, caplog):
+        _, _, inside = self._commits(jj_repo)
+        cfg = Config(mailbox_root=str(tmp_path / "mb"))
+        with caplog.at_level("WARNING"), \
+             patch("cld.docker.docker_occupant_list", return_value=[self._broken_ticket_record()]):
+            assert resolve_anchor_checked(
+                cfg, jj_repo.repo_root, inside, caller_kind="ticket",
+            ) == inside
+        assert "unreadable manifest" in caplog.text
+        assert "cld_ticket_broken" in caplog.text
+
     def test_git_backend_skips_check(self, tmp_path, git_repo):
         head = git_repo.resolve_revision("HEAD")
         cfg = Config(mailbox_root=str(tmp_path / "mb"))
@@ -797,6 +827,22 @@ class TestEffectiveAnchorDerivation:
         with patch("cld.docker.docker_occupant_list", return_value=records):
             with pytest.raises(RuntimeError, match="inside the live reach"):
                 resolve_anchor_checked(cfg, jj_repo.repo_root, scratch)
+
+    def test_sibling_prefix_session_scratch_is_not_mine(self, tmp_path, jj_repo):
+        """The description glob ends in ' *' (space before the wildcard), so
+        session x must not match the scratch of session x2 staged off the same
+        base -- a prefix collision would swap in the sibling's boundary."""
+        base = jj_repo.resolve_revision("@-")
+        jj_repo.run(["new", base])
+        (jj_repo.repo_root / ".cld-run").mkdir()
+        (jj_repo.repo_root / ".cld-run" / "anchor.json").write_text("{}\n")
+        jj_repo.run(["commit", "-m", f"cld anchor: {self.SESSION}2 mode=isolated"])
+        cfg, records = self._fleet(tmp_path, jj_repo, base)
+        # SESSION itself has no scratch commit -> its effective anchor must
+        # fall back to base A, whose reach covers A itself.
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live reach"):
+                resolve_anchor_checked(cfg, jj_repo.repo_root, base)
 
     def test_shared_occupant_keeps_base_reach(self, tmp_path, jj_repo):
         """A shared-mode occupant's effective anchor is the base itself."""
@@ -931,13 +977,18 @@ class TestDockerOccupantList:
         assert records[0]["repo_root"] == "/host/repos/lide-api"
         assert (records[1]["anchor_base"], records[1]["mode"]) == ("b" * 40, "shared")
 
-    def test_unreadable_manifest_skipped_with_warning(self, caplog):
-        with caplog.at_level("WARNING"), \
-             patch("cld.docker._docker_names_with_state",
+    def test_unreadable_manifest_becomes_unverifiable_record(self):
+        """A ticket whose manifest cannot be read still occupies its (now
+        unknown) trees: fail-closed means a record the check must trip over,
+        not a warn-and-skip that hides the ticket entirely."""
+        with patch("cld.docker._docker_names_with_state",
                    side_effect=[[], [("cld_ticket_broken", "running")]]), \
              patch("cld.docker.read_manifest", side_effect=RuntimeError("no label")):
-            assert docker_occupant_list() == []
-        assert "cld_ticket_broken" in caplog.text
+            [record] = docker_occupant_list()
+        assert record["name"] == record["session"] == "cld_ticket_broken"
+        assert record["kind"] == "ticket"
+        assert record["repo_root"] == "" and record["anchor_base"] == ""
+        assert "no label" in record["manifest_error"]
 
     def test_lists_stopped_containers_docker_side(self):
         calls = []

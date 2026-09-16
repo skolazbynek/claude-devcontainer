@@ -15,7 +15,7 @@ imports from here.
 import json
 import subprocess
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from cld.log import get_logger, log_subprocess
@@ -123,8 +123,15 @@ def manifest_labels(manifest: TicketManifest, session: str) -> dict[str, str]:
 
 
 def _split_rev(spec: str) -> tuple[str, str]:
-    """Split a ``repo[@rev]`` launch spec at the first ``@`` (so a rev may
-    itself contain ``@``, e.g. ``main@origin``)."""
+    """Split a ``repo[@rev]`` launch spec.
+
+    Rule: a spec that as a whole names an existing path on disk is a path with
+    no rev override (so ``./dir@2x`` is not misread as ``./dir`` at rev
+    ``2x``); otherwise it splits at the first ``@``, which lets a rev itself
+    contain ``@`` (``repo@main@origin`` -> rev ``main@origin``).
+    """
+    if "@" in spec and Path(spec).expanduser().exists():
+        return spec, ""
     base, sep, rev = spec.partition("@")
     if sep and not rev:
         raise RuntimeError(f"'{spec}': empty revision after '@'")
@@ -221,6 +228,32 @@ def diff_manifests(old: TicketManifest, new: TicketManifest) -> ManifestDiff:
             if r.name in old_by and old_by[r.name].identity() != r.identity()
         ),
     )
+
+
+def keep_attached_anchors(old: TicketManifest, new: TicketManifest) -> TicketManifest:
+    """Carry each kept repo's recorded anchor forward from *old* into *new*.
+
+    On a confirmed repo-set recreate a kept repo reattaches at its existing
+    bookmark, so its editable stack still descends from the OLD anchor -- the
+    launched manifest must record that reality, or the overlap check derives
+    the effective anchor from the wrong base and the ticket's real stack goes
+    invisible. The newly requested anchor only becomes real after
+    ``cld shutdown`` + ``cld start`` (a fresh lifecycle). A kept name whose
+    *path* changed points at a different store where the bookmark does not
+    exist, so its new anchor takes effect at once and is not carried.
+    """
+    old_by = {r.name: r for r in old.repos}
+    return replace(new, repos=tuple(
+        replace(
+            repo,
+            anchor_base=old_by[repo.name].anchor_base,
+            anchor_mode=old_by[repo.name].anchor_mode,
+            rev_source=old_by[repo.name].rev_source,
+        )
+        if repo.name in old_by and old_by[repo.name].path == repo.path
+        else repo
+        for repo in new.repos
+    ))
 
 
 def read_manifest(container: str) -> TicketManifest:

@@ -45,18 +45,19 @@ cld_detect_backend() {
 
 cld_recover_anchor() {
     # Recover AGENT_ANCHOR_HASH on a warm restart or bookmark reattach: find
-    # the ancestor of $bookmark carrying our own 'cld anchor: <session>[
-    # mode=<mode>]' description (glob-matched -- `jj commit -m` appends a
+    # the ancestor of $bookmark carrying our own 'cld anchor: <session>
+    # mode=<mode>' description (glob-matched -- `jj commit -m` appends a
     # trailing newline to single-line descriptions, so an exact match against
-    # the bare text never hits), then read that scratch commit's own
+    # the bare text never hits; the space before the wildcard keeps session
+    # x-1 from matching x-12's scratch), then read that scratch commit's own
     # description back to recover the mode it was staged with. isolated: the
     # scratch commit itself is the anchor. shared: its parent is (see
-    # docs/design-anchor-modes.md; mirrors the first-launch branch of
-    # cld_boot_workspace and cld.vcs.scratch.stage_in_workspace).
+    # docs/design-ticket-containers.md section 3; mirrors the first-launch
+    # branch of cld_boot_workspace and cld.vcs.scratch.stage_in_workspace).
     # Args: $1=bookmark $2=session. cwd must be inside the jj store.
     local bookmark="$1" session="$2" scratch_hash desc
     scratch_hash=$(jj log --no-graph -n 1 \
-        -r "heads(ancestors(${bookmark}) & description(glob:'cld anchor: ${session}*'))" \
+        -r "heads(ancestors(${bookmark}) & description(glob:'cld anchor: ${session} *'))" \
         -T commit_id 2>/dev/null || true)
     [ -n "$scratch_hash" ] || return 0
     desc=$(jj log --no-graph -n 1 -r "$scratch_hash" -T description 2>/dev/null || true)
@@ -158,7 +159,7 @@ cld_boot_workspace() {
     # isolated (default): the anchor is B, so only B's own descendants are
     # editable. shared: the anchor is A itself, so any pre-existing descendant
     # of A (not just of B) is in the container's editable tree -- see
-    # docs/design-anchor-modes.md. cld_recover_anchor mirrors this choice on a
+    # docs/design-ticket-containers.md section 3. cld_recover_anchor mirrors this choice on a
     # later restart/reattach.
     if [ "$mode" = "shared" ]; then
         CLD_BOOT_ANCHOR="$a_hash"

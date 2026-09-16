@@ -113,16 +113,48 @@ class TestResolveSelf:
         monkeypatch.setenv("SESSION_NAME", "cld_ticket_lide-1")
         assert resolve_self() == ("cld_ticket_lide-1", Path("/var/cld/mailboxes"))
 
-    def test_explicit_ticket_argument(self):
+    def _known(self, monkeypatch, *tickets):
+        monkeypatch.setattr(
+            identity_mod, "list_cld_containers",
+            lambda kind: [self._ticket(t) if isinstance(t, str) else self._ticket(*t)
+                          for t in tickets],
+        )
+
+    def test_explicit_ticket_argument(self, monkeypatch):
+        self._known(monkeypatch, "cld_ticket_lide-2600")
         assert resolve_self("LIDE-2600") == ("cld_ticket_lide-2600", self.mailbox_root)
 
     def test_cld_ticket_env(self, monkeypatch):
         monkeypatch.setenv("CLD_TICKET", "LIDE-2600")
+        self._known(monkeypatch, "cld_ticket_lide-2600")
         assert resolve_self() == ("cld_ticket_lide-2600", self.mailbox_root)
 
     def test_argument_beats_env(self, monkeypatch):
         monkeypatch.setenv("CLD_TICKET", "LIDE-1")
+        self._known(monkeypatch, "cld_ticket_lide-1", "cld_ticket_lide-2")
         assert resolve_self("LIDE-2")[0] == "cld_ticket_lide-2"
+
+    def test_explicit_stopped_ticket_is_valid(self, monkeypatch):
+        """Existence, not liveness, validates an explicit ticket: a stopped
+        container still owns its mailbox."""
+        self._known(monkeypatch, ("cld_ticket_lide-1", "stopped"))
+        assert resolve_self("LIDE-1") == ("cld_ticket_lide-1", self.mailbox_root)
+
+    def test_unknown_explicit_ticket_errors_naming_existing(self, monkeypatch):
+        """A typo'd --ticket must not silently attribute sends to a mailbox
+        nothing reads."""
+        self._known(monkeypatch, "cld_ticket_lide-1")
+        with pytest.raises(RuntimeError) as exc:
+            resolve_self("ghost")
+        assert "cld_ticket_ghost" in str(exc.value)
+        assert "cld_ticket_lide-1" in str(exc.value)
+
+    def test_unknown_cld_ticket_env_errors(self, monkeypatch):
+        monkeypatch.setenv("CLD_TICKET", "ghost")
+        self._known(monkeypatch)
+        with pytest.raises(RuntimeError, match="no ticket container 'cld_ticket_ghost'") as exc:
+            resolve_self()
+        assert "none" in str(exc.value)
 
     def test_single_running_ticket_is_self(self, monkeypatch):
         monkeypatch.setattr(
