@@ -9,14 +9,15 @@
 > § *Delegated anchor work* for the current wire and staging flow. Goals,
 > invariants, and the descendant contract below still apply.
 >
-> **Note (2026-08-19):** `AGENT_ANCHOR_HASH` is now `A` itself, not the
-> scratch commit `B` that §4.2/§4.4 below describe as "== AGENT_ANCHOR_HASH".
-> `B` still exists and still carries `.cld-run/*`, but it is scratch-staging
-> plumbing, not the enforced boundary. `assert_descendant` / the in-container
-> `vcs_assert_descendant` guard check against `A`, so a container may touch
-> any pre-existing descendant of `A` -- not only descendants of `B` -- per
-> the anchor descendant-tree contract (touch rights follow the anchor, not
-> container-created content). See CLAUDE.md § *Anchor change contract*.
+> **Note (2026-08-19, corrected 2026-09-16):** the enforced/exported
+> `AGENT_ANCHOR_HASH` depends on the anchor *mode* (PRODUCT_DESIGN.md §8,
+> docs/design-anchor-modes.md). Isolated mode (default): the anchor is the
+> scratch commit `B` itself, exactly as §4.2/§4.4 below describe -- only B's
+> own descendants are editable. Shared mode (explicit opt-in): the anchor is
+> `A`, so any pre-existing descendant of `A` -- not only descendants of `B`
+> -- is editable. An earlier revision of this note claimed the anchor is
+> always `A`; that contradicted the entrypoint's actual behavior and is the
+> documented contradiction the v2 spec settles.
 
 ## 1. Goal & invariant
 

@@ -156,3 +156,59 @@ class TestStageFromEnv:
         monkeypatch.delenv("SESSION_NAME", raising=False)
         with pytest.raises(RuntimeError, match="SESSION_NAME is required"):
             stage_from_env()
+
+
+class TestStageFromEnvDefaultPayload:
+    """`--default-payload` (ticket kind): no AGENT_SCRATCH, the session-marker
+    payload is synthesized in-container (design-ticket-containers.md 4.2)."""
+
+    def test_stages_without_agent_scratch(self, jj_repo, tmp_path, monkeypatch):
+        anchor = _add_second_commit(jj_repo.repo_root)
+        peer = _make_peer_workspace(jj_repo, anchor, tmp_path)
+
+        monkeypatch.setenv("SESSION_NAME", "cld_ticket_lide-2600")
+        monkeypatch.setenv("WORKSPACE_CURRENT", str(peer))
+        monkeypatch.delenv("AGENT_SCRATCH", raising=False)
+        b_hash = stage_from_env(default_payload=True)
+
+        # B's shape is unchanged: session marker under .cld-run/, the
+        # `cld anchor: <session> mode=<mode>` description.
+        show = subprocess.run(
+            ["jj", "log", "-r", b_hash, "--no-graph", "--summary", "-T", "description"],
+            cwd=jj_repo.repo_root, check=True, capture_output=True, text=True,
+        )
+        assert f"{SCRATCH_DIR}/session" in show.stdout
+        assert "cld anchor: cld_ticket_lide-2600 mode=isolated" in show.stdout
+
+    def test_session_marker_content_is_session_name(self, jj_repo, tmp_path, monkeypatch):
+        anchor = _add_second_commit(jj_repo.repo_root)
+        peer = _make_peer_workspace(jj_repo, anchor, tmp_path)
+
+        monkeypatch.setenv("SESSION_NAME", "cld_ticket_t1")
+        monkeypatch.setenv("WORKSPACE_CURRENT", str(peer))
+        monkeypatch.delenv("AGENT_SCRATCH", raising=False)
+        stage_from_env(default_payload=True)
+
+        assert (peer / SCRATCH_DIR / "session").read_text() == "cld_ticket_t1\n"
+
+    def test_mode_env_still_lands_in_description(self, jj_repo, tmp_path, monkeypatch):
+        anchor = _add_second_commit(jj_repo.repo_root)
+        peer = _make_peer_workspace(jj_repo, anchor, tmp_path)
+
+        monkeypatch.setenv("SESSION_NAME", "cld_ticket_t2")
+        monkeypatch.setenv("WORKSPACE_CURRENT", str(peer))
+        monkeypatch.setenv("AGENT_ANCHOR_MODE", "shared")
+        b_hash = stage_from_env(default_payload=True)
+
+        desc = subprocess.run(
+            ["jj", "log", "-r", b_hash, "--no-graph", "-T", "description"],
+            cwd=jj_repo.repo_root, check=True, capture_output=True, text=True,
+        ).stdout
+        assert "mode=shared" in desc
+
+    def test_env_path_still_requires_agent_scratch(self, jj_repo, monkeypatch):
+        """The v1 wire keeps its hard requirement when the flag is off."""
+        monkeypatch.setenv("SESSION_NAME", "sess_env")
+        monkeypatch.delenv("AGENT_SCRATCH", raising=False)
+        with pytest.raises(RuntimeError, match="AGENT_SCRATCH is required"):
+            stage_from_env(default_payload=False)

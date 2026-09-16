@@ -691,6 +691,27 @@ def ticket_repo_files(manifest: TicketManifest) -> str:
     return ";".join(parts)
 
 
+def ticket_repo_bootstrap(manifest: TicketManifest, cfg: Config) -> str:
+    """Encode which repos want a first-boot ``poetry install`` as ``CLD_REPO_BOOTSTRAP``.
+
+    Format ``<name>=<pyproject subdir>`` joined by ``;``; repos without the
+    registry ``bootstrap`` key (ad-hoc repos included) are omitted. The subdir
+    is the repo's own ``pyproject_dir`` (``.cld/config.toml``), default ``.``
+    -- resolved host-side like ``ticket_repo_files`` (design section 4.2).
+    """
+    parts: list[str] = []
+    for repo in manifest.repos:
+        entry = cfg.repos.get(repo.name)
+        if not entry or not entry.bootstrap:
+            continue
+        repo_config = Path(repo.path) / ".cld" / "config.toml"
+        subdir = "."
+        if repo_config.is_file():
+            subdir = _load_toml(repo_config).get("pyproject_dir", ".") or "."
+        parts.append(f"{repo.name}={subdir}")
+    return ";".join(parts)
+
+
 def build_ticket_container_args(manifest: TicketManifest, cfg: Config) -> list[str]:
     """Build the ``docker run`` argument list for a ticket container (v2).
 
@@ -762,6 +783,10 @@ def build_ticket_container_args(manifest: TicketManifest, cfg: Config) -> list[s
     if repo_files := ticket_repo_files(manifest):
         args += ["-e", f"CLD_REPO_FILES={repo_files}"]
         log.debug("Workspace files to link: %s", repo_files)
+
+    if bootstrap := ticket_repo_bootstrap(manifest, cfg):
+        args += ["-e", f"CLD_REPO_BOOTSTRAP={bootstrap}"]
+        log.debug("Bootstrap repos: %s", bootstrap)
 
     # Per-repo MySQL secrets, recomputed from the registry on every recreate
     # (the manifest carries identity facts only -- design section 2.1). Ad-hoc

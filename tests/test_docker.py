@@ -28,6 +28,7 @@ from cld.docker import (
     stage_broker,
     task_agent_container_name,
     ticket_container_name,
+    ticket_repo_bootstrap,
     ticket_repo_files,
     ticket_slug,
     to_host_path,
@@ -832,6 +833,19 @@ class TestBuildTicketContainerArgs:
         args = build_ticket_container_args(manifest, cfg)
         assert _env_value(args, "CLD_REPO_FILES") is None
 
+    def test_bootstrap_env_from_registry(self, tmp_path, monkeypatch):
+        manifest, cfg = self._setup(
+            tmp_path, monkeypatch,
+            repos={"lide-api": RepoEntry(path=str(tmp_path / "lide-api"), bootstrap=True)},
+        )
+        args = build_ticket_container_args(manifest, cfg)
+        assert _env_value(args, "CLD_REPO_BOOTSTRAP") == "lide-api=."
+
+    def test_no_bootstrap_env_when_nothing_opted_in(self, tmp_path, monkeypatch):
+        manifest, cfg = self._setup(tmp_path, monkeypatch)
+        args = build_ticket_container_args(manifest, cfg)
+        assert _env_value(args, "CLD_REPO_BOOTSTRAP") is None
+
     def test_per_repo_mysql_secret_from_registry(self, tmp_path, monkeypatch):
         cnf = tmp_path / "lide.cnf"
         cnf.write_text("[client]\n")
@@ -885,3 +899,31 @@ class TestTicketRepoFiles:
             RepoManifestEntry(name="a", path=str(tmp_path / "a"), anchor_base="h"),
         ))
         assert ticket_repo_files(manifest) == ""
+
+
+class TestTicketRepoBootstrap:
+    def _manifest(self, tmp_path, *names):
+        return TicketManifest(ticket="t", repos=tuple(
+            RepoManifestEntry(name=name, path=str(tmp_path / name), anchor_base="h")
+            for name in names
+        ))
+
+    def test_registry_optin_with_pyproject_dir(self, tmp_path):
+        cld_dir = tmp_path / "a" / ".cld"
+        cld_dir.mkdir(parents=True)
+        (cld_dir / "config.toml").write_text('pyproject_dir = "api"\n')
+        (tmp_path / "b").mkdir()
+        manifest = self._manifest(tmp_path, "a", "b")
+        cfg = Config(repos={
+            "a": RepoEntry(path=str(tmp_path / "a"), bootstrap=True),
+            "b": RepoEntry(path=str(tmp_path / "b"), bootstrap=True),
+        })
+        assert ticket_repo_bootstrap(manifest, cfg) == "a=api;b=."
+
+    def test_default_off_and_adhoc_repos_omitted(self, tmp_path):
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        manifest = self._manifest(tmp_path, "a", "b")
+        # a: registered without bootstrap; b: ad-hoc (no registry entry).
+        cfg = Config(repos={"a": RepoEntry(path=str(tmp_path / "a"))})
+        assert ticket_repo_bootstrap(manifest, cfg) == ""

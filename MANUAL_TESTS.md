@@ -346,3 +346,169 @@ GRAPHQL_URL_ALLOWLIST="allowed.example" bash -c '
   echo "rc=$?"'
 # expect: denied: host 'evil.com' is not in GRAPHQL_URL_ALLOWLIST ...  /  rc=3
 ```
+
+---
+
+## 8. Ticket container boot (cld v2, `TICKET_MODE`)
+
+Run from the **host** (not inside a container). Prerequisites: image rebuilt
+after the entrypoint change (`cld build`), at least two jj test repos
+registered (`cld repos add <name> <path>`).
+
+Until the W4 lifecycle verbs land, drive launches directly from the W2/W3
+building blocks:
+
+```bash
+cld_ticket_run() {  # usage: cld_ticket_run <ticket> <repo> [repo...]
+  python3 - "$@" <<'PY'
+import subprocess, sys
+from cld.config import Config
+from cld.docker import build_ticket_container_args
+from cld.manifest import resolve_manifest
+cfg = Config.from_env()
+manifest = resolve_manifest(sys.argv[1], list(sys.argv[2:]), cfg.repos)
+args = build_ticket_container_args(manifest, cfg)
+subprocess.run(["docker", "run", "-d", *args, "claude-devcontainer:latest"], check=True)
+PY
+}
+```
+
+With W4, the same checks apply behind `cld start` / `cld stop` /
+`cld restart` / `cld shutdown`.
+
+### 8.1 Cold start (single repo, isolated)
+
+**Steps**
+
+1. `cld_ticket_run smoke-t1 <repo-a>`
+2. Wait for boot: `docker exec cld_ticket_smoke-t1 ls /tmp/cld-ticket-ready`
+   (retry until present; boot logs: `docker logs cld_ticket_smoke-t1`).
+
+**Observe / confirm**
+
+- Logs show, in order: `[cld] repo 1/1: <repo-a> (base=<hash12>, mode=isolated)`,
+  `[cld] first launch, base=…`, `[cld] anchor=… (mode=isolated, base=…,
+  scratch=…)`, `[cld] wrote /workspace/smoke-t1/CLAUDE.md`,
+  `[cld] ticket 'smoke-t1' ready (1 repos)`.
+- In the repo on the host: `jj bookmark list` shows `cld_ticket_smoke-t1`;
+  `jj log -r 'description(glob:"cld anchor: cld_ticket_smoke-t1*")'` shows the
+  scratch commit B as a child of the anchor base, description ending
+  `mode=isolated`.
+- `docker exec cld_ticket_smoke-t1 cat /workspace/smoke-t1/CLAUDE.md` — table
+  row per repo (name, anchor, mode, backend) and the anchor-contract sentence.
+- `docker exec cld_ticket_smoke-t1 cat /workspace/smoke-t1/<repo-a>/.cld-run/session`
+  prints `cld_ticket_smoke-t1` (the default payload; no `AGENT_SCRATCH` env
+  on the container: `docker inspect` shows none).
+- Watchman snapshots: edit a file via
+  `docker exec cld_ticket_smoke-t1 sh -c 'echo x >> /workspace/smoke-t1/<repo-a>/README.md'`,
+  then within ~10 s the host-side `jj log -r cld_ticket_smoke-t1@` (workspace
+  working copy) shows the edit.
+- Single-session lock: `docker exec -d cld_ticket_smoke-t1 claude -p 'sleep'`
+  then a second `docker exec cld_ticket_smoke-t1 claude -p hi` refuses with
+  `a claude session is already live` naming pid + start time.
+
+**Debug if it fails**
+
+- No sentinel + exit: `docker logs` names the failing repo — the boot is
+  fail-fast per repo by design.
+- `Error: repo '<name>': no origin mount` → the manifest and the `-v` mounts
+  disagree; inspect `docker inspect --format '{{json .Mounts}}'`.
+
+### 8.2 Warm start (stop / start)
+
+**Steps**
+
+1. `docker exec cld_ticket_smoke-t1 sh -c 'touch /workspace/smoke-t1/<repo-a>/warm-marker'`
+2. `docker stop cld_ticket_smoke-t1` — expect a fast, clean stop (TERM trap
+   exits 0; **no** bookmark forgetting: `jj bookmark list` on the host still
+   shows `cld_ticket_smoke-t1`).
+3. `docker start cld_ticket_smoke-t1`
+
+**Observe / confirm**
+
+- Logs (second boot) show `[cld] warm restart: reusing existing workspace at
+  /workspace/smoke-t1/<repo-a>` — not `first launch`, no new scratch commit
+  (host `jj log` shows exactly one `cld anchor:` commit for the session).
+- `warm-marker` still exists in the workspace (container layer persisted).
+- CLAUDE.md was regenerated (mtime changed), same content.
+
+### 8.3 Restart-recreate (rm + rerun) reattaches at bookmarks
+
+**Steps**
+
+1. Make and snapshot an edit (as in 8.1), note `jj log -r cld_ticket_smoke-t1`
+   on the host.
+2. `docker rm -f cld_ticket_smoke-t1`
+3. `cld_ticket_run smoke-t1 <repo-a>` again (same ticket; with W4 this is
+   `cld restart`, which reuses the labeled manifest).
+
+**Observe / confirm**
+
+- Logs show `[cld] reattaching workspace 'cld_ticket_smoke-t1'` — not first
+  launch; the anchor line is absent but the recovered anchor governs (verify:
+  no second `cld anchor:` commit appears).
+- The bookmark still points where it did before the rm; the snapshotted edit
+  is reachable from it.
+- Venvs/caches are gone (expected: container layer died) — a bootstrap repo
+  (8.6) reruns poetry install.
+
+### 8.4 Multi-repo ticket
+
+**Steps**
+
+1. `cld shutdown`-equivalent cleanup of 8.1-8.3 first (host-side per repo:
+   `jj workspace forget cld_ticket_smoke-t1 && jj bookmark forget
+   cld_ticket_smoke-t1`; `docker rm -f cld_ticket_smoke-t1`).
+2. `cld_ticket_run smoke-t2 <repo-a> <repo-b>`
+
+**Observe / confirm**
+
+- Progress lines `[cld] repo 1/2: …` and `[cld] repo 2/2: …`; ready line says
+  `(2 repos)`.
+- Both repos' stores gain a `cld_ticket_smoke-t2` bookmark + workspace; the
+  ticket root holds both subdirs; CLAUDE.md lists two rows.
+- Per-repo `ignore_gitignore`: give repo-a a `.cld/config.toml` with
+  `ignore_gitignore = [".env"]` and an origin `.env` before launch — the boot
+  links it (`[INFO] Linked .env from origin`) into repo-a's workspace only.
+- Kill one repo's mount assumption deliberately (register a bogus path and
+  launch): the boot exits non-zero naming that repo, no sentinel.
+
+### 8.5 Shared-anchor repo
+
+**Steps**
+
+1. `cld_ticket_run` variant with `anchor_mode="shared"` for one repo (pass
+   `shared=["<repo-a>"]` to `resolve_manifest`; with W4:
+   `cld start smoke-t3 <repo-a> --shared-anchor <repo-a>`).
+
+**Observe / confirm**
+
+- The anchor log line says `mode=shared` and `anchor=` equals `base=` (A
+  itself, not the scratch hash).
+- The scratch commit still exists with description `… mode=shared` (recovery
+  channel), but pre-existing descendants of A count as editable.
+- Recreate (8.3 steps) on the shared repo recovers A, not B: after rerun, the
+  boot's recovered anchor equals the original base (check `docker exec …
+  cat /workspace/smoke-t3/CLAUDE.md` anchor column).
+
+### 8.6 Bootstrap key
+
+**Steps**
+
+1. Register a python repo with `cld repos add <name> <path> --bootstrap`
+   (and, if its pyproject lives in a subdir, `pyproject_dir` in the repo's
+   `.cld/config.toml`).
+2. Launch a ticket with it.
+
+**Observe / confirm**
+
+- `docker inspect` env contains `CLD_REPO_BOOTSTRAP=<name>=<subdir>`.
+- Logs show `[cld] repo '<name>': poetry install in <subdir>` and the boot
+  takes correspondingly longer; afterwards
+  `docker exec … sh -c 'cd /workspace/<slug>/<name>/<subdir> && poetry env info -p'`
+  names a venv.
+- A repo **without** the key shows no poetry line at all (v1's unconditional
+  depth-3 scan is gone in ticket mode).
+- Failure tolerance: point bootstrap at a repo whose `poetry install` fails
+  (e.g. unreachable index) — boot logs `[WARN] poetry install failed for
+  <name> (continuing)` and still reaches the ready sentinel.

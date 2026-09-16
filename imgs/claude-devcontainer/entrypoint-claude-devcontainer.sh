@@ -8,130 +8,138 @@ MAILBOX_OK=$?
 
 BOOKMARK="${SESSION_NAME:?SESSION_NAME must be set}"
 
-# Recover AGENT_ANCHOR_HASH on a warm restart or bookmark reattach: find the
-# ancestor of $BOOKMARK carrying our own 'cld anchor: <session>[ mode=<mode>]'
-# description (glob-matched -- `jj commit -m` appends a trailing newline to
-# single-line descriptions, so an exact match against the bare text never
-# hits), then read that scratch commit's own description back to recover the
-# mode it was staged with. isolated: the scratch commit itself is the anchor.
-# shared: its parent is (see docs/design-anchor-modes.md; mirrors the
-# first-launch branch below and cld.vcs.scratch.stage_in_workspace).
-_cld_recover_anchor() {
-    local scratch_hash desc
-    scratch_hash=$(jj log --no-graph -n 1 \
-        -r "heads(ancestors(${BOOKMARK}) & description(glob:'cld anchor: ${SESSION_NAME}*'))" \
-        -T commit_id 2>/dev/null || true)
-    [ -n "$scratch_hash" ] || return 0
-    desc=$(jj log --no-graph -n 1 -r "$scratch_hash" -T description 2>/dev/null || true)
-    case "$desc" in
-        *"mode=shared"*)
-            jj log --no-graph -n 1 -r "parents($scratch_hash)" -T commit_id 2>/dev/null || true
-            ;;
-        *)
-            echo "$scratch_hash"
-            ;;
-    esac
-}
+# Ticket container (v2): per-repo boot loop over the launch manifest, then its
+# own after-loop steps and PID-1 idle. It never reaches the v1 single-repo
+# flow below (docs/design-ticket-containers.md section 4).
+if [ -n "${TICKET_MODE:-}" ]; then
+    : "${CLD_TICKET_MANIFEST:?CLD_TICKET_MANIFEST must be set in TICKET_MODE}"
+    if ! command -v jq &>/dev/null; then
+        echo "Error: TICKET_MODE requires jq in the image" >&2
+        exit 1
+    fi
+    TICKET=$(printf '%s' "$CLD_TICKET_MANIFEST" | jq -r '.ticket')
+    TICKET_ROOT="/workspace/${TICKET}"
+    N_REPOS=$(printf '%s' "$CLD_TICKET_MANIFEST" | jq '.repos | length')
+    mkdir -p "$TICKET_ROOT"
+    TICKET_ROWS=""
+    REPO_INDEX=0
+
+    # Workspaces live inside the container's ephemeral filesystem under the
+    # ticket root. jj stores everything into each origin's .jj/repo/store via
+    # its RW bind mount, so bookmarks and (watchman-driven) snapshots persist
+    # across `docker rm && docker run` even though the workspace dirs do not.
+    # Per-repo boot failure is fatal for the whole boot (no sentinel): a
+    # ticket with a silently missing repo is worse than a failed start.
+    while IFS= read -r _repo_json; do
+        REPO_INDEX=$((REPO_INDEX + 1))
+        REPO_NAME=$(jq -r '.name' <<<"$_repo_json")
+        REPO_BASE=$(jq -r '.anchor_base' <<<"$_repo_json")
+        REPO_MODE=$(jq -r '.anchor_mode' <<<"$_repo_json")
+        REPO_ORIGIN="/workspace/origin/${REPO_NAME}"
+        REPO_WORKSPACE="${TICKET_ROOT}/${REPO_NAME}"
+        echo "[cld] repo ${REPO_INDEX}/${N_REPOS}: ${REPO_NAME} (base=${REPO_BASE:0:12}, mode=${REPO_MODE})"
+        if [ ! -d "$REPO_ORIGIN" ]; then
+            echo "Error: repo '${REPO_NAME}': no origin mount at ${REPO_ORIGIN}" >&2
+            exit 1
+        fi
+        REPO_BACKEND=$(cld_detect_backend "$REPO_ORIGIN")
+        case "$REPO_BACKEND" in
+            jj)
+                if ! cld_boot_workspace "$REPO_ORIGIN" "$REPO_WORKSPACE" \
+                        "$BOOKMARK" "$REPO_BASE" "$REPO_MODE" default; then
+                    echo "Error: repo '${REPO_NAME}': boot failed" >&2
+                    exit 1
+                fi
+                cld_enable_watchman "$REPO_WORKSPACE"
+                ;;
+            git)
+                if ! cld_boot_worktree "$REPO_ORIGIN" "$REPO_WORKSPACE" \
+                        "$BOOKMARK" "$REPO_BASE"; then
+                    echo "Error: repo '${REPO_NAME}': boot failed" >&2
+                    exit 1
+                fi
+                ;;
+            *)
+                echo "Error: repo '${REPO_NAME}': no supported VCS at ${REPO_ORIGIN} (expected .jj/ or .git)" >&2
+                exit 1
+                ;;
+        esac
+        link_workspace_files "$REPO_NAME" "$REPO_ORIGIN" "$REPO_WORKSPACE"
+        # Optional per-repo bootstrap, opted in via the registry `bootstrap`
+        # key and resolved host-side into CLD_REPO_BOOTSTRAP (<name>=<pyproject
+        # subdir>;...). Replaces v1's unconditional depth-3 poetry scan, which
+        # does not scale to N repos.
+        BOOTSTRAP_DIR=$(cld_repo_kv_get "${CLD_REPO_BOOTSTRAP:-}" "$REPO_NAME")
+        if [ -n "$BOOTSTRAP_DIR" ] && command -v poetry &>/dev/null; then
+            echo "[cld] repo '${REPO_NAME}': poetry install in ${BOOTSTRAP_DIR}"
+            (cd "$REPO_WORKSPACE/$BOOTSTRAP_DIR" && \
+                poetry install --no-interaction -q >/dev/null 2>&1) || \
+                echo "[WARN] poetry install failed for ${REPO_NAME} (continuing)"
+        fi
+        REPO_ANCHOR="${CLD_BOOT_ANCHOR:-$REPO_BASE}"
+        TICKET_ROWS="${TICKET_ROWS}| ${REPO_NAME} | ${REPO_ANCHOR:0:12} | ${REPO_MODE} | ${REPO_BACKEND} |
+"
+    done < <(printf '%s' "$CLD_TICKET_MANIFEST" | jq -c '.repos[]')
+
+    write_ticket_claude_md "$TICKET_ROOT" "$TICKET" "$TICKET_ROWS"
+    build_claude_config
+
+    # Claude wrapper: permission-skip and baked skills stay in-container; the
+    # model comes per-invocation from `cld claude -- --model ...`, never baked
+    # (design 4.3). The flock is the single-session refusal (design 4.5): one
+    # live harness session per ticket container (POC); the lock file carries
+    # pid + start time so the refusal can name the holder.
+    CLAUDE_BIN=$(which claude)
+    cat > /tmp/bin/claude <<EOF
+#!/bin/bash
+exec 9>>/tmp/cld-session.lock
+if ! flock -n 9; then
+    echo "Error: a claude session is already live in this ticket container:" >&2
+    sed 's/^/  /' /tmp/cld-session.lock >&2
+    echo "One session per ticket (POC) -- wait for it to end, or use it." >&2
+    exit 1
+fi
+printf 'pid=%s start=%s\n' "\$\$" "\$(date -Is)" > /tmp/cld-session.lock
+exec $CLAUDE_BIN --dangerously-skip-permissions --add-dir /opt/cld "\$@"
+EOF
+    chmod +x /tmp/bin/claude
+
+    # /tmp (not /run, which is root-owned 755) is writable by the non-root
+    # container user.
+    touch /tmp/cld-ticket-ready
+    echo "[cld] ticket '${TICKET}' ready (${N_REPOS} repos)"
+
+    # PID 1 idles; harness sessions arrive via `docker exec` from the host.
+    # Unlike v1 master, TERM (docker stop) tears nothing down: stop is the
+    # *pause* verb, and all bookmark/workspace forgetting lives host-side in
+    # `cld shutdown` (design 4.3).
+    trap 'exit 0' TERM INT
+    sleep infinity &
+    wait $!
+    exit 0
+fi
 
 cd "$WORKSPACE_ORIGIN"
 
-# Workspace lives inside the container's ephemeral filesystem at
-# /workspace/current. jj stores everything into the origin's .jj/repo/store via
-# the RW bind mount at $WORKSPACE_ORIGIN, so bookmarks and (watchman-driven)
-# snapshots persist across `docker rm && docker run` even though the workspace
-# directory itself does not.
+# v1 single-repo boot: the three-branch workspace logic (warm restart /
+# reattach / first launch) lives in cld_boot_workspace (vcs-lib.sh), shared
+# with the ticket loop above. Base revision comes from AGENT_REVISION_HINT (a
+# resolved hash from the host, or an unresolved revset when a `cld master`
+# delegated to this peer; see docs/design-master-sibling-launch.md).
 #
-# Invariant: bookmark $BOOKMARK exists in the origin store <=> a live or
-# restart-paused lifecycle owns this session. `cld <role> restart` preserves
-# the bookmark (reattach at its tip). `cld <role> shutdown` forgets it so the
-# next launch is a fresh lifecycle honoring -r.
-# Forget any workspace already registered under $BOOKMARK before adding. A
-# prior `cld <role> shutdown` forgets the bookmark but NOT the workspace, so
-# on a fresh first-launch the stale registration would make `jj workspace add
-# --name` fail with "Workspace named X already exists" -- silently, since
-# there's no set -e -- and leave /workspace/current an empty dir. No-op when
-# absent (first-ever launch).
-#
-# FIRST_LAUNCH records which of the three branches below we took. The brief
-# lives in scratch commit B (a child of anchor A), so every descendant
-# carries it and file presence can no longer tell a first launch from a
-# restart -- only this flag can.
-FIRST_LAUNCH=0
-if [ -e /workspace/current/.jj ]; then
-    # Warm restart: `docker start` of a stopped container (not `docker rm &&
-    # docker run`). The ephemeral /workspace/current and its jj workspace
-    # registration persisted along with the container's writable layer, so
-    # installed packages, history, and in-progress edits are all intact. Do
-    # NOT forget + re-add -- `jj workspace add` refuses a non-empty dir and
-    # would crash the boot (exit 1). Reuse the workspace in place, reconcile a
-    # possibly-stale working copy (a sibling workspace on the same origin store
-    # may have advanced it), and recover the anchor for downstream consumers.
-    echo "[cld] warm restart: reusing existing workspace at /workspace/current"
-    (cd /workspace/current && jj workspace update-stale 2>/dev/null || true)
-    AGENT_ANCHOR_HASH=$(_cld_recover_anchor)
-    export AGENT_ANCHOR_HASH
-else
-jj workspace forget "$BOOKMARK" 2>&1 || true
-
-if jj bookmark list -T 'name ++ "\n"' | grep -qx "$BOOKMARK"; then
-    echo "[cld] reattaching workspace '$BOOKMARK'"
-    if ! jj workspace add --name "$BOOKMARK" -r "$BOOKMARK" /workspace/current; then
-        echo "Error: jj workspace add failed (reattach)" >&2
-        exit 1
-    fi
-    AGENT_ANCHOR_HASH=$(_cld_recover_anchor)
-    export AGENT_ANCHOR_HASH
-else
-    # First launch. Base revision comes from AGENT_REVISION_HINT (a resolved
-    # hash from the host, or an unresolved revset when a `cld master`
-    # delegated to this peer; see docs/design-master-sibling-launch.md).
-    # Scratch commit B (child of anchor A, carrying `.cld-run/*`) is staged
-    # INSIDE /workspace/current by `python3 -m cld.vcs.scratch`, so the
-    # origin working copy is never touched -- crucial for the common jj case
-    # where the user's @ is A itself.
-    if [ -z "${AGENT_SCRATCH:-}" ]; then
-        echo "Error: AGENT_SCRATCH is required on first launch" >&2
-        exit 1
-    fi
-    FIRST_LAUNCH=1
-    BASE_REV="${AGENT_REVISION_HINT:-@}"
-    if ! A_HASH=$(jj log --no-graph -n 1 -r "$BASE_REV" -T commit_id 2>/dev/null); then
-        echo "Error: could not resolve AGENT_REVISION_HINT='$BASE_REV'" >&2
-        exit 1
-    fi
-    echo "[cld] first launch, base=${A_HASH:0:12}"
-    if ! jj workspace add --name "$BOOKMARK" -r "$A_HASH" /workspace/current; then
-        echo "Error: jj workspace add failed (first launch)" >&2
-        exit 1
-    fi
-    if ! B_HASH=$(cd /workspace/current && python3 -m cld.vcs.scratch); then
-        echo "Error: peer-side anchor staging failed" >&2
-        exit 1
-    fi
-    # isolated (default): AGENT_ANCHOR_HASH is B, so only B's own descendants
-    # are editable. shared: AGENT_ANCHOR_HASH is A itself, so any pre-existing
-    # descendant of A (not just of B) is in the container's editable tree --
-    # see docs/design-anchor-modes.md. _cld_recover_anchor mirrors this choice
-    # on a later restart/reattach.
-    AGENT_ANCHOR_MODE="${AGENT_ANCHOR_MODE:-isolated}"
-    if [ "$AGENT_ANCHOR_MODE" = "shared" ]; then
-        AGENT_ANCHOR_HASH="$A_HASH"
-    else
-        AGENT_ANCHOR_HASH="$B_HASH"
-    fi
-    export AGENT_ANCHOR_HASH
-    echo "[cld] anchor=${AGENT_ANCHOR_HASH:0:12} (mode=$AGENT_ANCHOR_MODE, base=${A_HASH:0:12}, scratch=${B_HASH:0:12})"
-    (cd /workspace/current && jj bookmark set "$BOOKMARK" -r @ --allow-backwards)
+# FIRST_LAUNCH records which of the three branches we took. The brief lives in
+# scratch commit B (a child of anchor A), so every descendant carries it and
+# file presence can no longer tell a first launch from a restart -- only this
+# flag can.
+if ! cld_boot_workspace "$WORKSPACE_ORIGIN" /workspace/current "$BOOKMARK" \
+        "${AGENT_REVISION_HINT:-@}" "${AGENT_ANCHOR_MODE:-isolated}" env; then
+    exit 1
 fi
-fi
+FIRST_LAUNCH=$CLD_BOOT_FIRST_LAUNCH
+AGENT_ANCHOR_HASH="$CLD_BOOT_ANCHOR"
+export AGENT_ANCHOR_HASH
 
-# Enable watchman auto-snapshot inside the workspace so background file
-# changes get snapshotted without a jj command. `register-snapshot-trigger`
-# fires under our cap-drop=ALL / no-new-privileges / non-root posture.
-(cd /workspace/current && \
-    jj config set --workspace fsmonitor.backend watchman && \
-    jj config set --workspace fsmonitor.watchman.register-snapshot-trigger true && \
-    jj status >/dev/null)
+cld_enable_watchman /workspace/current
 
 cd /workspace/current
 
