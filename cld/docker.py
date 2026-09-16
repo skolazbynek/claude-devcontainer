@@ -1,6 +1,7 @@
 """Container setup: arg building, image management, path translation."""
 
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -11,7 +12,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from cld.config import Config
+from cld.config import Config, _load_toml
+from cld.manifest import TicketManifest, manifest_labels
 from cld.log import get_logger, log_subprocess, mask_secrets
 from cld.vcs import get_backend
 
@@ -545,21 +547,7 @@ def build_container_args(
         "-w", f"{WORKSPACE_BASE}/current",
     ]
 
-    # SSL CA certificates: internal (Seznam) roots are baked into the base image
-    # trust store, so no mount is needed by default. `cfg.ssl_certs_path` is an
-    # explicit escape hatch that shadows the baked bundle with a host-supplied
-    # dir or PEM file -- opt in only, and it *replaces* rather than merges.
-    if cfg.ssl_certs_path:
-        ssl_path = Path(cfg.ssl_certs_path)
-        log.info("SSL: replacing baked CA bundle with %s (opt-in via ssl_certs_path)", ssl_path)
-        if ssl_path.is_dir():
-            args += ["-v", f"{ssl_path}:/etc/ssl/certs:ro",
-                     "-e", "NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt"]
-        else:
-            args += ["-v", f"{ssl_path}:/etc/ssl/cert.pem:ro",
-                     "-e", "SSL_CERT_FILE=/etc/ssl/cert.pem",
-                     "-e", "REQUESTS_CA_BUNDLE=/etc/ssl/cert.pem",
-                     "-e", "NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem"]
+    args += stage_ssl_certs(cfg)
 
     # Claude session state (required)
     # rw needed for OAuth token refresh and session state writes; tradeoff: agent can both
@@ -642,28 +630,7 @@ def build_container_args(
     # devcontainer needs its own mailbox to spawn agents/task-agents and get
     # `cld msg` / the messenger MCP's send()/list_inbox() working, same as master.
     if master or agent or task_agent or bare_devcontainer:
-        mailbox_root = Path(cfg.mailbox_root).expanduser()
-        host_mailbox_root = to_host_path(str(mailbox_root), cfg)
-        if host_mailbox_root == str(mailbox_root):
-            # Bare host: our own filesystem view already *is* the host view.
-            mailbox_root.mkdir(parents=True, exist_ok=True)
-        else:
-            # Nested (cld running inside another container): the real host path
-            # isn't in our filesystem view, and with no docker socket mounted
-            # there is no way (nor any wish) to reach across to the host to
-            # create it -- container isolation from the host is a hard
-            # requirement. If the path doesn't already exist on the real host,
-            # `docker run` will auto-create it as root and the non-root
-            # container user won't be able to write into it.
-            log.warning(
-                "Mailbox root %s is outside this process's filesystem view "
-                "(nested cld). If it doesn't already exist on the real host, "
-                "create it there manually before continuing: "
-                "mkdir -p %s && chown %d:%d %s",
-                host_mailbox_root, host_mailbox_root, os.getuid(), os.getgid(), host_mailbox_root,
-            )
-        args += ["-v", f"{host_mailbox_root}:{MAILBOX_MOUNT}:rw"]
-        log.info("Mailbox mounted: %s -> %s", host_mailbox_root, MAILBOX_MOUNT)
+        args += stage_mailbox(cfg)
 
     # Hub roles only (master, bare devcontainer): publish the registered
     # sibling target paths as an env var so the entrypoint can materialize them
@@ -707,10 +674,141 @@ def build_container_args(
     return args
 
 
+def ticket_repo_files(manifest: TicketManifest) -> str:
+    """Encode each repo's ``ignore_gitignore`` list as the ``CLD_REPO_FILES`` value.
+
+    Format ``<name>=<colon-list>`` joined by ``;``; repos with nothing to link
+    are omitted. Resolved host-side from each repo's own ``.cld/config.toml``
+    at launch, so an edit takes effect on the next recreate (design section 4.1).
+    """
+    parts: list[str] = []
+    for repo in manifest.repos:
+        repo_config = Path(repo.path) / ".cld" / "config.toml"
+        if not repo_config.is_file():
+            continue
+        if files := _load_toml(repo_config).get("ignore_gitignore", ()):
+            parts.append(f"{repo.name}={':'.join(files)}")
+    return ";".join(parts)
+
+
+def build_ticket_container_args(manifest: TicketManifest, cfg: Config) -> list[str]:
+    """Build the ``docker run`` argument list for a ticket container (v2).
+
+    Deliberately separate from ``build_container_args``: the ticket kind
+    mounts N repos RW at ``/workspace/origin/<name>``, works at the ticket
+    root ``/workspace/<slug>``, carries the manifest as labels (authoritative
+    JSON plus flat per-repo path labels), and replaces the scalar
+    ``CLD_HOST_PROJECT_DIR``/``CLD_HOST_HOME`` pair with the ``CLD_PATH_MAP``
+    prefix map -- v1 kinds keep their scalar plumbing untouched.
+
+    Anchors ride only in the manifest label: no ``org.cld.anchor`` labels here.
+    The effective per-repo anchor is derived from the jj store at check time.
+    """
+    session = ticket_container_name(manifest.ticket)
+    home = os.path.expanduser("~")
+    host_home = to_host_path(home, cfg)
+
+    args = ["--name", session]
+    for key, value in manifest_labels(manifest, session).items():
+        args += ["--label", f"{key}={value}"]
+
+    # Security and resources (same posture as every other kind)
+    args += [
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--cpus=2.0",
+        "--memory=4g",
+        "--user", f"{os.getuid()}:{os.getgid()}",
+        "-e", f"HOME={CONTAINER_HOME}",
+    ]
+
+    # Per-repo RW origin mounts; the workspaces themselves live in the
+    # container layer under the ticket root, which is the harness cwd.
+    # Both container prefixes of a repo map to its origin host path so
+    # host-facing messages naming workspace files resolve to something the
+    # user can open (design section 6.4).
+    path_map: dict[str, str] = {}
+    for repo in manifest.repos:
+        host_path = to_host_path(repo.path, cfg)
+        origin = f"{WORKSPACE_BASE}/origin/{repo.name}"
+        args += ["-v", f"{host_path}:{origin}"]
+        path_map[origin] = host_path
+        path_map[f"{WORKSPACE_BASE}/{manifest.ticket}/{repo.name}"] = host_path
+    path_map[CONTAINER_HOME] = host_home
+    args += ["-w", f"{WORKSPACE_BASE}/{manifest.ticket}"]
+
+    args += stage_ssl_certs(cfg)
+
+    # Claude session state (required; rw for OAuth refresh, as in v1)
+    if not (Path(home) / ".claude").is_dir():
+        log.error(f"{home}/.claude not found -- Claude auth and session state unavailable")
+        sys.exit(1)
+    args += ["-v", f"{host_home}/.claude:{CONTAINER_HOME}/.claude:rw"]
+
+    for rel in cfg.home_mounts_always:
+        if mnt := stage_home_ro(rel, cfg):
+            args += mnt
+        else:
+            log.warning(f"~/{rel} not found -- skipping")
+
+    args += [
+        "-e", "TICKET_MODE=1",
+        "-e", f"SESSION_NAME={session}",
+        "-e", f"CLD_TICKET_MANIFEST={manifest.to_json()}",
+        "-e", f"CLD_PATH_MAP={json.dumps(path_map)}",
+    ]
+    log.info(f"Session name: {session}")
+
+    if repo_files := ticket_repo_files(manifest):
+        args += ["-e", f"CLD_REPO_FILES={repo_files}"]
+        log.debug("Workspace files to link: %s", repo_files)
+
+    # Per-repo MySQL secrets, recomputed from the registry on every recreate
+    # (the manifest carries identity facts only -- design section 2.1). Ad-hoc
+    # repos have no registry entry, hence no secret.
+    for repo in manifest.repos:
+        entry = cfg.repos.get(repo.name)
+        if not entry or not entry.mysql_config:
+            continue
+        mysql_path = Path(entry.mysql_config).expanduser()
+        if not mysql_path.is_file():
+            log.warning("repo '%s': mysql_config not found: %s", repo.name, entry.mysql_config)
+            continue
+        resolved = to_host_path(str(mysql_path.resolve()), cfg)
+        args += ["-v", f"{resolved}:/run/secrets/mysql-{repo.name}.cnf:ro"]
+        log.info("MySQL config for %s mounted from: %s", repo.name, resolved)
+
+    # Same trust level as v1 master: the interactive user's own session.
+    args += stage_broker(cfg)
+    args += stage_otel(cfg, session)
+    args += stage_mailbox(cfg)
+
+    log.debug("Ticket container args: %s", mask_secrets(repr(args)))
+    return args
+
+
 def master_container_name(repo_root: Path) -> str:
     """Deterministic container name for the master devcontainer of *repo_root*."""
     sha = hashlib.sha1(str(repo_root).encode()).hexdigest()[:8]
     return f"cld_master_{repo_root.name}_{sha}"
+
+
+def ticket_slug(ticket: str) -> str:
+    """Sanitize a free-form ticket name into the slug that names the container,
+    workspaces, bookmarks and mailbox (``LIDE-2600`` -> ``lide-2600``)."""
+    slug = re.sub(r"[^a-z0-9]+", "-", ticket.lower()).strip("-")
+    if not slug:
+        raise ValueError(f"ticket name {ticket!r} sanitizes to an empty slug")
+    return slug
+
+
+def ticket_container_name(ticket: str) -> str:
+    """Deterministic container name for a ticket: ``cld_ticket_<slug>``.
+
+    One container per ticket, enforced by the name (PRODUCT_DESIGN.md
+    section 3). Idempotent on an already-sanitized slug.
+    """
+    return f"cld_ticket_{ticket_slug(ticket)}"
 
 
 def agent_container_name(repo_root: Path) -> str:
@@ -1032,6 +1130,52 @@ def stage_ssh_agent(cfg: Config) -> list[str]:
         "-v", f"{host_sock}:{_CONTAINER_SSH_AUTH_SOCK}",
         "-e", f"SSH_AUTH_SOCK={_CONTAINER_SSH_AUTH_SOCK}",
     ]
+
+
+def stage_ssl_certs(cfg: Config) -> list[str]:
+    """Return docker args shadowing the baked CA bundle with a host-supplied one.
+
+    Internal (Seznam) roots are baked into the base image trust store, so no
+    mount is needed by default. ``cfg.ssl_certs_path`` is an explicit escape
+    hatch (dir or PEM file) -- opt in only, and it *replaces* rather than merges.
+    """
+    if not cfg.ssl_certs_path:
+        return []
+    ssl_path = Path(cfg.ssl_certs_path)
+    log.info("SSL: replacing baked CA bundle with %s (opt-in via ssl_certs_path)", ssl_path)
+    if ssl_path.is_dir():
+        return ["-v", f"{ssl_path}:/etc/ssl/certs:ro",
+                "-e", "NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt"]
+    return ["-v", f"{ssl_path}:/etc/ssl/cert.pem:ro",
+            "-e", "SSL_CERT_FILE=/etc/ssl/cert.pem",
+            "-e", "REQUESTS_CA_BUNDLE=/etc/ssl/cert.pem",
+            "-e", "NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem"]
+
+
+def stage_mailbox(cfg: Config) -> list[str]:
+    """Return the ``-v`` args mounting the shared mailbox tree RW."""
+    mailbox_root = Path(cfg.mailbox_root).expanduser()
+    host_mailbox_root = to_host_path(str(mailbox_root), cfg)
+    if host_mailbox_root == str(mailbox_root):
+        # Bare host: our own filesystem view already *is* the host view.
+        mailbox_root.mkdir(parents=True, exist_ok=True)
+    else:
+        # Nested (cld running inside another container): the real host path
+        # isn't in our filesystem view, and with no docker socket mounted
+        # there is no way (nor any wish) to reach across to the host to
+        # create it -- container isolation from the host is a hard
+        # requirement. If the path doesn't already exist on the real host,
+        # `docker run` will auto-create it as root and the non-root
+        # container user won't be able to write into it.
+        log.warning(
+            "Mailbox root %s is outside this process's filesystem view "
+            "(nested cld). If it doesn't already exist on the real host, "
+            "create it there manually before continuing: "
+            "mkdir -p %s && chown %d:%d %s",
+            host_mailbox_root, host_mailbox_root, os.getuid(), os.getgid(), host_mailbox_root,
+        )
+    log.info("Mailbox mounted: %s -> %s", host_mailbox_root, MAILBOX_MOUNT)
+    return ["-v", f"{host_mailbox_root}:{MAILBOX_MOUNT}:rw"]
 
 
 def stage_broker(cfg: Config) -> list[str]:

@@ -1,5 +1,6 @@
 """Tests for pure helpers in cld.docker."""
 
+import json
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -16,6 +17,7 @@ from cld.docker import (
     assert_task_agent_capacity,
     build_container_args,
     build_session_name,
+    build_ticket_container_args,
     docker_task_agent_list,
     find_repo_root,
     in_master_container,
@@ -25,8 +27,13 @@ from cld.docker import (
     stage_home_ro,
     stage_broker,
     task_agent_container_name,
+    ticket_container_name,
+    ticket_repo_files,
+    ticket_slug,
     to_host_path,
 )
+from cld.manifest import RepoManifestEntry, TicketManifest
+from cld.registry import RepoEntry
 
 
 def _ps(names: str, rc: int = 0):
@@ -694,3 +701,187 @@ class TestParsePeersEnv:
     def test_malformed_raises(self, value):
         with pytest.raises(ValueError, match="malformed peer spec"):
             parse_peers_env(value)
+
+
+class TestTicketSlug:
+    def test_lowercases_and_keeps_kebab(self):
+        assert ticket_slug("LIDE-2600") == "lide-2600"
+
+    def test_free_form_sanitized(self):
+        assert ticket_slug("My Ticket_v2!") == "my-ticket-v2"
+
+    def test_leading_trailing_junk_stripped(self):
+        assert ticket_slug("--x--") == "x"
+
+    def test_idempotent_on_a_slug(self):
+        assert ticket_slug("lide-2600") == "lide-2600"
+
+    @pytest.mark.parametrize("ticket", ["", "___", "!!"])
+    def test_empty_slug_rejected(self, ticket):
+        with pytest.raises(ValueError, match="empty slug"):
+            ticket_slug(ticket)
+
+    def test_container_name(self):
+        assert ticket_container_name("LIDE-2600") == "cld_ticket_lide-2600"
+
+
+def _env_value(args, key):
+    """The value of `-e KEY=...` in a docker arg list; None when absent."""
+    for flag, value in zip(args, args[1:]):
+        if flag == "-e" and value.startswith(f"{key}="):
+            return value.removeprefix(f"{key}=")
+    return None
+
+
+class TestBuildTicketContainerArgs:
+    """Ticket launcher args: N origin mounts, manifest labels, prefix-map env.
+    No daemon needed -- the builder only inspects the filesystem and cfg."""
+
+    def _manifest(self, *repos):
+        return TicketManifest(ticket="lide-2600", repos=tuple(
+            RepoManifestEntry(name=name, path=path, anchor_base="a" * 40)
+            for name, path in repos
+        ))
+
+    def _setup(self, tmp_path, monkeypatch, **cfg_kwargs):
+        home = tmp_path / "home"
+        (home / ".claude").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        repo_a = tmp_path / "lide-api"
+        repo_b = tmp_path / "diskuze-api"
+        repo_a.mkdir()
+        repo_b.mkdir()
+        manifest = self._manifest(("lide-api", str(repo_a)), ("diskuze-api", str(repo_b)))
+        cfg = Config(mailbox_root=str(tmp_path / "mb"), **cfg_kwargs)
+        return manifest, cfg
+
+    def test_name_and_workdir(self, tmp_path, monkeypatch):
+        manifest, cfg = self._setup(tmp_path, monkeypatch)
+        args = build_ticket_container_args(manifest, cfg)
+        assert args[:2] == ["--name", "cld_ticket_lide-2600"]
+        assert "-w" in args and "/workspace/lide-2600" in args
+
+    def test_per_repo_rw_origin_mounts(self, tmp_path, monkeypatch):
+        manifest, cfg = self._setup(tmp_path, monkeypatch)
+        args = build_ticket_container_args(manifest, cfg)
+        assert f"{tmp_path}/lide-api:/workspace/origin/lide-api" in args
+        assert f"{tmp_path}/diskuze-api:/workspace/origin/diskuze-api" in args
+
+    def test_manifest_label_round_trips(self, tmp_path, monkeypatch):
+        manifest, cfg = self._setup(tmp_path, monkeypatch)
+        args = build_ticket_container_args(manifest, cfg)
+        labeled = next(
+            a.removeprefix("org.cld.manifest=") for a in args
+            if a.startswith("org.cld.manifest=")
+        )
+        assert TicketManifest.from_json(labeled) == manifest
+
+    def test_flat_labels_and_identity_labels(self, tmp_path, monkeypatch):
+        manifest, cfg = self._setup(tmp_path, monkeypatch)
+        args = build_ticket_container_args(manifest, cfg)
+        assert "org.cld.kind=ticket" in args
+        assert "org.cld.ticket=lide-2600" in args
+        assert "org.cld.session=cld_ticket_lide-2600" in args
+        assert f"org.cld.repo.lide-api={tmp_path}/lide-api" in args
+        assert f"org.cld.repo.diskuze-api={tmp_path}/diskuze-api" in args
+
+    def test_no_anchor_labels(self, tmp_path, monkeypatch):
+        """Anchors ride only in the manifest; B is derived from the jj store."""
+        manifest, cfg = self._setup(tmp_path, monkeypatch)
+        args = build_ticket_container_args(manifest, cfg)
+        assert not any(a.startswith("org.cld.anchor") for a in args)
+
+    def test_ticket_mode_and_session_env(self, tmp_path, monkeypatch):
+        manifest, cfg = self._setup(tmp_path, monkeypatch)
+        args = build_ticket_container_args(manifest, cfg)
+        assert "TICKET_MODE=1" in args
+        assert _env_value(args, "SESSION_NAME") == "cld_ticket_lide-2600"
+        assert _env_value(args, "CLD_TICKET_MANIFEST") == manifest.to_json()
+
+    def test_path_map_covers_both_prefixes_and_home(self, tmp_path, monkeypatch):
+        manifest, cfg = self._setup(tmp_path, monkeypatch)
+        args = build_ticket_container_args(manifest, cfg)
+        path_map = json.loads(_env_value(args, "CLD_PATH_MAP"))
+        assert path_map["/workspace/origin/lide-api"] == f"{tmp_path}/lide-api"
+        assert path_map["/workspace/lide-2600/lide-api"] == f"{tmp_path}/lide-api"
+        assert path_map["/home/claude"] == f"{tmp_path}/home"
+
+    def test_no_scalar_host_path_envs(self, tmp_path, monkeypatch):
+        """The prefix map replaces CLD_HOST_PROJECT_DIR/CLD_HOST_HOME for the
+        ticket kind only; v1 kinds keep the scalar pair."""
+        manifest, cfg = self._setup(tmp_path, monkeypatch)
+        args = build_ticket_container_args(manifest, cfg)
+        assert _env_value(args, "CLD_HOST_PROJECT_DIR") is None
+        assert _env_value(args, "CLD_HOST_HOME") is None
+
+    def test_persistent_not_ephemeral(self, tmp_path, monkeypatch):
+        manifest, cfg = self._setup(tmp_path, monkeypatch)
+        args = build_ticket_container_args(manifest, cfg)
+        assert "--rm" not in args and "-it" not in args
+
+    def test_repo_files_env_from_repo_config(self, tmp_path, monkeypatch):
+        manifest, cfg = self._setup(tmp_path, monkeypatch)
+        cld_dir = tmp_path / "lide-api" / ".cld"
+        cld_dir.mkdir()
+        (cld_dir / "config.toml").write_text('ignore_gitignore = [".env", "local.py"]\n')
+        args = build_ticket_container_args(manifest, cfg)
+        assert _env_value(args, "CLD_REPO_FILES") == "lide-api=.env:local.py"
+
+    def test_no_repo_files_env_when_nothing_to_link(self, tmp_path, monkeypatch):
+        manifest, cfg = self._setup(tmp_path, monkeypatch)
+        args = build_ticket_container_args(manifest, cfg)
+        assert _env_value(args, "CLD_REPO_FILES") is None
+
+    def test_per_repo_mysql_secret_from_registry(self, tmp_path, monkeypatch):
+        cnf = tmp_path / "lide.cnf"
+        cnf.write_text("[client]\n")
+        manifest, cfg = self._setup(
+            tmp_path, monkeypatch,
+            repos={"lide-api": RepoEntry(path=str(tmp_path / "lide-api"), mysql_config=str(cnf))},
+        )
+        args = build_ticket_container_args(manifest, cfg)
+        assert f"{cnf}:/run/secrets/mysql-lide-api.cnf:ro" in args
+        # No secret for the repo without a registry mysql_config.
+        assert not any("mysql-diskuze-api" in a for a in args)
+
+    def test_missing_mysql_file_skipped_with_warning(self, tmp_path, monkeypatch, caplog):
+        manifest, cfg = self._setup(
+            tmp_path, monkeypatch,
+            repos={"lide-api": RepoEntry(path=str(tmp_path / "lide-api"), mysql_config="/nope.cnf")},
+        )
+        with caplog.at_level("WARNING"):
+            args = build_ticket_container_args(manifest, cfg)
+        assert not any("mysql-" in a for a in args)
+        assert "mysql_config not found" in caplog.text
+
+    def test_mailbox_mounted(self, tmp_path, monkeypatch):
+        manifest, cfg = self._setup(tmp_path, monkeypatch)
+        args = build_ticket_container_args(manifest, cfg)
+        assert any(a.endswith(f":{MAILBOX_MOUNT}:rw") for a in args)
+
+    def test_broker_key_wired(self, tmp_path, monkeypatch):
+        key = tmp_path / "broker_key"
+        key.write_text("k")
+        manifest, cfg = self._setup(tmp_path, monkeypatch, broker_key=str(key))
+        args = build_ticket_container_args(manifest, cfg)
+        assert any("broker-key" in a for a in args)
+
+
+class TestTicketRepoFiles:
+    def test_multiple_repos_joined_with_semicolon(self, tmp_path):
+        for name, files in (("a", '[".env"]'), ("b", '["x", "y"]')):
+            cld_dir = tmp_path / name / ".cld"
+            cld_dir.mkdir(parents=True)
+            (cld_dir / "config.toml").write_text(f"ignore_gitignore = {files}\n")
+        manifest = TicketManifest(ticket="t", repos=(
+            RepoManifestEntry(name="a", path=str(tmp_path / "a"), anchor_base="h"),
+            RepoManifestEntry(name="b", path=str(tmp_path / "b"), anchor_base="h"),
+        ))
+        assert ticket_repo_files(manifest) == "a=.env;b=x:y"
+
+    def test_missing_config_omitted(self, tmp_path):
+        (tmp_path / "a").mkdir()
+        manifest = TicketManifest(ticket="t", repos=(
+            RepoManifestEntry(name="a", path=str(tmp_path / "a"), anchor_base="h"),
+        ))
+        assert ticket_repo_files(manifest) == ""
