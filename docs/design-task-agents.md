@@ -170,7 +170,8 @@ There is no `WRAP-UP` phase: wrap-up is an ordinary message processed in
 1. **Spawn.** Master issues `cld task-agent start …`. Anchor is resolved and
    staged peer-side exactly as `cld run`/`cld agent` do (`AGENT_REVISION_HINT` +
    `AGENT_SCRATCH`, workspace add, scratch commit `B`, `AGENT_ANCHOR_HASH` ==
-   `A`, `B`'s parent -- see CLAUDE.md § *Anchor change contract*). The
+   `B` in isolated mode (the default; `A` in shared mode) -- see
+   PRODUCT_DESIGN.md §8). The
    peer entrypoint sets the **session bookmark** and creates the **deliverable
    bookmark** at the anchor. Labels are stamped (§6). The container runs
    detached (`docker run -d`), not `--rm` — it is long-lived while working.

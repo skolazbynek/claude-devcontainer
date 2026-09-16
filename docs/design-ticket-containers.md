@@ -598,3 +598,51 @@ parallel.
 Critical path: W1 → W2 → W3 → W4. W5 and W6 fork off W2 and merge
 independently. A usable single-repo ticket exists at the end of W4 even if
 W5/W6 lag (single-repo broker fallback works without W6, spec gap 6).
+
+## 12. Implementation deltas
+
+Where the landed code (W1–W6) deviates from or extends this document. Each
+verified against the working copy.
+
+- **Repo-name regex duplicated, not imported** (§5.1 said registry names are
+  validated against `docker._TASK_SLUG_RE`): `cld/registry.py` defines its own
+  identical `_REPO_NAME_RE` because importing it would cycle —
+  `cld.config` imports from `cld.registry`, and `cld.docker` imports
+  `cld.config`.
+- **`CLD_REPO_BOOTSTRAP` env added to the wire** (§4.1 listed only
+  `CLD_TICKET_MANIFEST`, `CLD_REPO_FILES`, `CLD_PATH_MAP`): which repos want a
+  first-boot `poetry install`, and in which `pyproject_dir`, is resolved
+  host-side (`ticket_repo_bootstrap`, `cld/docker.py`) and shipped as
+  `<name>=<subdir>;…`, symmetrical to `CLD_REPO_FILES`.
+- **Session flock lives in the entrypoint-generated wrapper, not
+  `cld/ticket.py`** (the W4 row filed "claude (exec + session lock)" under
+  `cld/ticket.py`): the `TICKET_MODE` branch of the entrypoint writes
+  `/tmp/bin/claude` with the flock baked in; `exec_claude` does no locking.
+  Extension: host-side `cld status` probes the same lock with a non-blocking
+  `flock -n` to report a live session.
+- **`resolve_manifest` grew a resolver hook, and its signature carries
+  `mode`** (§2 defined `resolve_manifest()` as "args + registry → manifest"
+  with no resolver): anchor pinning is injected as a
+  `resolver(path, revision, mode)` callable so the launch path can pass the
+  overlap-checking `ticket_anchor_resolver` (which needs the per-repo anchor
+  mode for the shared-anchor probe) while `cld/manifest.py` stays free of
+  `cld.docker` imports.
+- **`docker_anchor_list` replaced by `docker_occupant_list`** (§7 said the
+  lister "grows a sibling"): the old function is gone; one lister returns the
+  unified per-repo record shape `{name, repo_root, anchor_base, session,
+  mode, kind}` for both v1 headless labels and expanded ticket manifests.
+- **GraphQL stop teardown keys off an `org.cld.gql-repo` label** (§6.1 covered
+  only start-side `--repo` resolution): `do_graphql_start` stamps the served
+  repo onto the server container, and `do_graphql_stop` forgets the jj
+  workspace in *that* repo — a multi-repo ticket can pass a different
+  `--repo` to stop than it did to start. Server identity stays per session
+  (`cld_gql_<session>`): one server per ticket container at a time.
+- **`CLD_TICKET` is the `--ticket` channel** (§6.5 named the env var and the
+  flag as alternatives): `cld msg`'s `--ticket` flag is exported as
+  `CLD_TICKET` by `cli_msg.py` before dispatch, so `resolve_self` reads one
+  channel; the messenger verb modules stay signature-unchanged.
+- **Readiness sentinel cleared at boot start** (§4.3 only specified touching
+  it after the loop): the container layer survives `docker stop`, so a warm
+  start still sees the previous boot's `/tmp/cld-ticket-ready`; `TICKET_MODE`
+  removes it before any per-repo work, or the host-side wait would return
+  early.

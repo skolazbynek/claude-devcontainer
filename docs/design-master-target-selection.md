@@ -1,5 +1,12 @@
 # Target selection from inside a master container
 
+> **Superseded (2026-09-16) by `docs/design-ticket-containers.md`** (and
+> `PRODUCT_DESIGN.md` §4): the named repo registry replaces `master_targets`
+> and its placeholder mechanism; a multi-repo ticket container mounts its
+> repos directly, so the target-selection problem this document designs
+> around disappears. Kept for the defect inventory below. The v1 master role
+> itself still works during coexistence.
+
 > **Status: design only.** Requested by `docs/next-steps-todo.md` § "Empty mounted
 > directories". Nothing here is implemented; `docs/design-master-sibling-launch.md`
 > still describes the shipped behaviour.

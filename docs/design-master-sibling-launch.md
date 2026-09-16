@@ -1,5 +1,11 @@
 # Launching sibling containers from inside master
 
+> **Superseded (2026-09-16) by `docs/design-ticket-containers.md`**: the
+> ticket container (v2) replaces the master role; a multi-repo ticket mounts
+> its repos directly, with no sibling launches or placeholder directories.
+> The mechanics below still describe the shipped v1 behaviour, which keeps
+> working during coexistence.
+
 > **Update (docker socket removed).** This document describes the original
 > socket-mediated design, where `cld <cmd>` inside master ran `docker run`
 > directly over a mounted `/var/run/docker.sock`. The socket has since been
@@ -129,7 +135,7 @@ peer container entrypoint:
   B_HASH = $(cd /workspace/current && python3 -m cld.vcs.scratch)
       # ↳ writes AGENT_SCRATCH files into .cld-run/*, `jj commit -m "cld anchor: $SESSION_NAME" .cld-run`,
       #   prints B (== the just-created scratch commit's id) to stdout.
-  AGENT_ANCHOR_HASH = A   # not B -- see CLAUDE.md § Anchor change contract
+  AGENT_ANCHOR_HASH = B (isolated, default) or A (shared) -- see PRODUCT_DESIGN.md §8
   jj bookmark set "$SESSION_NAME" -r @
 ```
 

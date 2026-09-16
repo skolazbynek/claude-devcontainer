@@ -1,7 +1,4 @@
-# Quick start: task-agents
-
-Hand one bounded task to one agent, on the host. Design and details:
-`docs/design-task-agents.md`.
+# Quick start
 
 ## Once
 
@@ -9,6 +6,55 @@ Hand one bounded task to one agent, on the host. Design and details:
 poetry install
 cld build
 ```
+
+# Ticket containers (v2)
+
+Work a ticket interactively: one container, your repos mounted, Claude driven
+from the host shell. Spec: `PRODUCT_DESIGN.md`; design:
+`docs/design-ticket-containers.md`.
+
+## 1. Register your repos (once)
+
+```bash
+cld repos add lide-api ~/projects/lide-api
+cld repos add diskuze-api ~/projects/diskuze-api
+cld repos          # list
+```
+
+## 2. Start the ticket
+
+```bash
+cld start LIDE-2600 lide-api diskuze-api    # or bare `cld start LIDE-2600` for a picker
+```
+
+Each repo anchors on its registry `default_rev` (fallback `trunk()`); override
+per repo with `lide-api@<rev>`.
+
+## 3. Work
+
+```bash
+cld claude LIDE-2600                        # the daily verb: Claude at the ticket root
+cld claude LIDE-2600 -- --continue          # resume the ticket's last conversation
+cld claude LIDE-2600 -- --model opus        # anything after -- goes to claude
+cld status LIDE-2600                        # anchors, bookmark tips, live session
+```
+
+## 4. Pause / finish
+
+```bash
+cld stop LIDE-2600         # pause; `cld start LIDE-2600` warm-starts it
+cld shutdown LIDE-2600     # end of ticket; commits survive in every repo store
+```
+
+**Coming from v1?** Shut down v1 masters/agents first
+(`cld master shutdown --all`, `cld agent shutdown --all`), then
+`cld repos add` each of your `master_targets` entries. Verb map and behavior
+changes: README, "Ticket containers (v2)".
+
+# Quick start: task-agents
+
+Hand one bounded task to one agent, on the host. Design and details:
+`docs/design-task-agents.md`.
 
 ## 1. Spawn
 

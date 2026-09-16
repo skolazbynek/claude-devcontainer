@@ -276,9 +276,10 @@ New helpers in `cld/docker.py`:
   — mirrors `docker_master_status`.
 
 Anchor / workspace / VCS handling is **identical to master**: pin the
-anchor at launch, create the editable_root child under
-`<repo>/.cld/workspaces/<container_name>/`, bind-mount at
-`/workspace/current`. The in-container `vcs_assert_descendant` guard
+anchor at launch, create the editable_root child in the workspace at
+`/workspace/current` (the workspace lives in the container layer, not on
+the host -- the `.cld/workspaces/` host path in the original design was
+never shipped). The in-container `vcs_assert_descendant` guard
 continues to protect the anchor.
 
 ## 8. Entrypoint changes

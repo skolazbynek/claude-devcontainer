@@ -2,6 +2,8 @@
 
 Run Claude Code in Docker containers with VCS workspace isolation. Supports **jujutsu (jj)** natively and **falls back to git** when jj is not installed. Each container gets its own isolated workspace (jj workspace or git worktree) and branch, so multiple agents can work on the same repo concurrently without conflicts.
 
+The primary interactive workflow is the **ticket container** (v2): one container per ticket, mounting one or more registered repos, driven from the host shell via `cld claude <ticket>`. See [Ticket containers](#ticket-containers-v2). The v1 interactive roles (`cld`, `cld master`) still work during the coexistence period but are superseded by tickets.
+
 ## Prerequisites
 
 - Docker
@@ -24,7 +26,7 @@ poetry run cld --help
 cld build [--no-cache]
 ```
 
-All commands must be run from within a VCS repository (jj or git).
+The v1 verbs (`cld`, `cld master`, `cld agent`, `cld run`, `cld chain`) must be run from within a VCS repository (jj or git) -- they operate on the cwd repo. The ticket verbs (`cld start`, `cld claude`, ...) run from anywhere: their repos come from the registry or from explicit paths.
 
 ## Usage
 
@@ -32,16 +34,12 @@ All commands must be run from within a VCS repository (jj or git).
 # Show information
 cld --help
 
-# Ephemeral interactive devcontainer (neovim, jj/git, poetry, claude with --dangerously-skip-permissions)
-cld [-n name] [-m model] [-r revision] [-p prompt]   # -p only; prompt refs go to `cld run`
-
-# Persistent per-repo interactive devcontainer (start-or-attach; idempotent per repo)
-cld master                                # start or re-attach
-cld master {restart | shutdown [--all] | status | logs}
-
-# Persistent per-repo headless Claude agent (mailbox-driven)
-cld agent                                 # start; never attaches
-cld agent {restart | shutdown [--all] | status | logs}
+# Ticket container (v2): one container per ticket, N repos, host-driven
+cld repos add lide-api ~/projects/lide-api    # register repos once
+cld start LIDE-2600 lide-api                  # create the ticket sandbox
+cld claude LIDE-2600                          # run Claude in it, from the host
+cld claude LIDE-2600 -- --continue            # resume the ticket's last session
+cld {stop | restart | shutdown | status | logs} <ticket>
 
 # One-shot autonomous run (headless, --rm, commits to a branch)
 cld run [refs...] [-n name] [-m model] [-r revision] [-p prompt]
@@ -54,13 +52,107 @@ cld chain run chains/parallel-review.yaml -p "Focus on auth code"
 cld chain list
 cld chain validate chains/my-chain.yaml
 cld chain dry-run @review-implement
+
+# --- v1 interactive roles (superseded by ticket containers; still work) ---
+
+# Ephemeral interactive devcontainer (neovim, jj/git, poetry, claude with --dangerously-skip-permissions)
+cld [-n name] [-m model] [-r revision] [-p prompt]   # -p only; prompt refs go to `cld run`
+
+# Persistent per-repo interactive devcontainer (start-or-attach; idempotent per repo)
+cld master                                # start or re-attach
+cld master {restart | shutdown [--all] | status | logs}
+
+# Persistent per-repo headless Claude agent (mailbox-driven)
+cld agent                                 # start; never attaches
+cld agent {restart | shutdown [--all] | status | logs}
 ```
 
-### Agent workflow
+## Ticket containers (v2)
+
+One container per ticket. The ticket (by convention a YouTrack id) is the unit of work; the container is its sandbox. You never shell in for normal work -- the cockpit is your host terminal, and `cld claude <ticket>` execs the Claude harness inside the container. The harness sees all the ticket's repos as subdirectories of one working set:
+
+```
+/workspace/<slug>/            harness cwd -- the "ticket root" (with a generated CLAUDE.md)
+  <repo-a>/                   jj workspace (or git worktree) of repo-a
+  <repo-b>/
+/workspace/origin/<repo-a>/   RW bind mount of the host repo
+/workspace/origin/<repo-b>/
+```
+
+Full product spec: `PRODUCT_DESIGN.md`; implementation design: `docs/design-ticket-containers.md`.
+
+### Repo registry
+
+Repos are addressed by name from a registry in `~/.config/cld/config.toml`:
+
+```bash
+cld repos                                        # list registry + which tickets mount each repo
+cld repos add lide-api ~/projects/lide-api [--default-rev R] [--bootstrap]
+cld repos rm lide-api                            # refused while a ticket container mounts it
+```
+
+Each entry is a `[repos.<name>]` TOML table: `path`, optional `default_rev` (anchor offered at launch; empty means `trunk()`), `bootstrap` (run `poetry install` in the repo's `pyproject_dir` on first boot), and `mysql_config` (host path to a `.cnf` mounted for that repo only, hand-edited into the config). `cld repos add/rm` rewrites the config with tomlkit, preserving your comments and unrelated keys. Ad-hoc paths are also accepted at launch (the basename becomes the subdir name).
+
+### Lifecycle
+
+| Verb | Semantics |
+|---|---|
+| `cld start <ticket> [repo[@rev]...]` | Create-or-start. On a TTY with no repos: interactive picker over the registry. Each repo arg is a registry name or path, with an optional `@rev` anchor override. Against an existing ticket, a different repo set shows a diff, asks to confirm, and recreates the container. |
+| `cld claude <ticket> [-- args...]` | The daily verb: exec the harness at the ticket root. Everything after `--` passes to claude (`--model`, `--continue`, `--resume`, `-p`). One live session per container (POC): a second `cld claude` is refused, naming the holder. |
+| `cld shell <ticket>` | Escape hatch: interactive bash in the container, for debugging the sandbox itself. |
+| `cld stop <ticket>` | Pause (`docker stop`). Workspaces stay in place; `cld start` on a stopped ticket is a warm start. |
+| `cld restart <ticket>` | Recreate the container from its persisted launch manifest (labels, read back before removal -- no argument drop). Workspaces reattach at their bookmarks; venvs and caches in the container layer are lost. |
+| `cld shutdown <ticket> [--all]` | End of ticket: teardown, forget the ticket's bookmark and workspace in every mounted repo. Commits always survive in the repo stores. |
+| `cld status [<ticket>]` | Roster (repos, state, live session) or one-ticket detail (per-repo anchors, modes, bookmark tips, session, uptime). |
+| `cld logs <ticket> [-n N]` | Entrypoint/boot logs. |
+
+Resume: transcripts land on the host under the per-ticket cwd slug, so `cld claude <ticket> -- --continue` resumes the ticket's latest conversation and `-- --resume` lists only that ticket's sessions. This works even after `cld shutdown` followed by a fresh `cld start` of the same ticket -- cld itself keeps no session state.
+
+### Anchors per repo
+
+At first launch, each repo's anchor revision resolves as: explicit `@rev` from the launch args, else the registry `default_rev`, else `trunk()`. In isolated mode (default), a scratch commit is staged as a child of the anchor and the ticket may edit only its descendants; `--shared-anchor <repo>` (repeatable, per repo) widens the editable tree to every descendant of the anchor itself. The anchor is never written to. The contract is policy, enforced by prompt and convention, not mechanism.
+
+When a new ticket's anchor lies inside another live ticket's editable tree in the same repo, cld **warns and proceeds** (stacked tickets are legitimate). Anchoring inside a headless container's tree (`agent`, `task-agent`, `run`) still blocks, in both directions.
+
+**Git-backed repos get weaker guarantees:** no scratch commit (the effective anchor is the base itself), no overlap check, no watchman snapshots -- worktree semantics only.
+
+### Persistence
+
+Commits, the op log, and the per-repo ticket bookmark live in each host repo's store and survive everything short of `shutdown` (which forgets the bookmark; commits remain). Uncommitted edits are watchman-snapshotted into the store. Workspace dirs, venvs and caches live in the container layer: they survive `stop`, are rebuilt (workspaces) or lost (venvs) on `restart`/recreate, and are gone after `shutdown`.
+
+### Changes from v1 behavior
+
+Verified deliberate differences from the v1 roles:
+
+- **Default anchor is `default_rev` -> `trunk()`, not `@`.** A v2 launch happens from anywhere, so each repo's `@` is invisible and may be unrelated WIP. Stacked work uses an explicit `repo@rev`. (v1 kinds keep defaulting to `@`.)
+- **Host-side `cld msg` prefers a single running ticket.** Identity resolution is: explicit `--ticket` flag or `CLD_TICKET` env, else the one running ticket container if exactly one exists, else the v1 fallback (the cwd repo's master). cwd is deliberately not mapped to tickets -- several tickets can mount one repo.
+- **Parallel same-base siblings need no placeholder commits.** The overlap check now derives each occupant's *effective* anchor (the scratch commit in isolated mode) from the jj store at check time, for v1 headless kinds too, so two isolated containers anchored on the same base no longer over-block each other.
+- **A kept repo whose anchor changed on a repo-set change reattaches at its old bookmark.** `cld start <ticket> <new set>` recreates the container, but a kept repo's bookmark survives, and the boot's reattach branch wins over the new `anchor_base` -- the new anchor takes effect only after `cld shutdown` forgets the bookmark.
+- **One GraphQL test server per ticket session, even multi-repo.** The broker's `graphql start` names the server container by session; a `start --repo b` while a server for repo a runs returns the running server's status rather than launching a second one. `graphql stop` tears down against the repo the server was *started* for (its own label), whatever `--repo` says.
+- **Registry rename corner.** Manifests persist name + path, so a rename never orphans a running ticket. But per-repo MySQL secrets resolve **by name** from the registry at every recreate: if a rename reuses an old name for a different path, a recreated ticket that mounted the old repo under that name gets the new entry's secret.
+
+### Migration from v1
+
+1. **Shut down all v1 masters, devcontainers and agents first** (`cld master shutdown --all`, `cld agent shutdown --all`) -- bookmark/workspace hygiene in every repo store.
+2. **Seed the registry from your `master_targets` entries:** `cld repos add <name> <path>` for each. (`master_targets` itself keeps working for the v1 master while the roles coexist.)
+3. Muscle memory:
+
+| v1 | v2 |
+|---|---|
+| `cld` (bare devcontainer) | `cld start <throwaway-name> <repo>` + `cld claude <name>` |
+| `cld master` | `cld start <ticket> <repo>` + `cld claude <ticket>` |
+| in-container shell work | `cld claude <ticket>` (daily) / `cld shell <ticket>` (sandbox debugging) |
+| `cld master shutdown` | `cld shutdown <ticket>` |
+| `cld master status` / `logs` | `cld status [<ticket>]` / `cld logs <ticket>` |
+| `-m model` / `-p prompt` at launch | per invocation: `cld claude <ticket> -- --model ... -p ...` |
+
+`cld run`, `cld chain`, the broker and the messenger are unchanged; inside a ticket container the broker's `run-tests`/`graphql` take `--repo <name>` when several repos are mounted (with exactly one repo, `--repo` may be omitted).
+
+## Agent workflow
 
 Agent containers run detached and auto-remove on exit. Results are committed to the agent's branch as `agent-output-<session>/` containing `agent.log`, `result.json`, and `summary.json`.
 
-### Chain workflow
+## Chain workflow
 
 `cld chain` runs a declarative sequence of named agents defined in a YAML file. Each step is an autonomous agent that receives the prior step's output as context. Steps can run in parallel (a `parallel:` group); the synthesiser step that follows sees a combined summary. Built-in chains live in `chains/` in the repo and in the installed package; reference them with `@name` shorthand.
 
@@ -168,7 +260,9 @@ The `orchestrator` MCP is no longer wired into cld images or host-side claude. `
 
 ## Messenger
 
-Lets any devcontainer (master or repo agent) send a message to any other and get a reply on its next turn, backed by a shared mailbox directory on the host -- no threads, no polling required from the user. Full design and mental model: `docs/design-agent-messaging.md`.
+Lets any cld container (ticket, master or repo agent) send a message to any other and get a reply on its next turn, backed by a shared mailbox directory on the host -- no threads, no polling required from the user. Full design and mental model: `docs/design-agent-messaging.md`.
+
+Ticket containers get a mailbox named `cld_ticket_<slug>` and can be addressed by the ticket slug; a slug that is also some repo's basename is an ambiguity error naming both. Host-side `cld msg` acts as: the `--ticket` flag (or `CLD_TICKET` env), else the single running ticket container if exactly one exists, else the cwd repo's master.
 
 ```bash
 # Register for host use (user-scoped, works from any directory)
@@ -200,6 +294,9 @@ The repo agent has one persistent Claude session that survives across messages -
 cld/                               Python package (CLI + shared logic)
   cli.py                           host typer app (all docker-daemon verbs)
   cli_container.py                 container typer app, shipped as `cld` in the image
+  registry.py                      named repo registry (`cld repos`, tomlkit config writes, picker)
+  manifest.py                      ticket launch manifest (schema, label codec, resolve, diff)
+  ticket.py                        ticket container lifecycle (start/claude/stop/restart/shutdown/status/logs)
   task_agent.py                    task-agent helpers shared by both apps
   docker.py                        container arg building, image management, path translation
   run.py                           one-shot run launch logic (`cld run`)
@@ -240,6 +337,8 @@ prompts/                           Reusable task prompts for agents
 
 ### Managing sibling agents from `cld master`
 
+> **Superseded by ticket containers** (a multi-repo ticket mounts all its repos directly -- see [Ticket containers](#ticket-containers-v2)). Kept while the v1 master role coexists; everything below still works.
+
 To spin up / restart / shut down persistent agents for repos other than master's own, set `master_targets` in your config (list of host paths registered as launch targets for master; each becomes an empty placeholder directory inside master's shell so `cd <path>` works, without ever bind-mounting the repo into master):
 
 ```toml
@@ -259,7 +358,7 @@ Master itself has no filesystem view of the target repo -- only a placeholder di
 
 ### Workspace isolation
 
-Containers mount the host repo RW at `/workspace/origin`. The container's own entrypoint runs `jj workspace add` / `git worktree add` at `/workspace/origin/.cld/workspaces/<session>` on boot and symlinks `/workspace/current` to it. Workspace creation lives in the container (not on the host), so `cld master` can launch sibling agents against RO-mounted repos without needing RW itself. The `-r` flag pins the anchor revision (default: `@` for jj, `HEAD` for git). On graceful shutdown, the container itself deregisters the workspace via `docker exec /opt/cld/cleanup-workspace.sh` before `docker stop`; the branch persists.
+Containers mount the host repo RW at `/workspace/origin` (ticket containers: one mount per repo at `/workspace/origin/<name>`). The container's own entrypoint runs `jj workspace add` / `git worktree add` on boot; the workspace directory lives in the container's own filesystem layer at `/workspace/current` (tickets: `/workspace/<slug>/<name>`), never on the host. jj writes all store objects through the RW origin mount, and watchman snapshots edits into the store autonomously, so work is durable and host-visible without a host-side workspace directory. The `-r` flag pins the anchor revision for v1 kinds (default: `@` for jj, `HEAD` for git; tickets default to the registry `default_rev`, falling back to `trunk()`). On shutdown, the session's bookmark and workspace registration are forgotten from the origin store -- host-side by `cld shutdown` / `cld <role> shutdown`, plus the v1 master/bare entrypoints' own TERM/EXIT traps; committed work persists.
 
 ### Host file protection
 
@@ -302,7 +401,7 @@ Lowest → highest priority:
 
 ### TOML schema
 
-Flat snake_case keys mirroring `Config` field names, valid in both `~/.config/cld/config.toml` (user-wide) and `<repo_root>/.cld/config.toml` (per-repo). Unknown keys are warned about on stderr and ignored. Array-typed keys take a TOML array of strings. `host_project_dir` / `host_home` are container-internal and not exposed via TOML.
+Flat snake_case keys mirroring `Config` field names, valid in both `~/.config/cld/config.toml` (user-wide) and `<repo_root>/.cld/config.toml` (per-repo). Unknown keys are warned about on stderr and ignored. Array-typed keys take a TOML array of strings. `host_project_dir` / `host_home` are container-internal and not exposed via TOML. The one table-typed key is the ticket repo registry, `[repos.<name>]` in the *user* config (see [Repo registry](#repo-registry)): per entry `path`, `default_rev`, `bootstrap`, `mysql_config`.
 
 ```toml
 base_image = "claude-base:latest"
@@ -326,7 +425,8 @@ Full set of keys:
 | `ssl_certs_path` | string | `""` | Opt-in override: host path (dir or PEM file) that **replaces** the baked CA bundle. Empty = use the baked bundle |
 | `home_mounts_always` | array of strings | `[".claude.json", ".config/anthropic", ".config/claude", ".config/jj"]` | RO `$HOME` paths staged into every container |
 | `home_mounts_devcontainer` | array of strings | `[".gitconfig", ".bashrc", ".config/nvim", ".local/state/nvim", ".cache/nvim"]` | Additional RO `$HOME` paths staged only for interactive devcontainer sessions |
-| `master_targets` | array of strings | `[]` | Host repo paths registered as launchable sibling targets from inside `cld master` |
+| `master_targets` | array of strings | `[]` | Host repo paths registered as launchable sibling targets from inside `cld master` (v1; tickets use the registry below) |
+| `repos.<name>` | TOML table | none | Ticket repo registry entry (`path`, `default_rev`, `bootstrap`, `mysql_config`); user config only, managed by `cld repos add/rm` |
 | `ignore_gitignore` | array of strings | `[]` | Gitignored files (e.g. `.env`) to symlink from `/workspace/origin` into the isolated workspace |
 | `agent_timeout` | int (seconds) | `1800` | Chain orchestrator's per-agent wait timeout |
 | `poll_interval` | int (seconds) | `30` | Chain orchestrator's docker-ps poll interval |
@@ -343,7 +443,7 @@ Full set of keys:
 | `log_color` | string | `"auto"` | ANSI color in log output: `auto` (TTY-detect) / `always` / `never` |
 | `debug` | bool | `false` | Diagnostics flag; back-compat alias for `log_level = "DEBUG"` when `log_level` is otherwise unset |
 
-Every key above also has a `CLD_*` env var equivalent that overrides it (see below) except the array-typed ones (`home_mounts_always`, `home_mounts_devcontainer`, `master_targets`, `ignore_gitignore`) and `pyproject_dir` (not a `Config` field), which are TOML-only.
+Every key above also has a `CLD_*` env var equivalent that overrides it (see below) except the array-typed ones (`home_mounts_always`, `home_mounts_devcontainer`, `master_targets`, `ignore_gitignore`), the `repos` registry table, and `pyproject_dir` (not a `Config` field), which are TOML-only.
 
 ### `CLD_*` env vars (defaults shown)
 
