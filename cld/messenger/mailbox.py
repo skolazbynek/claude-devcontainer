@@ -693,16 +693,20 @@ def list_containers(kind: str | None = None) -> list[dict]:
 
 
 def resolve_recipient(to: str, containers: list[dict] | None = None, root: Path | None = None) -> str:
-    """Resolve a shortname (repo basename) or full container name to a full container name.
+    """Resolve a shortname (ticket slug or repo basename) or full container name
+    to a full container name.
 
     When *root* is given and *to* already names an existing mailbox directory
     under it, return *to* directly -- this is the reply path (the recipient's
     full name comes from the message's ``from`` field), and it needs no container
     enumeration, so agents can reply without any host channel.
 
-    Otherwise enumerate: prefer an ``agent`` over a ``master`` when both exist
-    for the same basename. Raises ValueError if *to* is a shortname matching
-    containers from two different repo roots (ambiguous), or isn't found at all.
+    Otherwise enumerate, in order (design-ticket-containers.md section 6.5):
+    exact container name, then ticket slug, then repo basename -- a shortname
+    matching both a ticket slug and a repo basename is an ambiguity error
+    naming both. Among basename matches, prefer an ``agent`` over a ``master``.
+    Raises ValueError if *to* is a basename matching containers from two
+    different repo roots (ambiguous), or isn't found at all.
     """
     if root is not None and mailbox_dir(root, to).is_dir():
         return to
@@ -713,7 +717,23 @@ def resolve_recipient(to: str, containers: list[dict] | None = None, root: Path 
         if c["name"] == to:
             return to
 
-    matches = [c for c in all_containers if Path(c["repo"]).name == to]
+    ticket_matches = [
+        c for c in all_containers
+        if c["kind"] == "ticket" and c["name"] == f"cld_ticket_{to}"
+    ]
+    matches = [
+        c for c in all_containers
+        if c["kind"] != "ticket" and Path(c["repo"]).name == to
+    ]
+    if ticket_matches and matches:
+        raise ValueError(
+            f"Ambiguous shortname '{to}': it is ticket container "
+            f"{ticket_matches[0]['name']} and the repo basename of "
+            f"{', '.join(sorted(c['name'] for c in matches))}. "
+            "Use the full container name."
+        )
+    if ticket_matches:
+        return ticket_matches[0]["name"]
     if not matches:
         raise ValueError(f"No container found for '{to}' (not a known shortname or container name)")
 

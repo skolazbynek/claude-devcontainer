@@ -50,6 +50,19 @@ from cld.registry import add_repo, remove_repo, ticket_repo_mounts, tickets_refe
 from cld.run import launch_run
 from cld.log import get_logger, setup_logging
 from cld.prompts import compose_brief, list_prompt_items, resolve_prompt_args
+from cld.ticket import (
+    exec_claude,
+    exec_shell,
+    forget_session_state as _forget_session_state,
+    print_ticket_detail,
+    print_ticket_logs,
+    print_ticket_roster,
+    restart_ticket,
+    shutdown_all_tickets,
+    shutdown_ticket,
+    start_ticket,
+    stop_ticket,
+)
 from cld.task_agent import (
     format_peers,
     known_task_agent_names,
@@ -633,46 +646,6 @@ def _shutdown_persistent_container(role: str, name: str, repo_root_str: str, ses
     return True
 
 
-def _forget_session_state(repo_root_str: str, session: str) -> None:
-    """Drop the session's bookmark and workspace registration from the origin's jj store.
-
-    Best-effort: both entries are independent (bookmark = named commit
-    pointer, workspace = registered working-copy path). If we leave the
-    workspace behind, the next `cld <role>` launch takes the "first launch"
-    path (no bookmark) and its `jj workspace add --name <session>` fails
-    with "Workspace named X already exists", leaving /workspace/current empty.
-    """
-    repo_root = Path(repo_root_str)
-    if not repo_root.is_dir():
-        log.warning(
-            "Cannot clean up session state for %s: repo_root %s no longer exists. "
-            "Recover manually with: cd <repo> && jj bookmark forget %s && jj workspace forget %s",
-            session, repo_root, session, session,
-        )
-        return
-    try:
-        backend = get_backend(repo_root)
-    except RuntimeError as e:
-        log.warning(
-            "Cannot clean up session state for %s in %s: %s. "
-            "Recover manually with: cd %s && jj bookmark forget %s && jj workspace forget %s",
-            session, repo_root, e, repo_root, session, session,
-        )
-        return
-    if backend.name != "jj":
-        return
-    for cmd in (["bookmark", "forget", session], ["workspace", "forget", session]):
-        result = backend.run(cmd)
-        if result.returncode != 0:
-            log.warning(
-                "jj %s failed (rc=%d): %s. "
-                "Next `cld` launch may reattach to stale state; "
-                "recover with: cd %s && jj %s",
-                " ".join(cmd), result.returncode, result.stderr.strip(),
-                repo_root, " ".join(cmd),
-            )
-
-
 # --- Task-scoped agents (headless, many per repo, master-owned lifecycle) -----
 task_agent_app = typer.Typer(
     help="Task-scoped headless agents: one per task, bounded lifespan (see docs/design-task-agents.md).",
@@ -1022,6 +995,122 @@ def task_agent_shutdown(
 
 # --- Mailbox messaging (shared with the container CLI) ------------------------
 app.add_typer(msg_app, name="msg")
+
+
+# --- Ticket containers (v2 lifecycle verbs; see docs/design-ticket-containers.md) ---
+
+_TICKET_HELP = "Ticket name (e.g. LIDE-2600); sanitized into the container slug"
+# `cld claude <ticket> -- <args>`: everything after `--` lands in ctx.args and
+# passes through to claude untouched.
+_PASSTHROUGH_ARGS = {"allow_extra_args": True, "ignore_unknown_options": True}
+
+
+@app.command()
+@_handle_errors
+def start(
+    ticket: str = typer.Argument(..., help=_TICKET_HELP),
+    repos: Optional[list[str]] = typer.Argument(
+        None,
+        help="Repos to mount: registry names or paths, each with an optional @rev anchor override",
+    ),
+    shared_anchor: list[str] = typer.Option(
+        [], "--shared-anchor", metavar="REPO",
+        help="Mount REPO anchored directly on its revision (shared mode, repeatable). "
+        + _SHARED_ANCHOR_HELP,
+    ),
+):
+    """Create or start a ticket container (interactive repo picker on a TTY with no repos).
+
+    Against an existing ticket, an explicitly different repo set shows the
+    diff, asks to confirm, and recreates the container; repos leaving the set
+    are torn down as in shutdown (commits survive).
+    """
+    require_docker()
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    start_ticket(cfg, ticket, repos or [], shared_anchor)
+
+
+@app.command(context_settings=_PASSTHROUGH_ARGS)
+@_handle_errors
+def claude(
+    ctx: typer.Context,
+    ticket: str = typer.Argument(..., help=_TICKET_HELP),
+):
+    """Exec the Claude harness at the ticket root; everything after -- passes to claude."""
+    require_docker()
+    setup_logging(Config.from_env())
+    exec_claude(ticket, ctx.args)
+
+
+@app.command()
+@_handle_errors
+def shell(ticket: str = typer.Argument(..., help=_TICKET_HELP)):
+    """Interactive bash in the ticket container -- for debugging the sandbox itself."""
+    require_docker()
+    setup_logging(Config.from_env())
+    exec_shell(ticket)
+
+
+@app.command()
+@_handle_errors
+def stop(ticket: str = typer.Argument(..., help=_TICKET_HELP)):
+    """Pause a ticket container (docker stop); `cld start` warm-starts it."""
+    require_docker()
+    setup_logging(Config.from_env())
+    stop_ticket(ticket)
+
+
+@app.command()
+@_handle_errors
+def restart(ticket: str = typer.Argument(..., help=_TICKET_HELP)):
+    """Recreate a ticket container from its persisted manifest; workspaces reattach at their bookmarks."""
+    require_docker()
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    restart_ticket(cfg, ticket)
+
+
+@app.command()
+@_handle_errors
+def shutdown(
+    ticket: Optional[str] = typer.Argument(None, help=_TICKET_HELP),
+    all_: bool = typer.Option(False, "--all", help="Shut down every ticket container on this host"),
+):
+    """End a ticket: teardown plus per-repo bookmark/workspace forget (commits survive)."""
+    if all_ == bool(ticket):
+        typer.echo("Error: pass a ticket, or --all -- not both", err=True)
+        raise typer.Exit(1)
+    require_docker()
+    setup_logging(Config.from_env())
+    if all_:
+        shutdown_all_tickets()
+    else:
+        shutdown_ticket(ticket)
+
+
+@app.command()
+@_handle_errors
+def status(ticket: Optional[str] = typer.Argument(None, help=_TICKET_HELP)):
+    """Ticket roster, or one ticket in detail (anchors, bookmark tips, session)."""
+    require_docker()
+    setup_logging(Config.from_env())
+    if ticket:
+        print_ticket_detail(ticket)
+    else:
+        print_ticket_roster()
+
+
+@app.command()
+@_handle_errors
+def logs(
+    ticket: str = typer.Argument(..., help=_TICKET_HELP),
+    tail: int = typer.Option(80, "-n", "--tail", help="Number of lines to show"),
+):
+    """Entrypoint/boot logs of a ticket container."""
+    require_docker()
+    setup_logging(Config.from_env())
+    print_ticket_logs(ticket, tail)
 
 
 # --- Repo registry ------------------------------------------------------------

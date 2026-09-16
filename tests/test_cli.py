@@ -298,7 +298,7 @@ class TestShutdownForgetsSessionState:
 
     def test_jj_backend_forgets_bookmark_and_workspace(self, tmp_path):
         backend = self._jj_backend()
-        with patch("cld.cli.get_backend", return_value=backend), \
+        with patch("cld.ticket.get_backend", return_value=backend), \
              patch("cld.cli._stop_and_remove_container") as stop_mock:
             ok = _shutdown_persistent_container("master", "cld_master_x", str(tmp_path), "cld_master_x")
         assert ok
@@ -310,7 +310,7 @@ class TestShutdownForgetsSessionState:
     def test_git_backend_skips_forget(self, tmp_path):
         backend = MagicMock()
         backend.name = "git"
-        with patch("cld.cli.get_backend", return_value=backend), \
+        with patch("cld.ticket.get_backend", return_value=backend), \
              patch("cld.cli._stop_and_remove_container"):
             ok = _shutdown_persistent_container("agent", "cld_agent_x", str(tmp_path), "cld_agent_x")
         assert ok
@@ -320,20 +320,20 @@ class TestShutdownForgetsSessionState:
         backend = MagicMock()
         backend.name = "jj"
         backend.run.return_value = MagicMock(returncode=1, stderr="conflict")
-        with patch("cld.cli.get_backend", return_value=backend), \
+        with patch("cld.ticket.get_backend", return_value=backend), \
              patch("cld.cli._stop_and_remove_container"):
             ok = _shutdown_persistent_container("master", "cld_master_x", str(tmp_path), "cld_master_x")
         assert ok
 
     def test_missing_repo_root_is_non_fatal(self, tmp_path):
         gone = tmp_path / "gone"
-        with patch("cld.cli.get_backend") as get_backend_mock, \
+        with patch("cld.ticket.get_backend") as get_backend_mock, \
              patch("cld.cli._stop_and_remove_container"):
             _forget_session_state(str(gone), "cld_master_x")
         get_backend_mock.assert_not_called()
 
     def test_get_backend_failure_is_non_fatal(self, tmp_path):
-        with patch("cld.cli.get_backend", side_effect=RuntimeError("no vcs")), \
+        with patch("cld.ticket.get_backend", side_effect=RuntimeError("no vcs")), \
              patch("cld.cli._stop_and_remove_container"):
             ok = _shutdown_persistent_container("master", "cld_master_x", str(tmp_path), "cld_master_x")
         assert ok
@@ -348,7 +348,7 @@ class TestShutdownForgetsSessionState:
         backend = self._jj_backend()
         with patch("cld.cli.require_docker"), \
              patch("cld.cli.docker_master_list", return_value=containers), \
-             patch("cld.cli.get_backend", return_value=backend), \
+             patch("cld.ticket.get_backend", return_value=backend), \
              patch("cld.cli._stop_and_remove_container"):
             result = runner.invoke(app, ["master", "shutdown", "--all"])
         assert result.exit_code == 0, result.output
@@ -391,6 +391,98 @@ class TestRestartPreservesBookmark:
         forget_mock.assert_not_called()
         stop_mock.assert_called_once()
         launch_mock.assert_called_once()
+
+
+class TestTicketVerbs:
+    """The 8 root-level ticket lifecycle commands dispatch to cld/ticket.py.
+
+    Each is its own @app.command() with the ticket as the COMMAND's positional;
+    the root group callback still takes none (the typer hazard --
+    TestBareDevcontainer::test_positionals_are_a_usage_error guards that)."""
+
+    def _invoke(self, argv, **patches):
+        with ExitStack() as stack:
+            stack.enter_context(patch("cld.cli.require_docker"))
+            mocks = {
+                name: stack.enter_context(patch(f"cld.cli.{name}"))
+                for name in patches.get("names", [])
+            }
+            result = runner.invoke(app, argv)
+        return result, mocks
+
+    def test_start_passes_ticket_repos_and_shared(self):
+        result, mocks = self._invoke(
+            ["start", "LIDE-2600", "lide-api@trunk()", "diskuze-api",
+             "--shared-anchor", "lide-api"],
+            names=["start_ticket"],
+        )
+        assert result.exit_code == 0, result.output
+        args = mocks["start_ticket"].call_args.args
+        assert args[1] == "LIDE-2600"
+        assert args[2] == ["lide-api@trunk()", "diskuze-api"]
+        assert args[3] == ["lide-api"]
+
+    def test_start_without_repos_passes_empty_list(self):
+        result, mocks = self._invoke(["start", "LIDE-2600"], names=["start_ticket"])
+        assert result.exit_code == 0, result.output
+        assert mocks["start_ticket"].call_args.args[2] == []
+
+    def test_claude_passes_everything_after_dashdash_through(self):
+        result, mocks = self._invoke(
+            ["claude", "LIDE-2600", "--", "--model", "opus", "--continue"],
+            names=["exec_claude"],
+        )
+        assert result.exit_code == 0, result.output
+        assert mocks["exec_claude"].call_args.args == (
+            "LIDE-2600", ["--model", "opus", "--continue"],
+        )
+
+    def test_shell_stop_restart_logs_dispatch(self):
+        for argv, name, expect in (
+            (["shell", "t1"], "exec_shell", ("t1",)),
+            (["stop", "t1"], "stop_ticket", ("t1",)),
+            (["logs", "t1", "-n", "5"], "print_ticket_logs", ("t1", 5)),
+        ):
+            result, mocks = self._invoke(argv, names=[name])
+            assert result.exit_code == 0, result.output
+            assert mocks[name].call_args.args == expect
+
+    def test_restart_dispatches_with_cfg(self):
+        result, mocks = self._invoke(["restart", "t1"], names=["restart_ticket"])
+        assert result.exit_code == 0, result.output
+        assert mocks["restart_ticket"].call_args.args[1] == "t1"
+
+    def test_shutdown_requires_ticket_xor_all(self):
+        for argv in (["shutdown"], ["shutdown", "t1", "--all"]):
+            result, _ = self._invoke(argv, names=["shutdown_ticket", "shutdown_all_tickets"])
+            assert result.exit_code == 1
+            assert "not both" in result.output
+
+    def test_shutdown_one_and_all(self):
+        result, mocks = self._invoke(
+            ["shutdown", "t1"], names=["shutdown_ticket", "shutdown_all_tickets"])
+        assert result.exit_code == 0, result.output
+        assert mocks["shutdown_ticket"].call_args.args == ("t1",)
+        mocks["shutdown_all_tickets"].assert_not_called()
+
+        result, mocks = self._invoke(
+            ["shutdown", "--all"], names=["shutdown_ticket", "shutdown_all_tickets"])
+        assert result.exit_code == 0, result.output
+        mocks["shutdown_all_tickets"].assert_called_once()
+        mocks["shutdown_ticket"].assert_not_called()
+
+    def test_status_roster_or_detail(self):
+        result, mocks = self._invoke(
+            ["status"], names=["print_ticket_roster", "print_ticket_detail"])
+        assert result.exit_code == 0, result.output
+        mocks["print_ticket_roster"].assert_called_once()
+        mocks["print_ticket_detail"].assert_not_called()
+
+        result, mocks = self._invoke(
+            ["status", "t1"], names=["print_ticket_roster", "print_ticket_detail"])
+        assert result.exit_code == 0, result.output
+        assert mocks["print_ticket_detail"].call_args.args == ("t1",)
+        mocks["print_ticket_roster"].assert_not_called()
 
 
 class TestChainBlockedInMaster:

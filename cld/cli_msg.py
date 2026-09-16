@@ -6,6 +6,7 @@ decorator lives here too, so both apps share exactly one definition.
 """
 
 import functools
+import os
 import subprocess
 from pathlib import Path
 
@@ -44,6 +45,23 @@ def handle_errors(func):
 
 msg_app = typer.Typer(help="Mailbox messaging with other cld containers.")
 
+_TICKET_OPTION_HELP = (
+    "Act as this ticket's container (host-side identity override; "
+    "in-container the SESSION_NAME identity always wins)"
+)
+
+
+def _act_as_ticket(ticket: str) -> None:
+    """Route the ``--ticket`` flag into ``resolve_self``'s identity chain.
+
+    ``resolve_self`` sits several calls below these commands (inside the shared
+    messenger verb modules), so the flag travels via the ``CLD_TICKET`` env var
+    -- the exact channel design-ticket-containers.md section 6.5 gives it,
+    with the same precedence (an explicit ticket beats every fallback).
+    """
+    if ticket:
+        os.environ["CLD_TICKET"] = ticket
+
 
 @msg_app.command("send")
 @handle_errors
@@ -57,11 +75,13 @@ def msg_send(
         help="Oblige the recipient to reply; only for a question you cannot proceed without",
     ),
     answers: str = typer.Option("", "--answers", help="Id of the message this one answers"),
+    ticket: str = typer.Option("", "--ticket", help=_TICKET_OPTION_HELP),
 ):
     """Deliver a message to another container's mailbox."""
     if bool(body) == bool(body_file):
         typer.echo("Error: provide exactly one of --body or --body-file", err=True)
         raise typer.Exit(1)
+    _act_as_ticket(ticket)
     send_cmd.deliver(to, subject, body or Path(body_file).read_text(),
                      expects_reply=expects_reply, answers=answers)
 
@@ -70,22 +90,32 @@ def msg_send(
 @handle_errors
 def msg_inbox(
     all_: bool = typer.Option(False, "--all", help="Include archived messages"),
+    ticket: str = typer.Option("", "--ticket", help=_TICKET_OPTION_HELP),
 ):
     """List this container's unread messages."""
+    _act_as_ticket(ticket)
     inbox_cmd.show(all_)
 
 
 @msg_app.command("read")
 @handle_errors
-def msg_read(msg_id: str = typer.Argument(..., metavar="ID")):
+def msg_read(
+    msg_id: str = typer.Argument(..., metavar="ID"),
+    ticket: str = typer.Option("", "--ticket", help=_TICKET_OPTION_HELP),
+):
     """Print one message in full (inbox first, then archive)."""
+    _act_as_ticket(ticket)
     read_cmd.show(msg_id)
 
 
 @msg_app.command("archive")
 @handle_errors
-def msg_archive(msg_id: str = typer.Argument(..., metavar="ID")):
+def msg_archive(
+    msg_id: str = typer.Argument(..., metavar="ID"),
+    ticket: str = typer.Option("", "--ticket", help=_TICKET_OPTION_HELP),
+):
     """Move a message from this container's inbox to its archive."""
+    _act_as_ticket(ticket)
     archive_cmd.move(msg_id)
 
 

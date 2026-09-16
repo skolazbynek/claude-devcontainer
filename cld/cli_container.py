@@ -17,6 +17,7 @@ from cld.config import Config
 from cld.docker import find_target_repo
 from cld.broker import broker_agent_op, broker_available, broker_task_agent_op, run_action
 from cld.log import get_logger, setup_logging
+from cld.manifest import TicketManifest
 from cld.prompts import list_prompt_items
 from cld.task_agent import print_task_agent_transcript, resolve_task_agent
 
@@ -62,6 +63,49 @@ def build_stub(ctx: typer.Context):
 @app.command("bridge", hidden=True, context_settings=_ANY_ARGS)
 def bridge_stub(ctx: typer.Context):
     _host_only("cld bridge")
+
+
+# Ticket lifecycle verbs (v2) are host-only: they drive the docker daemon.
+
+
+@app.command("start", hidden=True, context_settings=_ANY_ARGS)
+def start_stub(ctx: typer.Context):
+    _host_only("cld start")
+
+
+@app.command("claude", hidden=True, context_settings=_ANY_ARGS)
+def claude_stub(ctx: typer.Context):
+    _host_only("cld claude")
+
+
+@app.command("shell", hidden=True, context_settings=_ANY_ARGS)
+def shell_stub(ctx: typer.Context):
+    _host_only("cld shell")
+
+
+@app.command("stop", hidden=True, context_settings=_ANY_ARGS)
+def stop_stub(ctx: typer.Context):
+    _host_only("cld stop")
+
+
+@app.command("restart", hidden=True, context_settings=_ANY_ARGS)
+def restart_stub(ctx: typer.Context):
+    _host_only("cld restart")
+
+
+@app.command("shutdown", hidden=True, context_settings=_ANY_ARGS)
+def shutdown_stub(ctx: typer.Context):
+    _host_only("cld shutdown")
+
+
+@app.command("status", hidden=True, context_settings=_ANY_ARGS)
+def status_stub(ctx: typer.Context):
+    _host_only("cld status")
+
+
+@app.command("logs", hidden=True, context_settings=_ANY_ARGS)
+def logs_stub(ctx: typer.Context):
+    _host_only("cld logs")
 
 
 # --- Broker dispatch ----------------------------------------------------------
@@ -353,13 +397,17 @@ def broker(
 @app.command()
 @_handle_errors
 def repos():
-    """List host repos this master can launch peer containers against.
+    """List the repos this container works against.
 
-    Prints one path per line, tagged 'own' for master's own repo (from
-    CLD_HOST_PROJECT_DIR) and 'target' for each entry in `MASTER_TARGETS`.
+    Ticket container (v2): one line per mounted repo from the launch manifest
+    -- name, origin path, workspace path, anchor, mode
+    (docs/design-ticket-containers.md section 6.6). The manifest env is
+    host-set at launch, like `MASTER_TARGETS` below.
 
-    Reads the `MASTER_TARGETS` env var, not `cfg.master_targets` -- the host
-    already resolved, validated and expanded `master_targets` from its own
+    v1 master/devcontainer: one path per line, tagged 'own' for the container's
+    own repo (from CLD_HOST_PROJECT_DIR) and 'target' for each `MASTER_TARGETS`
+    entry. Reads the `MASTER_TARGETS` env var, not `cfg.master_targets` -- the
+    host already resolved, validated and expanded `master_targets` from its own
     config into that env var at launch (see `build_container_args` in
     cld/docker.py). Re-reading TOML in-container would look at a different
     (usually absent, since `.cld/` is gitignored) config and disagree with
@@ -367,6 +415,16 @@ def repos():
     """
     cfg = Config.from_env()
     setup_logging(cfg)
+    raw_manifest = os.environ.get("CLD_TICKET_MANIFEST", "")
+    if raw_manifest:
+        manifest = TicketManifest.from_json(raw_manifest)
+        for repo in manifest.repos:
+            typer.echo(
+                f"{repo.name}\t/workspace/origin/{repo.name}"
+                f"\t/workspace/{manifest.ticket}/{repo.name}"
+                f"\t{repo.anchor_base[:12]}\t{repo.anchor_mode}"
+            )
+        return
     if cfg.host_project_dir:
         typer.echo(f"{cfg.host_project_dir}\town")
     for entry in os.environ.get("MASTER_TARGETS", "").split(":"):

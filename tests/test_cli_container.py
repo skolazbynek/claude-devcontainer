@@ -6,6 +6,7 @@ conversation. See docs/design-cli-split.md.
 """
 
 import json
+import os
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
@@ -48,6 +49,16 @@ class TestHostOnlyStubs:
         ["chain", "run", "c.yaml"],
         ["build"],
         [],
+        # Ticket lifecycle verbs (v2) drive the docker daemon, so they are
+        # host-only too -- each stub takes any args without a usage error.
+        ["start", "lide-2600", "lide-api"],
+        ["claude", "lide-2600", "--", "--model", "opus"],
+        ["shell", "lide-2600"],
+        ["stop", "lide-2600"],
+        ["restart", "lide-2600"],
+        ["shutdown", "--all"],
+        ["status"],
+        ["logs", "lide-2600"],
     ])
     def test_refused_with_a_host_only_message(self, argv):
         result = runner.invoke(app, argv)
@@ -57,7 +68,8 @@ class TestHostOnlyStubs:
     def test_hidden_from_help(self):
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
-        for verb in ("run", "master", "chain", "build"):
+        for verb in ("run", "master", "chain", "build", "start", "claude",
+                     "shell", "stop", "restart", "shutdown", "status", "logs"):
             assert f"│ {verb}" not in result.output
         assert "task-agent" in result.output
         assert "msg" in result.output
@@ -254,6 +266,48 @@ class TestRepos:
         assert "/host/side/cld\town" in result.output
         assert "/stale/toml/path" not in result.output
 
+    def _ticket_manifest_json(self):
+        return json.dumps({
+            "v": 1,
+            "ticket": "lide-2600",
+            "repos": [
+                {"name": "lide-api", "path": "/home/u/lide-api",
+                 "anchor_base": "a" * 40, "anchor_mode": "isolated",
+                 "rev_source": "registry"},
+                {"name": "diskuze-api", "path": "/home/u/diskuze-api",
+                 "anchor_base": "b" * 40, "anchor_mode": "shared",
+                 "rev_source": "arg"},
+            ],
+        })
+
+    def test_ticket_container_prints_the_manifest(self, monkeypatch):
+        """In a ticket container (v2) `repos` renders CLD_TICKET_MANIFEST:
+        name, origin path, workspace path, anchor, mode (design section 6.6)."""
+        monkeypatch.setenv("CLD_TICKET_MANIFEST", self._ticket_manifest_json())
+        monkeypatch.setenv("MASTER_TARGETS", "/host/side/foo")  # must be ignored
+        with patch("cld.cli_container.Config.from_env", return_value=Config()):
+            result = runner.invoke(app, ["repos"])
+        assert result.exit_code == 0, result.output
+        lines = result.output.splitlines()
+        assert (
+            f"lide-api\t/workspace/origin/lide-api\t/workspace/lide-2600/lide-api"
+            f"\t{'a' * 12}\tisolated"
+        ) in lines
+        assert (
+            f"diskuze-api\t/workspace/origin/diskuze-api\t/workspace/lide-2600/diskuze-api"
+            f"\t{'b' * 12}\tshared"
+        ) in lines
+        assert "target" not in result.output
+
+    def test_v1_output_when_no_manifest_env(self, monkeypatch):
+        monkeypatch.delenv("CLD_TICKET_MANIFEST", raising=False)
+        monkeypatch.setenv("MASTER_TARGETS", "/host/side/foo")
+        with patch("cld.cli_container.Config.from_env",
+                   return_value=Config(host_project_dir="/host/side/cld")):
+            result = runner.invoke(app, ["repos"])
+        assert result.exit_code == 0, result.output
+        assert "/host/side/foo\ttarget" in result.output
+
 
 class TestMsg:
     """The mailbox verbs replace `python3 -m cld.messenger.*`; each calls the same
@@ -311,6 +365,38 @@ class TestMsg:
         with patch("cld.cli_msg.archive_cmd.move") as move:
             assert runner.invoke(app, ["msg", "archive", "m1"]).exit_code == 0
         assert move.call_args.args == ("m1",)
+
+    def test_ticket_flag_routes_into_the_identity_chain(self, monkeypatch):
+        """--ticket travels to resolve_self via the CLD_TICKET env branch
+        (design-ticket-containers.md section 6.5) -- the explicit-ticket rung
+        of the host-side identity chain."""
+        monkeypatch.setenv("CLD_TICKET", "previous")  # also restores env after
+        with patch("cld.cli_msg.send_cmd.deliver") as deliver:
+            result = runner.invoke(app, [
+                "msg", "send", "--to", "cld_ticket_other", "--subject", "hi",
+                "--body", "b", "--ticket", "LIDE-2600",
+            ])
+        assert result.exit_code == 0, result.output
+        assert os.environ["CLD_TICKET"] == "LIDE-2600"
+        deliver.assert_called_once()
+
+    def test_without_ticket_flag_the_identity_chain_is_untouched(self, monkeypatch):
+        monkeypatch.setenv("CLD_TICKET", "previous")
+        with patch("cld.cli_msg.inbox_cmd.show"):
+            assert runner.invoke(app, ["msg", "inbox"]).exit_code == 0
+        assert os.environ["CLD_TICKET"] == "previous"
+
+    @pytest.mark.parametrize("argv,target", [
+        (["msg", "inbox", "--ticket", "t9"], "cld.cli_msg.inbox_cmd.show"),
+        (["msg", "read", "m1", "--ticket", "t9"], "cld.cli_msg.read_cmd.show"),
+        (["msg", "archive", "m1", "--ticket", "t9"], "cld.cli_msg.archive_cmd.move"),
+    ])
+    def test_ticket_flag_on_every_identity_verb(self, monkeypatch, argv, target):
+        monkeypatch.setenv("CLD_TICKET", "previous")
+        with patch(target) as cmd:
+            assert runner.invoke(app, argv).exit_code == 0
+        assert os.environ["CLD_TICKET"] == "t9"
+        cmd.assert_called_once()
 
     def test_agents_kind_filter_defaults_to_none(self):
         with patch("cld.cli_msg.agents_cmd.show") as show:

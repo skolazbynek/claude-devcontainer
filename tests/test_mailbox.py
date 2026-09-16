@@ -925,3 +925,34 @@ class TestResolveRecipient:
 
     def test_single_task_agent_shortname_still_resolves(self):
         assert resolve_recipient("repoC", self._TASK_AGENTS[:1]) == "cld_agent_repoC_add-oauth"
+
+    # Ticket containers (v2): the slug is a shortname too, resolved after the
+    # exact container name and before repo basenames; a collision between a
+    # slug and a basename is an ambiguity error naming both
+    # (design-ticket-containers.md section 6.5).
+    _TICKETS = [
+        {"name": "cld_ticket_lide-2600", "kind": "ticket", "repo": "", "status": "running"},
+    ]
+
+    def test_ticket_slug_resolves_to_the_ticket_container(self):
+        assert resolve_recipient("lide-2600", self._CONTAINERS + self._TICKETS) \
+            == "cld_ticket_lide-2600"
+
+    def test_ticket_full_name_still_used_verbatim(self):
+        assert resolve_recipient("cld_ticket_lide-2600", self._TICKETS) \
+            == "cld_ticket_lide-2600"
+
+    def test_slug_equal_to_repo_basename_is_ambiguous_naming_both(self):
+        containers = self._CONTAINERS + [
+            {"name": "cld_ticket_repoA", "kind": "ticket", "repo": "", "status": "running"},
+        ]
+        with pytest.raises(ValueError) as exc:
+            resolve_recipient("repoA", containers)
+        assert "cld_ticket_repoA" in str(exc.value)
+        assert "cld_agent_repoA" in str(exc.value)
+
+    def test_ticket_repo_field_never_matches_as_basename(self):
+        """A ticket's record carries no repo-root; its (empty) repo must not
+        accidentally match anything, and unknown names still error."""
+        with pytest.raises(ValueError, match="No container found"):
+            resolve_recipient("nonexistent", self._TICKETS)
