@@ -278,7 +278,10 @@ class Config:
     # "/path/to/socket" = use that host socket path explicitly.
     ssh_auth_sock: str | None = None
 
-    # Inter-container agent messaging (mailboxes + repo agent supervisor)
+    # Inter-container agent messaging (mailboxes + the headless supervisor,
+    # cld/messenger/agent_loop.py). agent_kickoff_persona only feeds the
+    # supervisor's non-task kickoff -- vestigial since the standing `cld agent`
+    # role was removed; a task-agent composes its kickoff from the task brief.
     mailbox_root: str = _default_mailbox_root()
     agent_max_turns: int = 120
     agent_kickoff_persona: str = "agent"
@@ -291,7 +294,7 @@ class Config:
     peer_absolute_limit: int = 10
     root_ask_limit: int = 5
 
-    # The cld broker: if broker_key is set, agent/task-agent/ticket containers
+    # The cld broker: if broker_key is set, task-agent/ticket containers
     # mount the restricted private key and get a `cld broker` wrapper that ships
     # pytest args to a host-side SSH broker running the `runtests` container.
     # Empty = off. Agents and task-agents are instructed (via their personas)

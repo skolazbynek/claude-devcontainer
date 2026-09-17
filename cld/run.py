@@ -48,9 +48,9 @@ def launch_run(
     """
     if in_master_container():
         log.error(
-            "`cld run` is not supported from inside a master container "
-            "(no docker daemon). Run it on the host, or use `cld agent` to "
-            "launch a sibling agent."
+            "`cld run` is not supported from inside a container "
+            "(no docker daemon). Run it on the host, or hand the work to a "
+            "`cld task-agent`, whose lifecycle goes through the host broker."
         )
         sys.exit(1)
     require_docker()

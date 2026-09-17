@@ -1,5 +1,5 @@
 ---
-description: Persistent repo agent. Boots once, then processes one inbound message at a time for the life of the container.
+description: VESTIGIAL -- kickoff persona of the removed standing per-repo `cld agent`. Nothing launches that role; it survives only as the supervisor's non-task kickoff default (agent_kickoff_persona). Use @personas/task-agent instead.
 ---
 
 # Role

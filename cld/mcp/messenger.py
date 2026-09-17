@@ -171,8 +171,10 @@ def read_mailbox(name: str, since: str = "") -> list[dict]:
 def list_agents(kind: str = "") -> list[dict]:
     """List cld containers via Docker labels.
 
-    kind: 'agent' (the standing per-repo agent), 'task-agent' (one per task, see
-    docs/design-task-agents.md) or 'ticket'; omit for all of them.
+    kind: 'task-agent' (one per task, see docs/design-task-agents.md) or
+    'ticket'; omit for all of them. 'agent' still resolves, but only ever
+    matches a container left over from before the standing per-repo agent role
+    was removed.
     """
     log.info("MCP tool: list_agents (kind=%s)", kind or "<all>")
     return mailbox.list_containers(kind or None)

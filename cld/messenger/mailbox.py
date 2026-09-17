@@ -142,8 +142,8 @@ def write_message(
     # Budgeted iff *both* endpoints are task-agents -- exactly the agent<->agent edge.
     # Keying on both sides rather than on the sender's `peers` mapping is what makes the
     # reply direction count too: edges are asymmetric, so the named peer has no entry of
-    # its own. Masters and the standing repo agent write no meta.json, so the whole
-    # control plane is exempt for free. The recipient side reads through the archive so a
+    # its own. Ticket containers write no meta.json, so the whole control plane is
+    # exempt for free. The recipient side reads through the archive so a
     # peer reaped mid-exchange cannot un-budget the edge; the sender is live by definition.
     sender_meta = read_meta(root, frm)
     peer_edge = sender_meta is not None and read_meta_resolved(root, to) is not None
@@ -351,8 +351,8 @@ def read_meta_resolved(root: Path, name: str) -> dict | None:
 def list_fleet(root: Path, parent: str | None = None) -> list[dict]:
     """List task-agent mailboxes under *root*, optionally only those spawned by *parent*.
 
-    A mailbox belongs to a task-agent iff it holds a ``meta.json`` -- masters and
-    repo agents never write one -- so no kind field is needed here. Each entry is
+    A mailbox belongs to a task-agent iff it holds a ``meta.json`` -- ticket
+    containers never write one -- so no kind field is needed here. Each entry is
     the spawn facts plus ``name``. Reserved root entries (``_archive/``,
     ``_edges/``) are skipped.
     """
@@ -683,8 +683,8 @@ def gated_send(
 def list_containers(kind: str | None = None) -> list[dict]:
     """Enumerate cld containers, ``{name, kind, repo, status}`` per entry.
 
-    *kind* filters to one ``org.cld.kind`` value (``"agent"``,
-    ``"task-agent"``, ``"ticket"``); omit for all. Delegates to the
+    *kind* filters to one ``org.cld.kind`` value (``"task-agent"``,
+    ``"ticket"``, or the legacy ``"agent"``); omit for all. Delegates to the
     host-docker seam: the local daemon on the host, the SSH broker in a
     container (there is no docker socket in-container). Stopped containers are
     included.
@@ -705,7 +705,9 @@ def resolve_recipient(to: str, containers: list[dict] | None = None, root: Path 
     Otherwise enumerate, in order (design-ticket-containers.md section 6.5):
     exact container name, then ticket slug, then repo basename -- a shortname
     matching both a ticket slug and a repo basename is an ambiguity error
-    naming both. Among basename matches, prefer the standing ``agent``.
+    naming both. Among basename matches, an ``agent``-kind container wins:
+    nothing launches that (removed) standing role any more, but one left over
+    from an older image is still a single, unambiguous answer for its repo.
     Raises ValueError if *to* is a basename matching containers from two
     different repo roots (ambiguous), or isn't found at all.
     """

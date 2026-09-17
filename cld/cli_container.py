@@ -265,17 +265,6 @@ def task_agent_transcript(
     print_task_agent_transcript(cfg, resolve_task_agent(cfg, name))
 
 
-# --- Persistent repo agent ----------------------------------------------------
-# Host-only: launching or managing a standing repo agent from inside a
-# container was the master role's sibling-launch route (broker `agent` action),
-# removed with it.
-
-
-@app.command("agent", hidden=True, context_settings=_ANY_ARGS)
-def agent_stub(ctx: typer.Context):
-    _host_only("cld agent")
-
-
 # --- Mailbox messaging --------------------------------------------------------
 app.add_typer(msg_app, name="msg")
 
@@ -287,7 +276,7 @@ app.add_typer(msg_app, name="msg")
 @_handle_errors
 def broker(
     ctx: typer.Context,
-    action: str = typer.Argument(..., help="Broker action: run-tests, list-containers, agent, task-agent, graphql"),
+    action: str = typer.Argument(..., help="Broker action: run-tests, list-containers, task-agent, graphql"),
 ):
     """Run a host-side action through the cld broker (docs/design-cld-broker.md).
 
@@ -318,7 +307,7 @@ def repos():
     (docs/design-ticket-containers.md section 6.6). The manifest env is
     host-set at launch.
 
-    v1 agent/task-agent: the single repo the container was launched for,
+    v1 task-agent: the single repo the container was launched for,
     tagged 'own'. Its host path comes from the host-set CLD_HOST_PROJECT_DIR,
     not from in-container TOML -- `.cld/` is gitignored, so a re-read would
     usually find nothing and disagree with the host.

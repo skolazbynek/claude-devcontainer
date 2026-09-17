@@ -26,7 +26,7 @@ poetry run cld --help
 cld build [--no-cache]
 ```
 
-The v1 verbs (`cld agent`, `cld run`, `cld chain`) must be run from within a VCS repository (jj or git) -- they operate on the cwd repo. The ticket verbs (`cld start`, `cld claude`, ...) run from anywhere: their repos come from the registry or from explicit paths.
+The v1 verbs (`cld task-agent`, `cld run`, `cld chain`) must be run from within a VCS repository (jj or git) -- they operate on the cwd repo. The ticket verbs (`cld start`, `cld claude`, ...) run from anywhere: their repos come from the registry or from explicit paths.
 
 ## Usage
 
@@ -55,9 +55,9 @@ cld chain dry-run @review-implement
 
 # --- v1 headless role (superseded by ticket containers; still works) ---
 
-# Persistent per-repo headless Claude agent (mailbox-driven)
-cld agent                                 # start; never attaches
-cld agent {restart | shutdown [--all] | status | logs}
+# Task-scoped headless Claude agent (one per task, mailbox-driven)
+cld task-agent start [refs...] -n <slug> [-p prompt]
+cld task-agent {status | logs | transcript | shutdown}
 ```
 
 ## Ticket containers (v2)
@@ -105,7 +105,7 @@ Resume: transcripts land on the host under the per-ticket cwd slug, so `cld clau
 
 At first launch, each repo's anchor revision resolves as: explicit `@rev` from the launch args, else the registry `default_rev`, else `trunk()`. In isolated mode (default), a scratch commit is staged as a child of the anchor and the ticket may edit only its descendants; `--shared-anchor <repo>` (repeatable, per repo) widens the editable tree to every descendant of the anchor itself. The anchor is never written to. The contract is policy, enforced by prompt and convention, not mechanism.
 
-When a new ticket's anchor lies inside another live ticket's editable tree in the same repo, cld **warns and proceeds** (stacked tickets are legitimate). Anchoring inside a headless container's tree (`agent`, `task-agent`, `run`) still blocks, in both directions.
+When a new ticket's anchor lies inside another live ticket's editable tree in the same repo, cld **warns and proceeds** (stacked tickets are legitimate). Anchoring inside a headless container's tree (`task-agent`, `run`) still blocks, in both directions.
 
 **Git-backed repos get weaker guarantees:** no scratch commit (the effective anchor is the base itself), no overlap check, no watchman snapshots -- worktree semantics only.
 
@@ -125,13 +125,14 @@ Verified deliberate differences from the v1 roles:
 
 ### Migration from v1
 
-1. **Shut down all v1 agents first** (`cld agent shutdown --all`) -- bookmark/workspace hygiene in every repo store. (The `cld master` role is gone; if a master container from an older cld is still around, remove it with `docker rm -f` and `jj bookmark forget` its session.)
+1. **Reap any v1 task-agents first** (`cld task-agent shutdown --all`) -- bookmark/workspace hygiene in every repo store. (The `cld master` and standing `cld agent` roles are both gone; if such a container from an older cld is still around, remove it with `docker rm -f` and `jj bookmark forget` its session.)
 2. **Register each repo you work on:** `cld repos add <name> <path>`.
 3. Muscle memory:
 
 | v1 | v2 |
 |---|---|
 | `cld master` (removed) | `cld start <ticket> <repo>` + `cld claude <ticket>` |
+| `cld agent` (removed) | `cld task-agent start ... -n <slug>` for bounded headless work |
 | in-container shell work | `cld claude <ticket>` (daily) / `cld shell <ticket>` (sandbox debugging) |
 | `cld master shutdown` | `cld shutdown <ticket>` |
 | `cld master status` / `logs` | `cld status [<ticket>]` / `cld logs <ticket>` |
@@ -247,7 +248,7 @@ This detection runs both on the host (CLI commands) and inside containers (entry
 
 ## Messenger
 
-Lets any cld container (ticket, repo agent or task-agent) send a message to any other and get a reply on its next turn, backed by a shared mailbox directory on the host -- no threads, no polling required from the user. Full design and mental model: `docs/design-agent-messaging.md`.
+Lets any cld container (ticket or task-agent) send a message to any other and get a reply on its next turn, backed by a shared mailbox directory on the host -- no threads, no polling required from the user. Full design and mental model: `docs/design-agent-messaging.md`.
 
 Ticket containers get a mailbox named `cld_ticket_<slug>` and can be addressed by the ticket slug; a slug that is also some repo's basename is an ambiguity error naming both. Host-side `cld msg` acts as: the `--ticket` flag (or `CLD_TICKET` env), else the single running ticket container if exactly one exists, else the cwd repo's own host identity.
 
@@ -255,25 +256,25 @@ Ticket containers get a mailbox named `cld_ticket_<slug>` and can be addressed b
 # Register for host use (user-scoped, works from any directory)
 claude mcp add -s user messenger -- /path/to/cld/scripts/mcp/run-messenger.sh
 
-# Start a persistent, headless repo agent for the current repo
-cld agent
+# Spawn a headless task-agent for the current repo
+cld task-agent start @personas/implementer -n add-oauth -p "Add OAuth login."
 
-# From any other container (a ticket or another agent), message it by repo basename
-# (inside Claude): mcp__messenger__send(to="my-repo", subject="...", body="...", expects_reply=True)
+# From any other container (a ticket or another agent), message it by container name
+# (inside Claude): mcp__messenger__send(to="cld_agent_my-repo_add-oauth", subject="...", body="...", expects_reply=True)
 ```
 
 **Tools:** `send(to, subject, body)`, `list_inbox(unread_only)`, `read_message(id)`, `archive(id)`, `list_agents(kind)`.
 
 **Lifecycle:**
 ```bash
-cld agent                     # start (idempotent per repo)
-cld agent restart             # rebuild + relaunch (fresh session)
-cld agent shutdown [--all]    # stop + remove + cleanup
-cld agent status              # supervisor phase / session / cost
-cld agent logs [-n N]         # tail its log
+cld task-agent start ... -n <slug>   # spawn (every start is a new container)
+cld task-agent status [<slug>]       # roster, or one agent's phase / session / cost
+cld task-agent logs <slug> [-n N]    # tail its supervisor log
+cld task-agent transcript <slug>     # the mailbox conversation (survives a reap)
+cld task-agent shutdown <slug>       # stop + remove + cleanup
 ```
 
-The repo agent has one persistent Claude session that survives across messages -- it remembers prior conversations with a given sender, so follow-ups like "for question a, RESTRICT" resolve without re-stating context. A message sent with `expects_reply` gets exactly one reply; if the agent's turn doesn't call `send()`, the supervisor synthesizes a fallback so a question is never left hanging. Without that flag the agent stays quiet by design -- an unconditional reply makes each acknowledgment oblige another one.
+A task-agent has one persistent Claude session that survives across messages -- it remembers prior conversations with a given sender, so follow-ups like "for question a, RESTRICT" resolve without re-stating context. A message sent with `expects_reply` gets exactly one reply; if the agent's turn doesn't call `send()`, the supervisor synthesizes a fallback so a question is never left hanging. Without that flag the agent stays quiet by design -- an unconditional reply makes each acknowledgment oblige another one.
 
 ## Architecture
 
@@ -296,13 +297,13 @@ cld/                               Python package (CLI + shared logic)
   mcp/messenger.py                 MCP server for the mailbox transport
   mcp/graphql.py                   MCP server for GraphQL testing -- thin client over the broker's `graphql` action
   messenger/mailbox.py             filesystem mailbox transport
-  messenger/agent_loop.py          repo agent supervisor daemon
+  messenger/agent_loop.py          headless agent supervisor daemon (task-agents)
 
 scripts/
   mcp/run-messenger.sh             venv wrapper for the messenger MCP server
   mcp/run-graphql.sh               venv wrapper for the graphql-tester MCP server
 
-broker/                            host-side broker: sshd ForceCommand dispatching run-tests/agent/task-agent/graphql actions
+broker/                            host-side broker: sshd ForceCommand dispatching run-tests/list-containers/task-agent/graphql actions
 graphqlserver/                     image serving a project's GraphQL server at a jj revision, driven by the broker's graphql action
 
 imgs/
@@ -381,7 +382,7 @@ Full set of keys:
 | Key | Type | Default | Purpose |
 |---|---|---|---|
 | `base_image` | string | `"claude-base:latest"` | Common base Docker image |
-| `devcontainer_image` | string | `"claude-devcontainer:latest"` | Devcontainer image (`cld agent`, `cld task-agent`, ticket containers) |
+| `devcontainer_image` | string | `"claude-devcontainer:latest"` | Devcontainer image (`cld task-agent`, ticket containers) |
 | `run_image` | string | `"claude-run:latest"` | One-shot run image (`cld run`) |
 | `pyproject_dir` | string | `"."` | Directory (relative to repo root) holding `pyproject.toml` and `.env`. Not a `Config` field -- read directly out of `.cld/config.toml` by `cld-broker.sh` on the host, for the broker's `PROJECT_SUBDIR` and secrets path (see "Host-side test running" in `CLAUDE.md`) |
 | `ssl_certs_path` | string | `""` | Opt-in override: host path (dir or PEM file) that **replaces** the baked CA bundle. Empty = use the baked bundle |
@@ -393,10 +394,10 @@ Full set of keys:
 | `poll_interval` | int (seconds) | `30` | Chain orchestrator's docker-ps poll interval |
 | `chain_max_parallel` | int | `4` | Max agents launched concurrently in a chain's parallel group |
 | `chain_default_model` | string | `""` | Model override for chain agents; empty = each step's own default |
-| `ssh_auth_sock` | string | unset (auto-detect) | SSH agent forwarding into every devcontainer-image launch (`agent`, `task-agent`, tickets). Unset = auto-detect host `$SSH_AUTH_SOCK`; `""` = explicitly disable; a path = use that socket. Launches the broker makes on a container's behalf need `SSH_AUTH_SOCK` in `broker.conf` -- see `broker/README.md` |
-| `mailbox_root` | string | `"~/.cld/mailboxes"` | Host root of the inter-container mailbox tree (bind-mounted RW into every agent, task-agent and ticket container) |
-| `agent_max_turns` | int | `120` | Per-message turn cap passed to the repo agent's `claude -p --max-turns` |
-| `agent_kickoff_persona` | string | `"agent"` | Persona used to kick off a new `cld agent` Claude session |
+| `ssh_auth_sock` | string | unset (auto-detect) | SSH agent forwarding into every devcontainer-image launch (`task-agent`, tickets). Unset = auto-detect host `$SSH_AUTH_SOCK`; `""` = explicitly disable; a path = use that socket. Launches the broker makes on a container's behalf need `SSH_AUTH_SOCK` in `broker.conf` -- see `broker/README.md` |
+| `mailbox_root` | string | `"~/.cld/mailboxes"` | Host root of the inter-container mailbox tree (bind-mounted RW into every task-agent and ticket container) |
+| `agent_max_turns` | int | `120` | Per-message turn cap passed to the agent supervisor's `claude -p --max-turns` |
+| `agent_kickoff_persona` | string | `"agent"` | Kickoff persona for the supervisor's non-task mode. Vestigial: the standing `cld agent` role that used it is gone, and every live launch is a task-agent, which composes its kickoff from the task brief instead |
 | `broker_key` | string | `""` | Host path to the restricted broker **private** key. Setting this enables `cld broker <action>` inside a container |
 | `broker_endpoint` | string | `"host.docker.internal:2222"` | Broker SSH endpoint, `[user@]host:port` (default login user `zet`) |
 | `broker_known_hosts` | string | `""` | Host path to the pinned `known_hosts` for the broker; required for the client's strict host-key check |

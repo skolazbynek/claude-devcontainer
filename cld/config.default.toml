@@ -54,12 +54,14 @@ home_mounts_devcontainer = [
 # Set to "" to disable forwarding. Set to an explicit socket path to override.
 # ssh_auth_sock = ""
 
-# Inter-container agent messaging (mailboxes + repo agent supervisor)
+# Inter-container agent messaging (mailboxes + the headless agent supervisor)
 # mailbox_root = "~/.cld/mailboxes"  # host root for the mailbox tree
 # agent_max_turns = 120              # per-message turn cap for the agent supervisor
 #                                    # (an implementation task spends turns fast; 30 was
 #                                    #  not enough for one to reach its first commit)
-# agent_kickoff_persona = "agent"  # persona used to kick off a new agent session
+# agent_kickoff_persona = "agent"  # kickoff persona for the supervisor's non-task mode;
+#                                  # vestigial -- the standing `cld agent` role that used
+#                                  # it is gone, and a task-agent kicks off from its brief
 
 # Task-scoped agents (see docs/design-task-agents.md)
 # max_task_agents = 4       # max running task-agents per master

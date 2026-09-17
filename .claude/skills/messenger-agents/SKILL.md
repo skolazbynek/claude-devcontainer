@@ -1,9 +1,9 @@
 ---
 name: messenger-agents
 description: >
-  List running and stopped cld containers (masters, repo agents, task-agents) that can be
+  List running and stopped cld containers (tickets, task-agents) that can be
   targeted with the messenger. Invoke when the user asks which agents,
-  masters, or containers are around, or wants to know who to send a message to.
+  tickets, or containers are around, or wants to know who to send a message to.
 user-invocable: true
 ---
 

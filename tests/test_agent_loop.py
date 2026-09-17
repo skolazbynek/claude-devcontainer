@@ -1,4 +1,4 @@
-"""Tests for cld.messenger.agent_loop: the repo agent supervisor state machine.
+"""Tests for cld.messenger.agent_loop: the headless agent supervisor state machine.
 
 Drives AgentSupervisor bare-metal (no Docker) against a stub `claude` binary
 and a temp mailbox root, per the design doc's suggested manual-test approach.

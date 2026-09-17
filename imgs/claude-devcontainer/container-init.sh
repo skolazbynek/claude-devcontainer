@@ -82,7 +82,7 @@ EOF
 }
 
 # Create this container's own mailbox dirs under the shared mailbox mount.
-# No-op if the mailbox tree isn't mounted (plain devcontainer / one-shot agent sessions).
+# No-op if the mailbox tree isn't mounted (one-shot `cld run` sessions).
 ensure_own_mailbox() {
     local mailbox_base="/var/cld/mailboxes"
     [ -d "$mailbox_base" ] || return 0

@@ -131,10 +131,12 @@ fi
 
 cd "$WORKSPACE_ORIGIN"
 
-# v1 single-repo boot: the three-branch workspace logic (warm restart /
-# reattach / first launch) lives in cld_boot_workspace (vcs-lib.sh), shared
-# with the ticket loop above. Base revision comes from AGENT_REVISION_HINT, a
-# hash the host resolved from its own jj view.
+# v1 single-repo boot: with the bare, master and standing-agent roles gone, the
+# task-agent is the only kind that still takes this path (`cld run` has its own
+# image and entrypoint, imgs/claude-run). The three-branch workspace logic (warm
+# restart / reattach / first launch) lives in cld_boot_workspace (vcs-lib.sh),
+# shared with the ticket loop above. Base revision comes from
+# AGENT_REVISION_HINT, a hash the host resolved from its own jj view.
 if ! cld_boot_workspace "$WORKSPACE_ORIGIN" /workspace/current "$BOOKMARK" \
         "${AGENT_REVISION_HINT:-@}" "${AGENT_ANCHOR_MODE:-isolated}" env; then
     exit 1
@@ -146,8 +148,8 @@ cld_enable_watchman /workspace/current
 
 cd /workspace/current
 
-# Task-agent only: the deliverable branch is a *second*, durable bookmark that
-# survives teardown (the session bookmark does not). Created at the anchor so it
+# The deliverable branch is a *second*, durable bookmark that survives
+# teardown (the session bookmark does not). Created at the anchor so it
 # has a base to exist at; from then on only the agent moves it, by squashing its
 # work into it on wrap-up. Create-if-absent, so a restart or reattach never
 # rewinds a branch that already advanced.
@@ -161,7 +163,7 @@ if [ -n "${TASK_AGENT_MODE:-}" ] && [ -n "${AGENT_DELIVERABLE_BRANCH:-}" ]; then
     else
         echo "[WARN] could not create deliverable bookmark '$AGENT_DELIVERABLE_BRANCH'" >&2
     fi
-    # Wrap-up may push this branch to the remote; agent containers ship no
+    # Wrap-up may push this branch to the remote; task-agent containers ship no
     # known_hosts, so a first push would fail host-key verification.
     seed_known_hosts
 fi
@@ -192,9 +194,12 @@ fi
 printf '#!/bin/bash\nexec %s %s "$@"\n' "$CLAUDE_BIN" "$CLAUDE_EXTRA_ARGS" > /tmp/bin/claude
 chmod +x /tmp/bin/claude
 
+# AGENT_MODE is the headless mailbox-supervisor branch; the task-agent role is
+# its only producer (cld/docker.py:build_container_args), and TASK_AGENT_MODE
+# always rides along with it.
 if [ -n "${AGENT_MODE:-}" ]; then
     if [ "$MAILBOX_OK" -ne 0 ]; then
-        echo "Error: repo agent cannot start without its mailbox (see error above)" >&2
+        echo "Error: a task-agent cannot start without its mailbox (see error above)" >&2
         exit 1
     fi
     touch /tmp/cld-agent-ready               # host readiness sentinel (/tmp is non-root writable)

@@ -399,8 +399,12 @@ class TestShutdownTicket:
 
 
 class TestForgetSessionState:
-    """The per-repo forget shared with the v1 roles (moved from cld/cli.py;
-    behavior tests live in test_cli.py's TestShutdownForgetsSessionState)."""
+    """The per-repo forget shared by ticket teardown and the task-agent reap.
+
+    Dropping the session bookmark AND the workspace registration is what makes
+    the next launch under that name a fresh lifecycle; every failure mode is
+    non-fatal, because teardown must finish regardless.
+    """
 
     def test_jj_forgets_bookmark_and_workspace(self, tmp_path):
         backend = MagicMock()
@@ -413,6 +417,30 @@ class TestForgetSessionState:
             ["bookmark", "forget", "cld_ticket_x"],
             ["workspace", "forget", "cld_ticket_x"],
         ]
+
+    def test_git_backend_skips_forget(self, tmp_path):
+        backend = MagicMock()
+        backend.name = "git"
+        with patch("cld.ticket.get_backend", return_value=backend):
+            forget_session_state(str(tmp_path), "cld_agent_r_x")
+        backend.run.assert_not_called()
+
+    def test_forget_failure_is_non_fatal(self, tmp_path):
+        backend = MagicMock()
+        backend.name = "jj"
+        backend.run.return_value = MagicMock(returncode=1, stderr="conflict")
+        with patch("cld.ticket.get_backend", return_value=backend):
+            forget_session_state(str(tmp_path), "cld_agent_r_x")
+        assert backend.run.call_count == 2
+
+    def test_missing_repo_root_never_touches_the_backend(self, tmp_path):
+        with patch("cld.ticket.get_backend") as get_backend_mock:
+            forget_session_state(str(tmp_path / "gone"), "cld_agent_r_x")
+        get_backend_mock.assert_not_called()
+
+    def test_get_backend_failure_is_non_fatal(self, tmp_path):
+        with patch("cld.ticket.get_backend", side_effect=RuntimeError("no vcs")):
+            forget_session_state(str(tmp_path), "cld_agent_r_x")
 
 
 class TestExecVerbs:

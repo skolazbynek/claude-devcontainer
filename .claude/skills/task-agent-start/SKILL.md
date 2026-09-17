@@ -11,8 +11,8 @@ user-invocable: true
 # Task-agent: spawn one
 
 A task-agent is bounded to **one task**, driven by you, and torn down when its work
-has landed. That is the difference from `cld agent`, the one standing agent per
-repo, immortal for as long as its container runs.
+has landed. It is the only standing headless role left: the immortal one-per-repo
+`cld agent` is gone.
 
 ## Prerequisite: inside a master, with a host channel
 

@@ -45,8 +45,6 @@ class TestHostOnlyStubs:
 
     @pytest.mark.parametrize("argv", [
         ["run", "task.md"],
-        ["agent"],
-        ["agent", "status"],
         ["chain", "run", "c.yaml"],
         ["build"],
         [],
@@ -69,7 +67,7 @@ class TestHostOnlyStubs:
     def test_hidden_from_help(self):
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
-        for verb in ("run", "agent", "chain", "build", "start", "claude",
+        for verb in ("run", "chain", "build", "start", "claude",
                      "shell", "stop", "restart", "shutdown", "status", "logs"):
             assert f"│ {verb}" not in result.output
         assert "task-agent" in result.output

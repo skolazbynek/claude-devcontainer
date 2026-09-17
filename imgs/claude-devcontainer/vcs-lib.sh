@@ -1,8 +1,9 @@
 # Shell-level VCS abstraction. Source this file to get vcs_* functions.
 #
 # Detects whether the repository is jujutsu or git and provides a unified set
-# of functions that both entrypoints (agent and devcontainer) use for workspace
-# isolation, branching, committing, and cleanup.
+# of functions the devcontainer entrypoint uses (for both its ticket boot loop
+# and the v1 task-agent flow) for workspace isolation, branching, committing,
+# and cleanup.
 #
 # Usage: source /workspace/vcs-lib.sh
 # Requires: WORKSPACE_ORIGIN to be set.

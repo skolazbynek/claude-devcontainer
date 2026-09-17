@@ -1,6 +1,6 @@
 # cld host broker
 
-The host-side glue that lets a `cld agent`, `cld task-agent` or ticket
+The host-side glue that lets a `cld task-agent` or ticket
 container trigger a fixed set of host-side actions -- run the target repo's
 tests, enumerate cld containers, drive a GraphQL server -- without ever
 seeing the secrets. The `task-agent` launcher action gates `<target>` on the
@@ -133,7 +133,7 @@ just defining/removing the function.
 
 **Built-in actions:** `run-tests` (pytest in the `runtests` container),
 `list-containers` (read-only cld-container enumeration for the messenger /
-`cld agent status`), `task-agent` (`<target> <op>` -- the `cld task-agent`
+`cld task-agent status`), `task-agent` (`<target> <op>` -- the `cld task-agent`
 lifecycle verbs), and `graphql` (`<op> [args...]` -- start/stop/restart/status/
 logs for the calling session's own GraphQL server, plus query/introspect/
 endpoints against it or a credentialed alias; see

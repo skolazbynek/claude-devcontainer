@@ -5,7 +5,7 @@
 #
 #     <action> <session> <base64-argv>
 #
-# The broker serves ANY repo that has a running agent, task-agent or ticket
+# The broker serves ANY repo that has a running task-agent or ticket
 # container -- no per-repo config, no whitelist. It resolves the target
 # repo from the calling container's host-set labels (established at launch,
 # not caller input): the single `org.cld.repo-root` for v1 kinds, or -- for a
@@ -14,8 +14,8 @@
 # (resolve_repo_target). The caller controls only: the action, a validated
 # session id, and the decoded argv. Nothing is ever eval'd.
 #
-# v1 sessions are all named `cld_agent_*` (both the standing repo agent and
-# task-agents -- kind is a label, not a name, see
+# v1 sessions are all named `cld_agent_*` (task-agents -- the prefix is a
+# leftover of the removed standing repo agent; kind is a label, not a name, see
 # cld/docker.py:task_agent_container_name), plus the v2 ticket containers. Any
 # of these may call `run-tests` / `list-containers`. The `task-agent` launcher
 # action gates on validate_target, which since the removal of the master role
@@ -118,8 +118,9 @@ action_run_tests() {
         "$RUNTESTS_IMAGE" "$@"
 }
 
-# Enumerate cld containers for the messenger / `cld agent status`. Read-only:
-# the sole argv is an optional kind filter (agent|task-agent|ticket). Emits one
+# Enumerate cld containers for the messenger / `cld task-agent status`.
+# Read-only: the sole argv is an optional kind filter
+# (task-agent|ticket, or the legacy agent). Emits one
 # tab-separated `name<TAB>kind<TAB>repo<TAB>raw-status` line per container.
 action_list_containers() {
     local kind="${1:-}"
@@ -823,7 +824,7 @@ REPO=""
 if [ "$KIND" != ticket ]; then
     REPO=$(docker inspect "$session" --format '{{index .Config.Labels "org.cld.repo-root"}}' 2>/dev/null) || true
     [ -n "$REPO" ] && { [ -d "$REPO/.jj" ] || [ -d "$REPO/.git" ]; } \
-        || { echo "no agent/task-agent container for session $session" >&2; exit 3; }
+        || { echo "no task-agent container for session $session" >&2; exit 3; }
 fi
 
 # Per-action context (REV, secrets, target validation) is resolved inside each

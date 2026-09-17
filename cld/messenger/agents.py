@@ -1,4 +1,8 @@
-"""List cld containers (repo agents, task-agents, tickets) via Docker labels."""
+"""List cld containers (task-agents, tickets) via Docker labels.
+
+``agent`` stays an accepted ``--kind`` so a container left over from before the
+standing per-repo agent role was removed is still listable.
+"""
 
 import argparse
 

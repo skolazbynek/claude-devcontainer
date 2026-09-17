@@ -371,7 +371,6 @@ def build_container_args(
     session_name: str,
     cfg: Config,
     *,
-    agent: bool = False,
     task_agent: TaskAgentSpec | None = None,
     anchor_hash: str = "",
     anchor_mode: str = "isolated",
@@ -383,11 +382,11 @@ def build_container_args(
     note in the body). Devcontainer-only
     mounts (gitconfig, bashrc, nvim) are added by the launcher in cli.py.
 
-    ``agent`` and ``task_agent`` are mutually exclusive persistent-container
-    roles (``agent`` is the headless messaging agent, ``task_agent`` the
-    task-scoped one); either adds the ``org.cld.kind`` label set and
-    mounts the shared mailbox tree. With neither set the container is a
-    one-shot `cld run`: ``--rm``, anonymous, no broker or mailbox.
+    ``task_agent`` selects the one persistent v1 role left (the task-scoped
+    agent): it adds the ``org.cld.kind`` label set and mounts the shared
+    mailbox tree. Without it the container is a one-shot `cld run`: ``--rm``,
+    anonymous, no broker or mailbox. Ticket containers (v2) have their own
+    builder, ``build_ticket_container_args``.
 
     ``anchor_hash``/``anchor_mode``, when given, are stamped as host-set
     ``org.cld.anchor``/``org.cld.anchor-mode`` labels on every role including
@@ -397,44 +396,38 @@ def build_container_args(
     they're the source of truth the overlap check reads back via
     ``docker_occupant_list``.
     """
-    if agent and task_agent:
-        raise ValueError("agent and task_agent are mutually exclusive roles")
-
     home = os.path.expanduser("~")
     host_home = to_host_path(home, cfg)
     host_repo_root = to_host_path(str(repo_root), cfg)
 
     args: list[str] = []
 
-    if agent or task_agent:
-        kind = "task-agent" if task_agent else "agent"
+    if task_agent:
+        # AGENT_MODE is the entrypoint's headless-supervisor branch and
+        # TASK_AGENT_MODE modifies it (same mailbox precondition, readiness
+        # sentinel and supervisor exec); the task-scoped role is the only
+        # producer of either since the standing repo agent was removed. Labels
+        # are host-set, so the cap and the own-fleet check can trust them; the
+        # env vars are what the in-container supervisor turns into meta.json.
         args += [
             "--name", session_name,
-            "--label", f"org.cld.kind={kind}",
+            "--label", "org.cld.kind=task-agent",
             "--label", f"org.cld.repo-root={host_repo_root}",
             "--label", f"org.cld.session={session_name}",
+            "--label", f"org.cld.task={task_agent.slug}",
+            "--label", f"org.cld.parent-master={task_agent.parent_master}",
             "-e", "AGENT_MODE=1",
+            "-e", "TASK_AGENT_MODE=1",
+            "-e", f"AGENT_TASK_SLUG={task_agent.slug}",
+            "-e", f"AGENT_PARENT_MASTER={task_agent.parent_master}",
+            "-e", f"AGENT_DELIVERABLE_BRANCH={task_agent.deliverable_branch}",
+            "-e", f"AGENT_PEERS={task_agent.peers_env()}",
+            # In-container Config.from_env() sees no host user TOML, so the
+            # operator's configured budgets have to be passed in.
+            "-e", f"CLD_PEER_ABSOLUTE_LIMIT={cfg.peer_absolute_limit}",
+            "-e", f"CLD_ROOT_ASK_LIMIT={cfg.root_ask_limit}",
+            "-e", f"CLD_AGENT_MAX_TURNS={cfg.agent_max_turns}",
         ]
-        if task_agent:
-            # TASK_AGENT_MODE modifies the AGENT_MODE branch (same mailbox
-            # precondition, readiness sentinel and supervisor exec) rather than
-            # being a fourth mode. Labels are host-set, so the cap and the
-            # own-fleet check can trust them; the env vars are what the
-            # in-container supervisor turns into meta.json.
-            args += [
-                "--label", f"org.cld.task={task_agent.slug}",
-                "--label", f"org.cld.parent-master={task_agent.parent_master}",
-                "-e", "TASK_AGENT_MODE=1",
-                "-e", f"AGENT_TASK_SLUG={task_agent.slug}",
-                "-e", f"AGENT_PARENT_MASTER={task_agent.parent_master}",
-                "-e", f"AGENT_DELIVERABLE_BRANCH={task_agent.deliverable_branch}",
-                "-e", f"AGENT_PEERS={task_agent.peers_env()}",
-                # In-container Config.from_env() sees no host user TOML, so the
-                # operator's configured budgets have to be passed in.
-                "-e", f"CLD_PEER_ABSOLUTE_LIMIT={cfg.peer_absolute_limit}",
-                "-e", f"CLD_ROOT_ASK_LIMIT={cfg.root_ask_limit}",
-                "-e", f"CLD_AGENT_MAX_TURNS={cfg.agent_max_turns}",
-            ]
     else:
         args += ["--rm"]
         if anchor_hash:
@@ -513,22 +506,21 @@ def build_container_args(
     # No docker socket is mounted into any container (it was equivalent to host
     # root). In-container docker needs -- peer enumeration above all -- go
     # through the host broker over SSH (see cld/broker.py,
-    # broker/cld-broker.sh). The broker key is mounted for the persistent roles
-    # (agent, task-agent) by stage_broker below.
+    # broker/cld-broker.sh). The broker key is mounted for the persistent role
+    # (task-agent) by stage_broker below.
 
-    # Host test broker (persistent roles): mount the restricted key +
+    # Host test broker (persistent role): mount the restricted key +
     # known_hosts and make the broker reachable.
-    # No-op unless broker_key is set. Agents and task-agents get this too so
-    # they can run `cld broker run-tests`, but their personas instruct them to
-    # only invoke it with explicit per-run authorization from their master --
-    # see prompts/personas/agent.md and prompts/personas/task-agent.md.
-    if agent or task_agent:
+    # No-op unless broker_key is set. Task-agents get this so they can run
+    # `cld broker run-tests`, but their persona instructs them to only invoke
+    # it with explicit per-run authorization from their master -- see
+    # prompts/personas/task-agent.md.
+    #
+    # Mailbox tree -- shared RW mount so every task-agent and ticket container
+    # sees the same mailbox filesystem.
+    if task_agent:
         args += stage_broker(cfg)
         args += stage_otel(cfg, session_name)
-
-    # Mailbox tree -- shared RW mount so every agent and task-agent container
-    # sees the same mailbox filesystem.
-    if agent or task_agent:
         args += stage_mailbox(cfg)
 
     log.debug("Container args: %s", mask_secrets(repr(args)))
@@ -692,24 +684,16 @@ def ticket_container_name(ticket: str) -> str:
     return f"cld_ticket_{ticket_slug(ticket)}"
 
 
-def agent_container_name(repo_root: Path) -> str:
-    """Deterministic container name for the repo agent of *repo_root*.
-
-    Unlike ``host_identity_name`` this skips the sha8 disambiguator: at
-    most one agent per repo basename may run host-wide (see design doc Q4).
-    """
-    return f"cld_agent_{repo_root.name}"
-
-
 _TASK_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
 def task_agent_container_name(repo_root: Path, slug: str, suffix: int = 0) -> str:
     """Container name for a task-scoped agent: ``cld_agent_<repo>_<slug>[-<suffix>]``.
 
-    The ``cld_agent_`` prefix is deliberately shared with the repo agent -- the
-    ``org.cld.kind`` label is the discriminator, not the name (see
-    docs/design-task-agents.md D5). *suffix* > 1 is the collision disambiguator.
+    The ``cld_agent_`` prefix was deliberately shared with the (now removed)
+    standing repo agent -- the ``org.cld.kind`` label is the discriminator, not
+    the name (see docs/design-task-agents.md D5). *suffix* > 1 is the collision
+    disambiguator.
     """
     if not _TASK_SLUG_RE.match(slug):
         raise ValueError(
@@ -748,10 +732,6 @@ def _docker_status(name: str) -> str:
     return "running" if result.stdout.strip() == "running" else "stopped"
 
 
-def docker_agent_status(name: str) -> str:
-    return _docker_status(name)
-
-
 def docker_task_agent_status(name: str) -> str:
     return _docker_status(name)
 
@@ -773,7 +753,7 @@ _INSPECT_FORMAT = "|".join(f'{{{{index .Config.Labels "{label}"}}}}' for _, labe
 
 
 def _docker_kind_list(kind: str, *, running_only: bool = False) -> list[dict]:
-    """Return containers of *kind* ('agent', 'task-agent', 'ticket') with their org.cld.* labels.
+    """Return containers of *kind* ('task-agent', 'ticket') with their org.cld.* labels.
 
     Records are ``{name, repo_root, session, kind, parent, task}``; the last two are
     empty for roles that don't set them. ``running_only`` filters docker-side --
@@ -805,11 +785,6 @@ def _docker_kind_list(kind: str, *, running_only: bool = False) -> list[dict]:
         values = (inspect.stdout.strip().split("|") + [""] * len(keys))[:len(keys)]
         containers.append({"name": name, **dict(zip(keys, values, strict=True))})
     return containers
-
-
-def docker_agent_list() -> list[dict]:
-    """Return all repo agent containers with their org.cld.* labels."""
-    return _docker_kind_list("agent")
 
 
 def docker_task_agent_list(*, running_only: bool = False) -> list[dict]:
@@ -848,11 +823,16 @@ _OCCUPANT_INSPECT_FORMAT = (
 )
 
 # Kinds whose reach strictly blocks another container's anchor. Headless roles
-# (agent, task-agent, run) can silently rewrite their stack with nobody
-# watching, so they block; any other kind carrying an anchor label does not.
-# Tickets occupy trees too, but they are collected separately (from their
-# manifest label) and only warn against other tickets -- stacked tickets are
-# legitimate, see resolve_anchor_checked.
+# (task-agent, run) can silently rewrite their stack with nobody watching, so
+# they block; any other kind carrying an anchor label does not. Tickets occupy
+# trees too, but they are collected separately (from their manifest label) and
+# only warn against other tickets -- stacked tickets are legitimate, see
+# resolve_anchor_checked.
+#
+# "agent" -- the removed standing per-repo role -- stays in the set on purpose:
+# nothing launches one any more, but a container left over from an older cld
+# image still owns its tree and must still refuse an overlapping anchor.
+# Dropping it would silently widen what a new container may claim.
 ANCHOR_BLOCKING_KINDS = {"agent", "task-agent", "run"}
 
 
@@ -1183,7 +1163,7 @@ def stage_broker(cfg: Config) -> list[str]:
     known_hosts) RO, adds a host-gateway alias so the container can reach the
     host-side sshd, and sets ``CLD_BROKER_ENDPOINT`` so the in-container client
     (``cld broker <action>``) can reach it. No-op unless ``cfg.broker_key`` is set.
-    Called for agent, task-agent and ticket containers
+    Called for task-agent and ticket containers
     (see the call site in ``build_container_args``); the broker's sshd accepts
     any ``cld_*`` session and resolves its role from the ``org.cld.kind`` label
     set at launch, not from the name -- see ``broker/cld-broker.sh``. See

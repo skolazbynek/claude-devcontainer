@@ -16,15 +16,12 @@ from cld.chain_state import ChainState, StateWriter, write_state, _utcnow_iso
 from cld.config import Config, _user_config_path
 from cld.docker import (
     TaskAgentSpec,
-    agent_container_name,
     allocate_task_agent_name,
     anchor_env_args,
     assert_task_agent_capacity,
     base_extra_paths,
     build_container_args,
     devcontainer_extra_paths,
-    docker_agent_list,
-    docker_agent_status,
     docker_task_agent_list,
     docker_task_agent_status,
     ensure_image,
@@ -198,178 +195,6 @@ def _wait_for_container_ready(name: str, sentinel: str, timeout: int = 60) -> bo
 _READY_SENTINEL = "/tmp/cld-agent-ready"
 
 
-def _run_persistent_devcontainer(
-    role: str,
-    model: str,
-    revision: str,
-    cfg: Config,
-    shared_anchor: bool = False,
-) -> None:
-    """Agent-mode devcontainer: start-or-confirm the one persistent container per repo.
-
-    The headless agent role never attaches (see
-    docs/design-agent-messaging.md) -- it starts (or confirms it's running)
-    and returns. *role* only names the container kind in the output.
-    """
-    cld_root = Path(__file__).resolve().parent.parent
-    ensure_image(
-        cfg.devcontainer_image,
-        cld_root / "imgs/claude-devcontainer/Dockerfile.claude-devcontainer",
-        cld_root,
-        extra_paths=devcontainer_extra_paths(cld_root),
-        parent_image=(
-            cfg.base_image,
-            cld_root / "imgs/claude-base/Dockerfile.claude-base",
-            cld_root,
-            base_extra_paths(cld_root),
-        ),
-    )
-
-    repo_root = find_target_repo(cfg)
-    session = agent_container_name(repo_root)
-    status = docker_agent_status(session)
-    log.info("%s devcontainer: name=%s, status=%s", role, session, status)
-
-    if status in ("running", "stopped"):
-        if revision:
-            log.warning("--%s: re-attaching to existing container; -r/--revision ignored", role)
-        if shared_anchor:
-            log.warning("--%s: re-attaching to existing container; --shared-anchor ignored", role)
-        if status == "stopped":
-            log.info("Starting stopped %s container: %s", role, session)
-            subprocess.run(["docker", "start", session], check=True)
-        typer.echo(f"Agent '{session}' is running. Message it via the messenger MCP's send() tool.")
-        return
-
-    # absent — create a new persistent container. The container entrypoint
-    # itself creates the ephemeral workspace at /workspace/current on top of
-    # the anchor B commit. On a subsequent restart the bookmark `<session>`
-    # already exists in the origin store; the entrypoint detects it and
-    # reattaches without re-staging an anchor, so this path only runs on the
-    # very first launch.
-    mode = _anchor_mode(shared_anchor)
-    anchor = resolve_anchor_checked(cfg, repo_root, revision, mode, caller_kind=role)
-    args = build_container_args(
-        repo_root, session, cfg, agent=True,
-        anchor_hash=anchor, anchor_mode=mode,
-    )
-    args += anchor_env_args(cfg, session, anchor, mode=mode)
-    if model:
-        args += ["-e", f"AGENT_MODEL={model}"]
-
-    skipped = []
-    for rel in cfg.home_mounts_devcontainer:
-        mnt = stage_home_ro(rel, cfg)
-        if mnt:
-            args += mnt
-        else:
-            skipped.append(rel)
-    if skipped:
-        log.warning("Optional host paths not found (skipped): %s", ", ".join(skipped))
-
-    args += stage_ssh_agent(cfg)
-
-    args += [cfg.devcontainer_image]
-
-    log.info("Starting %s devcontainer (detached)...", role)
-    subprocess.run(["docker", "run", "-d"] + args, check=True)
-
-    log.info("Waiting for container to be ready...")
-    if not _wait_for_container_ready(session, _READY_SENTINEL):
-        typer.echo(
-            f"Error: {role.capitalize()} container '{session}' did not become ready within 60 s. "
-            "Check: docker logs " + session,
-            err=True,
-        )
-        raise typer.Exit(1)
-
-    typer.echo(f"Agent '{session}' started for {repo_root}.")
-    typer.echo("  Status: cld agent status")
-    typer.echo("  Logs:   cld agent logs")
-    typer.echo(f"  Send:   messenger MCP send(to=\"{repo_root.name}\", ...) from another container")
-
-
-def _do_shutdown(role: str, all_: bool) -> None:
-    require_docker()
-    cfg = Config.from_env()
-    setup_logging(cfg)
-    if all_:
-        containers = docker_agent_list()
-        if not containers:
-            typer.echo(f"No {role} containers found.")
-            return
-        failed = False
-        for c in containers:
-            if not _shutdown_persistent_container(role, c["name"], c["repo_root"], c["session"]):
-                failed = True
-        if failed:
-            raise typer.Exit(1)
-        return
-    repo_root = find_target_repo(cfg)
-    container_name = agent_container_name(repo_root)
-    if docker_agent_status(container_name) == "absent":
-        typer.echo(f"No {role} container found for this repo.")
-        return
-    if not _shutdown_persistent_container(role, container_name, str(repo_root), container_name):
-        raise typer.Exit(1)
-
-
-def _do_restart(role: str) -> None:
-    require_docker()
-    cfg = Config.from_env()
-    setup_logging(cfg)
-    repo_root = find_target_repo(cfg)
-    container_name = agent_container_name(repo_root)
-    if docker_agent_status(container_name) == "absent":
-        typer.echo(f"No {role} container to restart. Start one with: cld {role}", err=True)
-        raise typer.Exit(1)
-    # Bypasses _shutdown_persistent_container so the session bookmark
-    # survives; the container entrypoint reattaches at its tip.
-    _stop_and_remove_container(container_name, restart=True)
-    _run_persistent_devcontainer(role, "", "", cfg)
-
-
-def _do_status(role: str) -> None:
-    cfg = Config.from_env()
-    setup_logging(cfg)
-    repo_root = find_target_repo(cfg)
-    container_name = agent_container_name(repo_root)
-    docker_status = docker_agent_status(container_name)
-    typer.echo(f"{role.capitalize()}: {container_name}")
-    typer.echo(f"  Container: {docker_status}")
-    # Host-only path: the supervisor's state file lives under the real
-    # host-side mailbox_root.
-    mailbox_root = Path(cfg.mailbox_root).expanduser()
-    state_path = mailbox_root / container_name / "state.json"
-    if not state_path.is_file():
-        typer.echo("  Supervisor state: unavailable (not started yet, or mailbox_root misconfigured)")
-        return
-    try:
-        state = json.loads(state_path.read_text())
-    except (OSError, json.JSONDecodeError) as e:
-        typer.echo(f"  Supervisor state: unreadable ({e})")
-        return
-    typer.echo(f"  Phase:       {state.get('phase')}")
-    typer.echo(f"  Session ID:  {state.get('session_id')}")
-    typer.echo(f"  Messages:    {state.get('msg_count')}")
-    typer.echo(f"  Cost so far: ${state.get('cost_usd_total', 0.0):.4f}")
-    current = state.get("current")
-    if current:
-        typer.echo(f"  Processing:  {current.get('subject')} (from {current.get('from')}, id {current.get('id')})")
-
-
-def _do_logs(role: str, tail: int) -> None:
-    require_docker()
-    cfg = Config.from_env()
-    setup_logging(cfg)
-    repo_root = find_target_repo(cfg)
-    container_name = agent_container_name(repo_root)
-    if docker_agent_status(container_name) == "absent":
-        typer.echo(f"No {role} container found for this repo.", err=True)
-        raise typer.Exit(1)
-    _docker_logs(container_name, tail)
-
-
 def _docker_logs(name: str, tail: int) -> None:
     """Print the tail of a container's log. Supervisor output arrives on stderr."""
     result = subprocess.run(
@@ -382,98 +207,17 @@ def _docker_logs(name: str, tail: int) -> None:
         typer.echo(result.stderr, nl=False, err=True)
 
 
-# --- Persistent repo agent (headless, mailbox-driven, per-repo) ---------------
-agent_app = typer.Typer(
-    help="Persistent per-repo headless Claude agent (mailbox-driven; see docs/design-agent-messaging.md).",
-    invoke_without_command=True,
-)
-app.add_typer(agent_app, name="agent")
-
-
-@agent_app.callback(invoke_without_command=True)
-@_handle_errors
-def agent(
-    ctx: typer.Context,
-    model: str = typer.Option("", "-m", "--model", help="Claude model (first launch only)"),
-    revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (first launch only)"),
-    shared_anchor: bool = typer.Option(False, "--shared-anchor", help=_SHARED_ANCHOR_HELP + " (first launch only)"),
-):
-    """Start the persistent repo agent for this repo. Idempotent per repo."""
-    if ctx.invoked_subcommand is not None:
-        return
-    cfg = Config.from_env()
-    setup_logging(cfg)
-    _run_persistent_devcontainer("agent", model, revision, cfg, shared_anchor)
-
-
-@agent_app.command("restart")
-@_handle_errors
-def agent_restart():
-    """Restart the repo agent for this repo, picking up image/code changes."""
-    _do_restart("agent")
-
-
-@agent_app.command("shutdown")
-@_handle_errors
-def agent_shutdown(
-    all_: bool = typer.Option(False, "--all", help="Stop all agent containers on this host"),
-):
-    """Stop and remove the repo agent for this repo (or all with --all)."""
-    _do_shutdown("agent", all_)
-
-
-@agent_app.command("status")
-@_handle_errors
-def agent_status():
-    """Print status of the repo agent for this repo (docker + supervisor phase)."""
-    _do_status("agent")
-
-
-@agent_app.command("logs")
-@_handle_errors
-def agent_logs(
-    tail: int = typer.Option(80, "-n", "--tail", help="Number of lines to show"),
-):
-    """Tail the repo agent's log output (= supervisor stderr)."""
-    _do_logs("agent", tail)
-
-
-def _stop_and_remove_container(name: str, *, restart: bool = False) -> None:
+def _stop_and_remove_container(name: str) -> None:
     """Stop and remove a container. Idempotent.
 
-    restart=True stops via SIGUSR1 so the container keeps its session bookmark
-    for the fresh container to reattach, waiting briefly for a clean exit and
-    falling back to SIGKILL (which also skips the forget) past the grace
-    period. A plain stop (SIGTERM) lets the container forget its bookmark.
+    A plain `docker stop` (SIGTERM): the supervisor's own exit handler forgets
+    the session bookmark, and the reap path forgets it again caller-side
+    (`_reap_task_agent`) because that supervisor is usually SIGKILLed mid-turn
+    and never gets to run.
     """
     log.info("Stopping container: %s", name)
-    if restart:
-        subprocess.run(["docker", "kill", "--signal=SIGUSR1", name], capture_output=True)
-        try:
-            subprocess.run(["docker", "wait", name], capture_output=True, timeout=10)
-        except subprocess.TimeoutExpired:
-            subprocess.run(["docker", "kill", name], capture_output=True)
-            subprocess.run(["docker", "wait", name], capture_output=True)
-    else:
-        subprocess.run(["docker", "stop", name], capture_output=True)
+    subprocess.run(["docker", "stop", name], capture_output=True)
     subprocess.run(["docker", "rm", name], capture_output=True)
-
-
-def _shutdown_persistent_container(role: str, name: str, repo_root_str: str, session: str) -> bool:
-    """Stop and remove a persistent agent container; end the session's lifecycle.
-
-    `docker rm` drops the ephemeral workspace. Forgetting the bookmark
-    `<session>` in the origin's jj store makes the next `cld <role>` launch
-    a fresh lifecycle (honoring `-r/--revision` again). Committed work and
-    op-log snapshots remain in the store, reachable by change ID -- see
-    `jj log -r 'heads(all())'`. `cld <role> restart` bypasses this function
-    (calls `_stop_and_remove_container` directly) so restart preserves the
-    bookmark and reattaches.
-    """
-    _stop_and_remove_container(name)
-    _forget_session_state(repo_root_str, session)
-    typer.echo(f"Stopped and removed {role} container: {name}")
-    return True
 
 
 # --- Task-scoped agents (headless, many per repo, master-owned lifecycle) -----
@@ -1125,7 +869,7 @@ def chain_run(
     validate_chain(chain, repo_root, cld_root)
     chain = apply_name_override(chain, name)
 
-    # Pin the anchor in the foreground (like `cld agent`) so it tracks where the
+    # Pin the anchor in the foreground (like every container launcher) so it tracks where the
     # user is at invocation, not where the detached child happens to boot.
     # Resolve before GC so a bad -r errors without disturbing any prior archive.
     anchor_hash = resolve_anchor(get_backend(), revision)

@@ -3,12 +3,12 @@ name: broker-run-tests
 description: >
   Run the target repo's test suite (pytest) via the cld broker's
   `cld broker` client instead of raw ssh, mysql, or docker commands. Use this
-  whenever you need to run tests inside a `cld master`, `cld agent`, or
-  `cld task-agent` container and secrets (DB/Redis credentials etc.) are not
-  otherwise available in-container. Invoke when the user (or, for an agent /
-  task-agent, your master) asks to run tests, run pytest, or check whether
-  tests pass. If you are an agent or task-agent (not master), you need your
-  master's explicit authorization for this specific run first -- see Step 0.
+  whenever you need to run tests inside a `cld master` or `cld task-agent`
+  container and secrets (DB/Redis credentials etc.) are not otherwise
+  available in-container. Invoke when the user (or, for a task-agent, your
+  master) asks to run tests, run pytest, or check whether tests pass. If you
+  are a task-agent (not master), you need your master's explicit
+  authorization for this specific run first -- see Step 0.
 user-invocable: true
 ---
 
@@ -28,10 +28,10 @@ a manually-built `ssh ... "run-tests ..."` command will not match and will be
 denied, and it bypasses the safety property that arbitrary args can only ever
 become pytest arguments.
 
-## Step 0: If you are an agent or task-agent, get authorization first
+## Step 0: If you are a task-agent, get authorization first
 
-`cld master`, `cld agent`, and `cld task-agent` containers all have the
-broker wired -- but for an agent or task-agent, **every** broker action
+`cld master` and `cld task-agent` containers both have the broker wired --
+but for a task-agent, **every** broker action
 (`run-tests` here, but the same gate applies to any other action the broker
 exposes, e.g. `graphql`) may be invoked **only with your master's explicit
 authorization for this specific invocation**. Your master is the trusted
@@ -44,8 +44,8 @@ may run it directly.
 
 ## Step 1: Confirm the broker is wired
 
-This only exists for `cld master`, `cld agent`, and `cld task-agent`
-containers (never `cld run`). Check for the client:
+This only exists for `cld master` and `cld task-agent` containers (never
+`cld run`). Check for the client:
 
 ```bash
 cld broker --help >/dev/null 2>&1 && echo broker-ok

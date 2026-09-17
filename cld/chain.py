@@ -436,8 +436,8 @@ def run_chain(
     if in_master_container():
         raise RuntimeError(
             "`cld chain run` is not yet supported from inside a master container. "
-            "Run chains from the host, or launch individual agents from master "
-            "with `cld agent` / `cld run`."
+            "Run chains from the host, or hand bounded pieces of work to "
+            "`cld task-agent start`."
         )
 
     repo_root = find_repo_root()

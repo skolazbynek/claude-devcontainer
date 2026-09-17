@@ -10,9 +10,9 @@ import pytest
 from cld.config import Config, _load_dotenv
 from cld.docker import (
     _INSPECT_FORMAT,
+    ANCHOR_BLOCKING_KINDS,
     MAILBOX_MOUNT,
     TaskAgentSpec,
-    agent_container_name,
     allocate_task_agent_name,
     assert_task_agent_capacity,
     build_container_args,
@@ -78,16 +78,6 @@ class TestFindJjRoot:
     def test_exits_when_not_found(self, tmp_path):
         with pytest.raises(SystemExit):
             find_repo_root(tmp_path)
-
-
-class TestAgentContainerName:
-    def test_no_sha_disambiguator(self, tmp_path):
-        repo = tmp_path / "myrepo"
-        assert agent_container_name(repo) == "cld_agent_myrepo"
-
-    def test_deterministic(self, tmp_path):
-        repo = tmp_path / "myrepo"
-        assert agent_container_name(repo) == agent_container_name(repo)
 
 
 class TestLoadDotenv:
@@ -457,26 +447,16 @@ class TestBuildContainerArgsTaskAgent:
         )
         assert any("broker-key" in a for a in args)
 
-    def test_roles_mutually_exclusive(self, tmp_path):
-        with pytest.raises(ValueError, match="mutually exclusive"):
-            build_container_args(
-                tmp_path, "s", Config(), agent=True, task_agent=TaskAgentSpec(slug="t"),
-            )
-
 
 class TestBuildContainerArgsBrokerWiring:
-    """Broker key reaches every persistent role -- agent and task-agent alike.
-    Access-time policy (master authorization) lives in the agent/task-agent
-    persona prompts, not in this wiring."""
+    """Broker key reaches the one persistent v1 role left -- the task-agent.
+    Access-time policy (master authorization) lives in its persona prompt, not
+    in this wiring."""
 
     def _cfg(self, tmp_path):
         key = tmp_path / "broker_key"
         key.write_text("k")
         return Config(mailbox_root=str(tmp_path / "mb"), broker_key=str(key))
-
-    def test_agent_role_gets_broker(self, tmp_path):
-        args = build_container_args(tmp_path, "cld_agent_r", self._cfg(tmp_path), agent=True)
-        assert any("broker-key" in a for a in args)
 
     def test_task_agent_role_gets_broker(self, tmp_path):
         args = build_container_args(
@@ -529,7 +509,7 @@ class TestAssertTaskAgentCapacity:
         assert m.call_args.kwargs == {"running_only": True}
 
 
-def _occupants(*specs, kind="agent"):
+def _occupants(*specs, kind="task-agent"):
     """Fake docker_occupant_list records: (name, repo_root, anchor_base, mode).
     Paths are resolved like the real lister resolves them at record-build time."""
     return [
@@ -555,7 +535,7 @@ class TestResolveAnchorChecked:
         inside = jj_repo.resolve_revision("@-")
         return base, live_anchor, inside
 
-    def _fleet(self, tmp_path, jj_repo, anchor, name="cld_agent_r_live", anchor_mode="isolated", kind="agent"):
+    def _fleet(self, tmp_path, jj_repo, anchor, name="cld_agent_r_live", anchor_mode="isolated", kind="task-agent"):
         cfg = Config(mailbox_root=str(tmp_path / "mb"))
         records = _occupants((name, str(jj_repo.repo_root), anchor, anchor_mode), kind=kind)
         return cfg, records
@@ -721,7 +701,7 @@ class TestEffectiveAnchorDerivation:
         inside_b = jj_repo.resolve_revision("@-")
         return base, scratch, inside_b
 
-    def _fleet(self, tmp_path, jj_repo, base, kind="agent"):
+    def _fleet(self, tmp_path, jj_repo, base, kind="task-agent"):
         cfg = Config(mailbox_root=str(tmp_path / "mb"))
         records = _occupants((self.SESSION, str(jj_repo.repo_root), base, "isolated"), kind=kind)
         return cfg, records
@@ -824,7 +804,7 @@ class TestOverlapKindMatrix:
             with pytest.raises(RuntimeError, match="inside the live reach"):
                 resolve_anchor_checked(cfg, jj_repo.repo_root, inside, caller_kind="ticket")
 
-    @pytest.mark.parametrize("caller", ["agent", "task-agent", "run"])
+    @pytest.mark.parametrize("caller", ["task-agent", "run"])
     def test_headless_vs_ticket_blocks(self, tmp_path, jj_repo, caller):
         occupant_anchor, inside = self._commits(jj_repo)
         cfg, records = self._fleet(tmp_path, jj_repo, occupant_anchor, "ticket")
@@ -833,6 +813,17 @@ class TestOverlapKindMatrix:
                 resolve_anchor_checked(cfg, jj_repo.repo_root, inside, caller_kind=caller)
 
     def test_headless_vs_headless_blocks(self, tmp_path, jj_repo):
+        occupant_anchor, inside = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, occupant_anchor, "task-agent")
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live reach"):
+                resolve_anchor_checked(cfg, jj_repo.repo_root, inside, caller_kind="task-agent")
+
+    def test_legacy_standing_agent_occupant_still_blocks(self, tmp_path, jj_repo):
+        """Nothing launches the removed standing `agent` role any more, but a
+        container left over from an older image still owns its tree -- "agent"
+        stays in ANCHOR_BLOCKING_KINDS so it keeps refusing an overlap."""
+        assert "agent" in ANCHOR_BLOCKING_KINDS
         occupant_anchor, inside = self._commits(jj_repo)
         cfg, records = self._fleet(tmp_path, jj_repo, occupant_anchor, "agent")
         with patch("cld.docker.docker_occupant_list", return_value=records):
@@ -961,7 +952,7 @@ class TestTicketAnchorResolver:
         assert "cld_occupant" in caplog.text
 
     def test_blocks_on_headless_occupant(self, tmp_path, jj_repo):
-        _, occupant_anchor, records = self._occupied(jj_repo, "agent")
+        _, occupant_anchor, records = self._occupied(jj_repo, "task-agent")
         cfg = Config(mailbox_root=str(tmp_path / "mb"))
         resolver = ticket_anchor_resolver(cfg)
         with patch("cld.docker.docker_occupant_list", return_value=records):
@@ -970,7 +961,7 @@ class TestTicketAnchorResolver:
 
     def test_shared_mode_passes_through_to_the_check(self, tmp_path, jj_repo):
         """--shared-anchor for a repo must trigger the whole-tree claim check."""
-        base, _, records = self._occupied(jj_repo, "agent")
+        base, _, records = self._occupied(jj_repo, "task-agent")
         cfg = Config(mailbox_root=str(tmp_path / "mb"))
         resolver = ticket_anchor_resolver(cfg)
         with patch("cld.docker.docker_occupant_list", return_value=records):

@@ -239,7 +239,7 @@ class TestListFleet:
 
     def test_excludes_mailboxes_without_meta(self, tmp_path):
         ensure_meta(tmp_path, "agent1", **_SPAWN)
-        ensure_mailbox(tmp_path, "cld_agent_repoA")          # repo agent
+        ensure_mailbox(tmp_path, "cld_agent_repoA")          # legacy repo-agent mailbox
         ensure_mailbox(tmp_path, "cld_master_repoA_abcd1234")  # master
         assert [m["name"] for m in list_fleet(tmp_path)] == ["agent1"]
 

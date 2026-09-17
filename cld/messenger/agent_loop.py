@@ -80,7 +80,7 @@ def _read_brief() -> str:
 
 @dataclass(frozen=True)
 class TaskMode:
-    """What a task-scoped agent has that a repo agent doesn't (docs/design-task-agents.md).
+    """What a task-scoped agent adds over a bare supervisor (docs/design-task-agents.md).
 
     Built once at boot by ``from_env``, which is the only place task-mode env vars
     and mounted files are read; everything downstream takes this object.
@@ -173,10 +173,13 @@ def compose_kickoff(
 
 
 class AgentSupervisor:
-    """Owns the one persistent Claude session for a repo agent or task-agent container.
+    """Owns the one persistent Claude session of a headless agent container.
 
-    One state machine for both: ``task`` only changes how the kickoff prompt is
-    composed (and adds the boot-time ``meta.json`` write), never the phases.
+    ``task`` only changes how the kickoff prompt is composed (and adds the
+    boot-time ``meta.json`` write), never the phases. Task mode is the only one
+    any launcher produces since the standing per-repo `cld agent` role was
+    removed; the ``persona_path`` kickoff is the vestigial non-task path behind
+    ``agent_kickoff_persona``.
     """
 
     def __init__(
@@ -273,7 +276,7 @@ class AgentSupervisor:
         if result.returncode != 0:
             # In --output-format json, claude reports errors as a JSON envelope on stdout;
             # stderr is usually empty. Emit both streams to the container log before raising
-            # so `docker logs` / `cld agent logs` has the full context.
+            # so `docker logs` / `cld task-agent logs` has the full context.
             log.error("claude exited %d\ncmd: %s\nstdout:\n%s\nstderr:\n%s",
                       result.returncode, " ".join(cmd), result.stdout, result.stderr)
             raise RuntimeError(
@@ -404,8 +407,9 @@ class AgentSupervisor:
 
     def _forget_session_bookmark(self) -> None:
         """Peer self-cleanup: drop the session bookmark from the origin store on
-        exit so `cld agent shutdown` yields a fresh lifecycle on next start.
-        See docs/design-master-sibling-launch.md (Shutdown / bookmark cleanup).
+        exit so a reused session name starts a fresh lifecycle. `cld task-agent
+        shutdown` forgets it caller-side too, because a reaped supervisor is
+        usually SIGKILLed mid-turn and never reaches this.
         """
         origin = os.environ.get("WORKSPACE_ORIGIN", "/workspace/origin")
         try:

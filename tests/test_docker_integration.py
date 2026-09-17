@@ -10,8 +10,8 @@ from cld.config import Config
 from cld.docker import (
     TaskAgentSpec,
     build_container_args,
-    docker_agent_list,
-    docker_agent_status,
+    docker_task_agent_list,
+    docker_task_agent_status,
     ensure_image,
     require_docker,
 )
@@ -75,32 +75,29 @@ class TestBuildContainerArgs:
         args = build_container_args(jj_repo.repo_root, "test-session", Config())
         assert "-it" not in args
 
-    def test_agent_and_task_agent_mutually_exclusive(self, jj_repo):
-        with pytest.raises(ValueError, match="mutually exclusive"):
-            build_container_args(
-                jj_repo.repo_root, "test-session", Config(),
-                agent=True, task_agent=TaskAgentSpec(slug="t"),
-            )
-
     def test_plain_mode_has_no_mailbox_mount(self, jj_repo):
         args = build_container_args(jj_repo.repo_root, "test-session", Config())
         volume_args = [args[i+1] for i in range(len(args)-1) if args[i] == "-v"]
         assert not any("/var/cld/mailboxes" in v for v in volume_args)
 
-    def test_agent_mode_mounts_mailbox_and_labels(self, jj_repo, tmp_path):
+    def test_task_agent_mode_mounts_mailbox_and_labels(self, jj_repo, tmp_path):
         cfg = Config(mailbox_root=str(tmp_path / "mailboxes"))
-        args = build_container_args(jj_repo.repo_root, "cld_agent_x", cfg, agent=True)
+        args = build_container_args(
+            jj_repo.repo_root, "cld_agent_x_t", cfg, task_agent=TaskAgentSpec(slug="t"),
+        )
         volume_args = [args[i+1] for i in range(len(args)-1) if args[i] == "-v"]
         env_pairs = [args[i+1] for i in range(len(args)-1) if args[i] == "-e"]
         assert any(v.endswith(":/var/cld/mailboxes:rw") for v in volume_args)
-        assert "org.cld.kind=agent" in args
+        assert "org.cld.kind=task-agent" in args
         assert "AGENT_MODE=1" in env_pairs
         assert (tmp_path / "mailboxes").is_dir()
 
     def test_no_role_publishes_hub_mode_or_targets(self, jj_repo, tmp_path):
         """Both went with the master role: nothing produces them any more."""
         cfg = Config(mailbox_root=str(tmp_path / "mailboxes"))
-        args = build_container_args(jj_repo.repo_root, "cld_agent_x", cfg, agent=True)
+        args = build_container_args(
+            jj_repo.repo_root, "cld_agent_x_t", cfg, task_agent=TaskAgentSpec(slug="t"),
+        )
         env_pairs = [args[i+1] for i in range(len(args)-1) if args[i] == "-e"]
         assert "HUB_MODE=1" not in env_pairs
         assert not any(e.startswith("MASTER_TARGETS=") for e in env_pairs)
@@ -124,7 +121,9 @@ class TestBuildContainerArgs:
         )
         assert not Path(mailbox_path).exists()
         with patch("cld.docker.subprocess.run") as run_mock:
-            args = build_container_args(jj_repo.repo_root, "cld_agent_x", cfg, agent=True)
+            args = build_container_args(
+                jj_repo.repo_root, "cld_agent_x_t", cfg, task_agent=TaskAgentSpec(slug="t"),
+            )
         assert not run_mock.called
         assert not Path(mailbox_path).exists()
         volume_args = [args[i+1] for i in range(len(args)-1) if args[i] == "-v"]
@@ -133,14 +132,14 @@ class TestBuildContainerArgs:
 
 
 @skip_no_docker
-class TestDockerAgentHelpers:
+class TestDockerTaskAgentHelpers:
     def test_status_absent_for_unknown_name(self):
-        assert docker_agent_status("cld_agent_definitely_not_running_xyz") == "absent"
+        assert docker_task_agent_status("cld_agent_definitely_not_running_xyz") == "absent"
 
     def test_list_returns_list(self):
-        # No real agent containers running in this environment; just verify
+        # No real task-agent containers running in this environment; just verify
         # the docker label query round-trips without error.
-        assert isinstance(docker_agent_list(), list)
+        assert isinstance(docker_task_agent_list(), list)
 
 
 @skip_no_docker
