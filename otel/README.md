@@ -58,8 +58,8 @@ from both without being exposed on the LAN-facing interface.
 `service.name` is the standard OTel resource attribute used to key the
 per-session output file -- pick whatever name you want that session's stats
 filed under. In cld, this is wired automatically: set `otel_endpoint` (or
-`CLD_OTEL_ENDPOINT`) in config, and `master`/`agent`/`task-agent`/the bare
-devcontainer point at it with `service.name` set to the session name. `cld
+`CLD_OTEL_ENDPOINT`) in config, and `master`/`agent`/`task-agent` sessions
+point at it with `service.name` set to the session name. `cld
 run` is unaffected -- it keeps its existing VCS-committed cost reporting.
 
 To make this persistent instead of retyping it in every terminal, `./otelctl.sh

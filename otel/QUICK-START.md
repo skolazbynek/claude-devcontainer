@@ -22,7 +22,7 @@
    otel_endpoint = "host.docker.internal:4318"
    ```
 
-   and relaunch a `master`/`agent`/`task-agent`/devcontainer session -- it's wired in automatically.
+   and relaunch a `master`/`agent`/`task-agent` session -- it's wired in automatically.
 
    For any other Claude Code session (no cld involved):
 

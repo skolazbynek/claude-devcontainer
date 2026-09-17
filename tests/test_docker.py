@@ -543,22 +543,13 @@ class TestBuildContainerArgsBrokerWiring:
         assert any("broker-key" in a for a in args)
 
     def test_run_role_gets_no_broker(self, tmp_path):
-        """`cld run` (no role, non-interactive) never gets the broker -- it's a
-        one-shot, unattended container, unlike the bare interactive devcontainer."""
+        """`cld run` (no persistent role) never gets the broker -- it's a
+        one-shot, unattended container."""
         args = build_container_args(tmp_path, "run_x", self._cfg(tmp_path))
         assert not any("broker-key" in a for a in args)
 
-    def test_bare_interactive_devcontainer_gets_broker(self, tmp_path):
-        """Bare `cld` (interactive, no persistent role) is an ephemeral, single-user
-        `cld master` in every capability that matters -- it gets the broker too."""
-        args = build_container_args(tmp_path, "cld_x", self._cfg(tmp_path), interactive=True)
-        assert any("broker-key" in a for a in args)
-        assert "--name" in args and "cld_x" in args
-        assert any(a == "org.cld.kind=devcontainer" for a in args)
-
     def test_run_devcontainer_not_named(self, tmp_path):
-        """Only the interactive bare devcontainer gets a name/labels; `cld run`
-        stays anonymous like before."""
+        """Only the persistent roles get a name; `cld run` stays anonymous."""
         args = build_container_args(tmp_path, "run_x", self._cfg(tmp_path))
         assert "--name" not in args
 
@@ -911,7 +902,7 @@ class TestOverlapKindMatrix:
         cfg, records = self._fleet(tmp_path, jj_repo, occupant_anchor, "ticket")
         with patch("cld.docker.docker_occupant_list", return_value=records):
             with pytest.raises(RuntimeError, match="inside the live reach"):
-                resolve_anchor_checked(cfg, jj_repo.repo_root, inside, caller_kind="devcontainer")
+                resolve_anchor_checked(cfg, jj_repo.repo_root, inside, caller_kind="master")
 
     def test_shared_ticket_vs_ticket_still_warns(self, tmp_path, jj_repo, caplog):
         base = jj_repo.resolve_revision("@-")
@@ -952,10 +943,9 @@ class TestDockerOccupantList:
         with names_patch, run_patch:
             assert [r["kind"] for r in docker_occupant_list()] == ["run"]
 
-    @pytest.mark.parametrize("kind", ["master", "devcontainer"])
-    def test_interactive_kinds_never_occupy(self, kind):
+    def test_interactive_kind_never_occupies(self):
         names_patch, run_patch = self._v1(
-            [("cld_x", "running")], [_ps(f"/r|aaa|isolated|{kind}|cld_x\n")],
+            [("cld_x", "running")], [_ps("/r|aaa|isolated|master|cld_x\n")],
         )
         with names_patch, run_patch:
             assert docker_occupant_list() == []

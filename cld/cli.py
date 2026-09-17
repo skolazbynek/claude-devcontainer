@@ -22,7 +22,6 @@ from cld.docker import (
     assert_task_agent_capacity,
     base_extra_paths,
     build_container_args,
-    build_session_name,
     devcontainer_extra_paths,
     docker_agent_list,
     docker_agent_status,
@@ -79,7 +78,7 @@ from cld.vcs.anchor import resolve_anchor
 
 log = get_logger(__name__)
 
-app = typer.Typer()
+app = typer.Typer(no_args_is_help=True)
 
 _SHARED_ANCHOR_HELP = (
     "Anchor directly on -r/--revision instead of a fresh isolated child: the "
@@ -116,27 +115,19 @@ def _version_callback(value: bool):
         raise typer.Exit()
 
 
-@app.callback(invoke_without_command=True)
+@app.callback()
 @_handle_errors
 def main(
-    ctx: typer.Context,
     version: bool = typer.Option(False, "--version", callback=_version_callback, is_eager=True, help="Show version and exit"),
-    name: str = typer.Option("", "-n", "--name", help="Session name suffix"),
-    model: str = typer.Option("", "-m", "--model", help="Claude model (e.g. opus, sonnet)"),
-    revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (default: current change -- @ for jj, HEAD for git)"),
-    prompt: str = typer.Option("", "-p", "--prompt", help="Inline prompt for the session"),
-    shared_anchor: bool = typer.Option(False, "--shared-anchor", help=_SHARED_ANCHOR_HELP),
 ):
-    """Launch an ephemeral interactive Claude devcontainer (default; no subcommand).
+    """Run Claude Code in Docker containers with VCS workspace isolation.
 
-    Takes `-p` only, no prompt refs: click resolves a group callback's first positional
-    as a subcommand name, so `cld @personas/x` can only ever be "No such command".
-    Refs live on the real commands -- `cld run`, `cld task-agent start`, `cld chain run`.
+    The root group takes no positionals: click resolves a group callback's first
+    positional as a subcommand name, so a stray one is always a usage error.
+    Prompt refs live on the real commands -- `cld run`, `cld task-agent start`,
+    `cld chain run`.
     """
     _reject_in_container()
-    if ctx.invoked_subcommand is not None:
-        return
-    _run_devcontainer(name, model, revision, prompt, shared_anchor)
 
 
 @app.command()
@@ -187,76 +178,6 @@ def _compose_from_args(
         typer.echo("Error: Provide at least one prompt ref, --prompt, or both", err=True)
         raise typer.Exit(1)
     return compose_brief([p for p, _ in resolved], prompt), resolved
-
-
-def _run_devcontainer(
-    name: str,
-    model: str,
-    revision: str,
-    prompt: str,
-    shared_anchor: bool = False,
-) -> None:
-    """Ephemeral interactive devcontainer launch. Persistent master/agent live in their own sub-apps."""
-    require_docker()
-    cfg = Config.from_env()
-    setup_logging(cfg)
-
-    log.info(
-        "devcontainer: name=%s, model=%s, revision=%s, prompt=%s, shared_anchor=%s",
-        name or "<auto>",
-        model or "<default>",
-        revision or "<default>",
-        "<provided>" if prompt else "<none>",
-        shared_anchor,
-    )
-
-    cld_root = Path(__file__).resolve().parent.parent
-    ensure_image(
-        cfg.devcontainer_image,
-        cld_root / "imgs/claude-devcontainer/Dockerfile.claude-devcontainer",
-        cld_root,
-        extra_paths=devcontainer_extra_paths(cld_root),
-        parent_image=(
-            cfg.base_image,
-            cld_root / "imgs/claude-base/Dockerfile.claude-base",
-            cld_root,
-            base_extra_paths(cld_root),
-        ),
-    )
-
-    session = build_session_name("cld", name)
-    repo_root = find_target_repo(cfg)
-    mode = _anchor_mode(shared_anchor)
-    anchor = resolve_anchor_checked(cfg, repo_root, revision, mode, caller_kind="devcontainer")
-
-    brief = compose_brief([], prompt) if prompt else ""
-
-    args = build_container_args(
-        repo_root, session, cfg, interactive=True, anchor_hash=anchor, anchor_mode=mode,
-    )
-    args += anchor_env_args(cfg, session, anchor, brief=brief, mode=mode)
-    if model:
-        args += ["-e", f"AGENT_MODEL={model}"]
-
-    skipped = []
-    for rel in cfg.home_mounts_devcontainer:
-        mnt = stage_home_ro(rel, cfg)
-        if mnt:
-            args += mnt
-        else:
-            skipped.append(rel)
-
-    if skipped:
-        log.warning(f"Optional host paths not found (skipped): {', '.join(skipped)}")
-
-    args += stage_ssh_agent(cfg)
-
-    args += [cfg.devcontainer_image]
-
-    log.info("Starting Claude Code in container...")
-    print()
-
-    os.execvp("docker", ["docker", "run"] + args)
 
 
 def _wait_for_container_ready(name: str, sentinel: str, timeout: int = 60) -> bool:
@@ -350,7 +271,7 @@ def _run_persistent_devcontainer(
     mode = _anchor_mode(shared_anchor)
     anchor = resolve_anchor_checked(cfg, repo_root, revision, mode, caller_kind=role)
     args = build_container_args(
-        repo_root, session, cfg, interactive=False,
+        repo_root, session, cfg,
         master=(role == "master"), agent=(role == "agent"),
         anchor_hash=anchor, anchor_mode=mode,
     )
@@ -508,7 +429,7 @@ def master(
 ):
     """Start (or attach to) the persistent master devcontainer for this repo.
 
-    Like bare `cld`, this takes `-p` only -- a group callback never sees positionals.
+    Takes `-p` only -- a group callback never sees positionals.
     """
     if ctx.invoked_subcommand is not None:
         return

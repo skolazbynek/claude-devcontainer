@@ -45,7 +45,7 @@ may run it directly.
 ## Step 1: Confirm the broker is wired
 
 This only exists for `cld master`, `cld agent`, and `cld task-agent`
-containers (never `cld run` or bare `cld`). Check for the client:
+containers (never `cld run`). Check for the client:
 
 ```bash
 cld broker --help >/dev/null 2>&1 && echo broker-ok

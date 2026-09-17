@@ -4,7 +4,6 @@ Docker container orchestration for Claude Code with jujutsu/git workspace isolat
 
 ## Roles
 
-- **cld** — ephemeral interactive devcontainer
 - **cld master** — persistent per-repo interactive
 - **cld agent** — persistent per-repo headless (mailbox-driven)
 - **cld task-agent** — bounded task-scoped with peer messaging

@@ -208,11 +208,10 @@ COMPOSED_PROMPT=""
 [ -f "$BRIEF_FILE" ] && COMPOSED_PROMPT="$(cat "$BRIEF_FILE")"
 
 # Materialize registered sibling targets as empty placeholder directories so
-# `cd <target>` inside the shell succeeds. This runs for both `cld master` and
-# the bare ephemeral devcontainer (HUB_MODE, not MASTER_MODE -- see
-# in_master_container() in cld/docker.py) -- neither gets a bind mount of the
-# sibling repo; cld-inside-the-container resolves cwd to the host path via
-# config lookup. See docs/design-master-sibling-launch.md.
+# `cd <target>` inside the shell succeeds. Gated on HUB_MODE, the capability
+# flag (see in_master_container() in cld/docker.py) -- master gets no bind
+# mount of the sibling repo; cld-inside-the-container resolves cwd to the host
+# path via config lookup. See docs/design-master-sibling-launch.md.
 if [ -n "${HUB_MODE:-}" ] && [ -n "${MASTER_TARGETS:-}" ]; then
     IFS=':' read -r -a _cld_targets <<< "$MASTER_TARGETS"
     for t in "${_cld_targets[@]}"; do
@@ -282,16 +281,7 @@ if [ -n "${AGENT_MODE:-}" ]; then
     exec python3 -P -m cld.messenger.agent_loop
 fi
 
-# Bare ephemeral devcontainer: unlike master/agent there is no restart or
-# reattach concept for this mode, so nothing else will ever forget this
-# session's bookmark or workspace registration out of the origin's jj store.
-# Without this, every exited session (each with its own random session name,
-# see build_session_name) would leave a permanently orphaned bookmark and a
-# stale `jj workspace` entry behind even though the container itself is --rm.
-_cld_bare_cleanup() {
-    (cd "$WORKSPACE_ORIGIN" && jj bookmark forget "$SESSION_NAME" 2>&1) || true
-    (cd "$WORKSPACE_ORIGIN" && jj workspace forget "$SESSION_NAME" 2>&1) || true
-}
-trap _cld_bare_cleanup EXIT
-
-/bin/bash
+# Every v1 launcher sets one of the modes above; reaching here means the
+# container was started without one, which is a launcher bug, not a session.
+echo "Error: no container mode set (expected TICKET_MODE, MASTER_MODE or AGENT_MODE)" >&2
+exit 1

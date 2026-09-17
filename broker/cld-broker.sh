@@ -14,16 +14,14 @@
 # (resolve_repo_target). The caller controls only: the action, a validated
 # session id, and the decoded argv. Nothing is ever eval'd.
 #
-# Sessions come in three shapes: `cld_master_*` (a `cld master`), `cld_agent_*`
-# (both the standing repo agent and task-agents -- kind is a label, not a
-# name, see cld/docker.py:task_agent_container_name), and the bare ephemeral
-# devcontainer (`cld_<name>`, org.cld.kind=devcontainer -- an ephemeral,
-# single-user `cld master`, so it gets the same broker reach). Any of these
-# may call `run-tests` / `list-containers`. The `agent` / `task-agent`
-# launcher actions (spawning siblings) stay master/devcontainer-only in
-# practice even though the session regex admits every kind of caller: they
-# gate on the `org.cld.targets` label via validate_target, which only master
-# and bare-devcontainer sessions ever carry (set from `master_targets`, see
+# Sessions come in two v1 shapes: `cld_master_*` (a `cld master`) and
+# `cld_agent_*` (both the standing repo agent and task-agents -- kind is a
+# label, not a name, see cld/docker.py:task_agent_container_name), plus the v2
+# ticket containers. Any of these may call `run-tests` / `list-containers`.
+# The `agent` / `task-agent` launcher actions (spawning siblings) stay
+# master-only in practice even though the session regex admits every kind of
+# caller: they gate on the `org.cld.targets` label via validate_target, which
+# only master sessions ever carry (set from `master_targets`, see
 # build_container_args) -- a repo agent or task-agent session always fails
 # validate_target for lack of any registered target.
 #
@@ -845,7 +843,7 @@ REPO=""
 if [ "$KIND" != ticket ]; then
     REPO=$(docker inspect "$session" --format '{{index .Config.Labels "org.cld.repo-root"}}' 2>/dev/null) || true
     [ -n "$REPO" ] && { [ -d "$REPO/.jj" ] || [ -d "$REPO/.git" ]; } \
-        || { echo "no master/agent/task-agent/devcontainer container for session $session" >&2; exit 3; }
+        || { echo "no master/agent/task-agent container for session $session" >&2; exit 3; }
 fi
 
 # Per-action context (REV, secrets, target validation) is resolved inside each

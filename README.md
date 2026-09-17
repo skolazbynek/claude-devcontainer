@@ -2,7 +2,7 @@
 
 Run Claude Code in Docker containers with VCS workspace isolation. Supports **jujutsu (jj)** natively and **falls back to git** when jj is not installed. Each container gets its own isolated workspace (jj workspace or git worktree) and branch, so multiple agents can work on the same repo concurrently without conflicts.
 
-The primary interactive workflow is the **ticket container** (v2): one container per ticket, mounting one or more registered repos, driven from the host shell via `cld claude <ticket>`. See [Ticket containers](#ticket-containers-v2). The v1 interactive roles (`cld`, `cld master`) still work during the coexistence period but are superseded by tickets.
+The primary interactive workflow is the **ticket container** (v2): one container per ticket, mounting one or more registered repos, driven from the host shell via `cld claude <ticket>`. See [Ticket containers](#ticket-containers-v2). The v1 interactive role `cld master` still works during the coexistence period but is superseded by tickets.
 
 ## Prerequisites
 
@@ -26,7 +26,7 @@ poetry run cld --help
 cld build [--no-cache]
 ```
 
-The v1 verbs (`cld`, `cld master`, `cld agent`, `cld run`, `cld chain`) must be run from within a VCS repository (jj or git) -- they operate on the cwd repo. The ticket verbs (`cld start`, `cld claude`, ...) run from anywhere: their repos come from the registry or from explicit paths.
+The v1 verbs (`cld master`, `cld agent`, `cld run`, `cld chain`) must be run from within a VCS repository (jj or git) -- they operate on the cwd repo. The ticket verbs (`cld start`, `cld claude`, ...) run from anywhere: their repos come from the registry or from explicit paths.
 
 ## Usage
 
@@ -53,10 +53,7 @@ cld chain list
 cld chain validate chains/my-chain.yaml
 cld chain dry-run @review-implement
 
-# --- v1 interactive roles (superseded by ticket containers; still work) ---
-
-# Ephemeral interactive devcontainer (neovim, jj/git, poetry, claude with --dangerously-skip-permissions)
-cld [-n name] [-m model] [-r revision] [-p prompt]   # -p only; prompt refs go to `cld run`
+# --- v1 interactive role (superseded by ticket containers; still works) ---
 
 # Persistent per-repo interactive devcontainer (start-or-attach; idempotent per repo)
 cld master                                # start or re-attach
@@ -132,13 +129,12 @@ Verified deliberate differences from the v1 roles:
 
 ### Migration from v1
 
-1. **Shut down all v1 masters, devcontainers and agents first** (`cld master shutdown --all`, `cld agent shutdown --all`) -- bookmark/workspace hygiene in every repo store.
+1. **Shut down all v1 masters and agents first** (`cld master shutdown --all`, `cld agent shutdown --all`) -- bookmark/workspace hygiene in every repo store.
 2. **Seed the registry from your `master_targets` entries:** `cld repos add <name> <path>` for each. (`master_targets` itself keeps working for the v1 master while the roles coexist.)
 3. Muscle memory:
 
 | v1 | v2 |
 |---|---|
-| `cld` (bare devcontainer) | `cld start <throwaway-name> <repo>` + `cld claude <name>` |
 | `cld master` | `cld start <ticket> <repo>` + `cld claude <ticket>` |
 | in-container shell work | `cld claude <ticket>` (daily) / `cld shell <ticket>` (sandbox debugging) |
 | `cld master shutdown` | `cld shutdown <ticket>` |
@@ -351,7 +347,7 @@ Master itself has no filesystem view of the target repo -- only a placeholder di
 
 ### Workspace isolation
 
-Containers mount the host repo RW at `/workspace/origin` (ticket containers: one mount per repo at `/workspace/origin/<name>`). The container's own entrypoint runs `jj workspace add` / `git worktree add` on boot; the workspace directory lives in the container's own filesystem layer at `/workspace/current` (tickets: `/workspace/<slug>/<name>`), never on the host. jj writes all store objects through the RW origin mount, and watchman snapshots edits into the store autonomously, so work is durable and host-visible without a host-side workspace directory. The `-r` flag pins the anchor revision for v1 kinds (default: `@` for jj, `HEAD` for git; tickets default to the registry `default_rev`, falling back to `trunk()`). On shutdown, the session's bookmark and workspace registration are forgotten from the origin store -- host-side by `cld shutdown` / `cld <role> shutdown`, plus the v1 master/bare entrypoints' own TERM/EXIT traps; committed work persists.
+Containers mount the host repo RW at `/workspace/origin` (ticket containers: one mount per repo at `/workspace/origin/<name>`). The container's own entrypoint runs `jj workspace add` / `git worktree add` on boot; the workspace directory lives in the container's own filesystem layer at `/workspace/current` (tickets: `/workspace/<slug>/<name>`), never on the host. jj writes all store objects through the RW origin mount, and watchman snapshots edits into the store autonomously, so work is durable and host-visible without a host-side workspace directory. The `-r` flag pins the anchor revision for v1 kinds (default: `@` for jj, `HEAD` for git; tickets default to the registry `default_rev`, falling back to `trunk()`). On shutdown, the session's bookmark and workspace registration are forgotten from the origin store -- host-side by `cld shutdown` / `cld <role> shutdown`, plus the v1 master entrypoint's own TERM trap; committed work persists.
 
 ### Host file protection
 
@@ -410,7 +406,7 @@ Full set of keys:
 | Key | Type | Default | Purpose |
 |---|---|---|---|
 | `base_image` | string | `"claude-base:latest"` | Common base Docker image |
-| `devcontainer_image` | string | `"claude-devcontainer:latest"` | Devcontainer image (`cld`, `cld master`) |
+| `devcontainer_image` | string | `"claude-devcontainer:latest"` | Devcontainer image (`cld master`, `cld agent`, `cld task-agent`, ticket containers) |
 | `run_image` | string | `"claude-run:latest"` | One-shot run image (`cld run`) |
 | `pyproject_dir` | string | `"."` | Directory (relative to repo root) holding `pyproject.toml` and `.env`. Not a `Config` field -- read directly out of `.cld/config.toml` by `cld-broker.sh` on the host, for the broker's `PROJECT_SUBDIR` and secrets path (see "Host-side test running" in `CLAUDE.md`) |
 | `ssl_certs_path` | string | `""` | Opt-in override: host path (dir or PEM file) that **replaces** the baked CA bundle. Empty = use the baked bundle |
@@ -423,7 +419,7 @@ Full set of keys:
 | `poll_interval` | int (seconds) | `30` | Chain orchestrator's docker-ps poll interval |
 | `chain_max_parallel` | int | `4` | Max agents launched concurrently in a chain's parallel group |
 | `chain_default_model` | string | `""` | Model override for chain agents; empty = each step's own default |
-| `ssh_auth_sock` | string | unset (auto-detect) | SSH agent forwarding into every devcontainer-image launch (`cld`, `master`, `agent`, `task-agent`). Unset = auto-detect host `$SSH_AUTH_SOCK`; `""` = explicitly disable; a path = use that socket. Launches the broker makes on a master's behalf need `SSH_AUTH_SOCK` in `broker.conf` -- see `broker/README.md` |
+| `ssh_auth_sock` | string | unset (auto-detect) | SSH agent forwarding into every devcontainer-image launch (`master`, `agent`, `task-agent`). Unset = auto-detect host `$SSH_AUTH_SOCK`; `""` = explicitly disable; a path = use that socket. Launches the broker makes on a master's behalf need `SSH_AUTH_SOCK` in `broker.conf` -- see `broker/README.md` |
 | `mailbox_root` | string | `"~/.cld/mailboxes"` | Host root of the inter-container mailbox tree (bind-mounted RW into every master/agent) |
 | `agent_max_turns` | int | `120` | Per-message turn cap passed to the repo agent's `claude -p --max-turns` |
 | `agent_kickoff_persona` | string | `"agent"` | Persona used to kick off a new `cld agent` Claude session |

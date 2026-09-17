@@ -71,11 +71,8 @@ class TestBuildContainerArgs:
         volume_args = [args[i+1] for i in range(len(args)-1) if args[i] == "-v"]
         assert any("/workspace/origin" in v for v in volume_args)
 
-    def test_interactive_mode_adds_it_flag(self, jj_repo):
-        args = build_container_args(jj_repo.repo_root, "test-session", Config(), interactive=True)
-        assert "-it" in args
-
-    def test_non_interactive_mode_no_it_flag(self, jj_repo):
+    def test_no_it_flag(self, jj_repo):
+        """Every launcher detaches and attaches with `docker exec -it` if at all."""
         args = build_container_args(jj_repo.repo_root, "test-session", Config())
         assert "-it" not in args
 
@@ -107,28 +104,26 @@ class TestBuildContainerArgs:
         assert "org.cld.kind=agent" in args
         assert "AGENT_MODE=1" in env_pairs
 
-    def test_bare_devcontainer_mounts_mailbox_hub_mode_and_targets(self, jj_repo, tmp_path):
-        # The bare interactive devcontainer is meant to have master's full hub
-        # capability (broker, mailbox, sibling-target resolution) while staying
-        # ephemeral -- see the "same capabilities as master" fix.
-        target = tmp_path / "sibling-repo"
-        target.mkdir()
+    def test_master_publishes_hub_mode_and_targets(self, jj_repo, tmp_path):
+        # Master's hub capability: the registered sibling targets reach the
+        # entrypoint as MASTER_TARGETS and the broker as the host-set,
+        # immutable org.cld.targets label it validates launches against.
         home = tmp_path / "home"
-        home.mkdir()
+        (home / ".claude").mkdir(parents=True)
+        # Placeholders are mirrored under the container $HOME, so a registered
+        # target has to live under the host home dir.
+        target = home / "sibling-repo"
+        target.mkdir()
         cfg = Config(
             mailbox_root=str(tmp_path / "mailboxes"),
             master_targets=(str(target),),
         )
         with patch.dict(os.environ, {"HOME": str(home)}):
             args = build_container_args(
-                jj_repo.repo_root, "cld_x", cfg, interactive=True,
+                jj_repo.repo_root, "cld_master_x_abcd1234", cfg, master=True,
             )
-        volume_args = [args[i+1] for i in range(len(args)-1) if args[i] == "-v"]
         env_pairs = [args[i+1] for i in range(len(args)-1) if args[i] == "-e"]
-        assert any(v.endswith(":/var/cld/mailboxes:rw") for v in volume_args)
-        assert "org.cld.kind=devcontainer" in args
         assert "HUB_MODE=1" in env_pairs
-        assert "--rm" in args  # still ephemeral, unlike master
         assert any(e.startswith("MASTER_TARGETS=") and str(target) in e for e in env_pairs)
         assert any(a == f"org.cld.targets={target}" for a in args)
 
