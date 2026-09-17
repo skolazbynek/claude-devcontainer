@@ -35,6 +35,4 @@ No overlap: live anchor trees checked host-wide.
 
 **Messenger:** Mailbox at `~/.cld/mailboxes`. `send()/list_inbox()/read_message()/archive()` via MCP. Hop budgets; explicit reply obligations. See `docs/design-agent-messaging.md`.
 
-**Mattermost bridge:** `cld bridge start|stop` routes `@<name>` posts to mailboxes. See `docs/impl-mattermost-bridge-plan.md`.
-
 **Chain:** `cld chain <file.yaml>` runs declarative multi-step pipeline. Persistent accumulator; transient per-step branches.

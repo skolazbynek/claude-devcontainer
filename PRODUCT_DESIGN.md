@@ -268,8 +268,6 @@ starts from the product logic:
   container, anchored inside the ticket's trees, reporting to the ticket's
   mailbox. The standing per-repo `agent` role weakens further (memory
   `feedback_prefer_task_agents` already steers away from it).
-- The Mattermost bridge addressing moves from repo-keyed to ticket-keyed
-  names.
 
 ## 12. Gaps, risks, open issues
 

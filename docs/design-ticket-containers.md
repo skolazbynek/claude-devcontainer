@@ -19,7 +19,7 @@ removal later is a deletion, not a disentanglement.
 | `cld/registry.py` | new | `RepoEntry`, registry load (from `Config`), TOML writes (add/rm), interactive picker, ad-hoc-path resolution (basename → subdir name, collision = error) |
 | `cld/manifest.py` | new | `RepoManifestEntry` / `TicketManifest` dataclasses, JSON label codec, `resolve_manifest()` (args + registry → manifest), manifest diff for repo-set change, label readback from `docker inspect` |
 | `cld/ticket.py` | new | ticket lifecycle: start/stop/restart/shutdown/status/logs, `cld claude` exec, `cld shell`, single-session refusal, host-side per-repo teardown (`bookmark forget` + `workspace forget` per manifest entry), readiness wait scaled by repo count |
-| `cld/cli.py` | changed | registers the 8 lifecycle verbs as root-level `@app.command()`s beside `run`/`build`/`prompts` (`cli.py:130,1095,1139`), each taking `<ticket>` as its **own command's** positional — safe; only the root *group* callback must never take one (the typer hazard, `cli.py:120-123`). `repos` is a new sub-typer like `bridge_app` (`cli.py:1027-1031`). The root callback stays `invoke_without_command=True` for the v1 bare devcontainer while the two coexist. |
+| `cld/cli.py` | changed | registers the 8 lifecycle verbs as root-level `@app.command()`s beside `run`/`build`/`prompts` (`cli.py:130,1095,1139`), each taking `<ticket>` as its **own command's** positional — safe; only the root *group* callback must never take one (the typer hazard, `cli.py:120-123`). `repos` is a new sub-typer (`cli.py:1027-1031`). The root callback stays `invoke_without_command=True` for the v1 bare devcontainer while the two coexist. |
 | `cld/cli_container.py` | changed | host-only stubs gain the new verbs (`cli_container.py:42-64` pattern); `repos` (`:353-374`) switches from `MASTER_TARGETS` env to the manifest env; `find_target_repo` callers (`:85,110`) route through the ticket-aware resolver (§6.5) |
 | `cld/docker.py` | changed | `ticket_container_name()`, manifest label stamping, per-repo mounts/env in a new `build_ticket_container_args()`, prefix-map path translation (§6.4), overlap-check rework (§7) |
 | `cld/config.py` | changed | `[repos.*]` table parsing into `Config.repos: dict[str, RepoEntry]` (`_load_toml` today rejects tables, `config.py:130-155`); template block in `config.default.toml` |
@@ -462,8 +462,7 @@ prefix. `Config` gains `path_map: dict[str, str]` parsed from the env.
 - **Shortnames:** ticket slugs join repo basenames in
   `mailbox.resolve_recipient` (`mailbox.py:695+`). A slug equal to a repo
   basename is ambiguous; resolution order becomes exact container name →
-  ticket slug → repo basename, with an ambiguity error naming both. The
-  Mattermost bridge stays repo-keyed (deferred, spec §11).
+  ticket slug → repo basename, with an ambiguity error naming both.
 
 ### 6.6 In-container `cld repos` and config discovery
 
