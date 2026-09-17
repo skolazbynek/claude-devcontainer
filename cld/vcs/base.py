@@ -96,19 +96,7 @@ class VcsBackend(ABC):
     def delete_branch(self, name: str) -> str:
         """Delete a branch/bookmark."""
 
-    @abstractmethod
-    def list_branches(self) -> str:
-        """List all branches/bookmarks. Returns human-readable output."""
-
     # -- change creation and manipulation -------------------------------------
-
-    @abstractmethod
-    def new_change(self, revision: str = "") -> str:
-        """Create a new empty change on top of *revision*.
-
-        jj: ``jj new <rev>``
-        git: ``git checkout <rev>`` (in a worktree context, already positioned).
-        """
 
     @abstractmethod
     def commit(self, message: str) -> str:
@@ -116,14 +104,6 @@ class VcsBackend(ABC):
 
         jj: ``jj commit -m``
         git: ``git add -A && git commit -m``
-        """
-
-    @abstractmethod
-    def describe(self, revision: str, message: str) -> str:
-        """Rewrite the commit message of *revision*.
-
-        jj: ``jj describe -r <rev> -m``
-        git: uses commit-tree plumbing to rewrite the branch tip.
         """
 
     @abstractmethod

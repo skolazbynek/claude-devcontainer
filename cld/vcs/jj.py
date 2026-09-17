@@ -104,27 +104,11 @@ class JjBackend(VcsBackend):
         """Delete a jj bookmark."""
         return self.run(["bookmark", "delete", name]).stdout
 
-    def list_branches(self) -> str:
-        """List all jj bookmarks."""
-        result = self.run(["bookmark", "list"])
-        return result.stdout if result.returncode == 0 else f"Error: {result.stderr.strip()}"
-
     # -- change creation and manipulation -------------------------------------
-
-    def new_change(self, revision: str = "") -> str:
-        """Create a new empty jj change on top of *revision*."""
-        cmd = ["new"]
-        if revision:
-            cmd.append(revision)
-        return self.run(cmd).stdout
 
     def commit(self, message: str) -> str:
         """Commit the current jj working copy."""
         return self.run(["commit", "-m", message]).stdout
-
-    def describe(self, revision: str, message: str) -> str:
-        """Rewrite the description of a jj change."""
-        return self.run(["describe", "-r", revision, "-m", message]).stdout
 
     def squash(self, from_rev: str, into_rev: str) -> str:
         """Squash one jj change into another."""

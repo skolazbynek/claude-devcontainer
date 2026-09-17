@@ -27,6 +27,12 @@ def _parent_rev(vcs, base="@"):
     return f"{base}~1" if base != "HEAD" else "HEAD~1"
 
 
+def _list_branches(vcs):
+    """Raw branch/bookmark listing (list_branches() removed from VcsBackend)."""
+    cmd = ["bookmark", "list"] if vcs.name == "jj" else ["branch", "-a"]
+    return vcs.run(cmd).stdout
+
+
 # --- Tests --------------------------------------------------------------------
 
 
@@ -83,14 +89,14 @@ class TestWorkspace:
 class TestBranch:
     def test_create_and_list(self, vcs_repo):
         vcs_repo.create_branch("test-branch")
-        branches = vcs_repo.list_branches()
+        branches = _list_branches(vcs_repo)
         assert "test-branch" in branches
         vcs_repo.delete_branch("test-branch")
 
     def test_delete(self, vcs_repo):
         vcs_repo.create_branch("to-delete")
         vcs_repo.delete_branch("to-delete")
-        branches = vcs_repo.list_branches()
+        branches = _list_branches(vcs_repo)
         assert "to-delete" not in branches
 
     def test_set_branch_moves_pointer(self, vcs_repo):
@@ -129,26 +135,6 @@ class TestCommitAndChanges:
 
     def test_has_changes_false_when_clean(self, vcs_repo):
         assert not vcs_repo.has_changes()
-
-
-class TestDescribe:
-    def test_rewrites_message(self, vcs_repo):
-        root = vcs_repo.repo_root
-        (root / "desc.txt").write_text("x\n")
-        vcs_repo.commit("original message")
-        rev = _committed_rev(vcs_repo)
-        vcs_repo.describe(rev, "rewritten message")
-        assert "rewritten" in vcs_repo.get_description(rev)
-
-    def test_describe_branch_name(self, vcs_repo):
-        root = vcs_repo.repo_root
-        (root / "br.txt").write_text("x\n")
-        vcs_repo.commit("branch msg")
-        rev = _committed_rev(vcs_repo)
-        vcs_repo.create_branch("desc-branch", rev)
-        vcs_repo.describe("desc-branch", "via branch name")
-        assert "via branch name" in vcs_repo.get_description("desc-branch")
-        vcs_repo.delete_branch("desc-branch")
 
 
 class TestDiff:
@@ -238,13 +224,13 @@ class TestForkPoint:
             base = vcs_repo.resolve_revision("@-")
 
             # Branch A
-            vcs_repo.new_change(base)
+            vcs_repo.run(["new", base])
             (root / "branch_a.txt").write_text("a\n")
             vcs_repo.commit("branch a")
             vcs_repo.create_branch("branch-a", "@-")
 
             # Branch B (from same base)
-            vcs_repo.new_change(base)
+            vcs_repo.run(["new", base])
             (root / "branch_b.txt").write_text("b\n")
             vcs_repo.commit("branch b")
             vcs_repo.create_branch("branch-b", "@-")

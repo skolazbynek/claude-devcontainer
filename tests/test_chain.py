@@ -32,7 +32,7 @@ def _write_chain(path: Path, name: str, steps: str) -> Path:
 def _make_fake_agent_commit(vcs, revision, session_name, files):
     """Commit + branch named session_name on top of revision (mimics a real agent)."""
     sha = vcs.resolve_revision(revision)
-    vcs.new_change(sha)
+    vcs.run(["new", sha] if vcs.name == "jj" else ["checkout", sha])
     for fname, content in files.items():
         target = vcs.repo_root / fname
         target.parent.mkdir(parents=True, exist_ok=True)

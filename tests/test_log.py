@@ -1,7 +1,6 @@
 """Tests for cld/log.py."""
 
 import logging
-import os
 import subprocess
 import sys
 
@@ -127,51 +126,3 @@ def test_log_subprocess_error_with_none_streams(caplog):
         assert any("<not captured>" in r.getMessage() for r in error_records)
     finally:
         cld_log.removeHandler(caplog.handler)
-
-
-@pytest.mark.integration
-@pytest.mark.skip(reason="orchestrator MCP is deprecated")
-def test_mcp_orchestrator_stdout_is_clean(tmp_path):
-    """MCP stdio server must keep stdout free of log lines."""
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "cld.mcp.orchestrator"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=env,
-        text=True,
-    )
-    try:
-        init_msg = (
-            '{"jsonrpc":"2.0","id":1,"method":"initialize",'
-            '"params":{"protocolVersion":"2024-11-05","capabilities":{},'
-            '"clientInfo":{"name":"test","version":"0.1"}}}\n'
-        )
-        proc.stdin.write(init_msg)
-        proc.stdin.flush()
-        try:
-            stdout_line = proc.stdout.readline()
-        except Exception:
-            stdout_line = ""
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=2)
-        stderr_total = proc.stderr.read() if proc.stderr else ""
-
-    if stdout_line.strip():
-        import json
-        try:
-            json.loads(stdout_line)
-        except json.JSONDecodeError:
-            pytest.fail(
-                f"stdout contained non-JSON content: {stdout_line!r}\n"
-                f"stderr: {stderr_total[:1000]}"
-            )
-    if not stdout_line and "MCP orchestrator starting" not in stderr_total:
-        pytest.skip("MCP orchestrator did not start; mcp package may be misconfigured")

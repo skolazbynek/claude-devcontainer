@@ -83,8 +83,11 @@ class TestAgentJj:
             e2e_jj_repo.repo_root, session, TASK_CONTENT, claude_stub,
             vcs_type="jj",
         )
-        branches = e2e_jj_repo.list_branches()
-        assert session in branches
+        result = subprocess.run(
+            ["jj", "bookmark", "list"],
+            cwd=e2e_jj_repo.repo_root, capture_output=True, text=True,
+        )
+        assert session in result.stdout
 
     def test_log_file_written(self, e2e_jj_repo, claude_stub):
         session = _session("ealjj")

@@ -126,23 +126,7 @@ class GitBackend(VcsBackend):
         """Delete a git branch (force-delete to handle unmerged branches)."""
         return self._run_git(["branch", "-D", name]).stdout
 
-    def list_branches(self) -> str:
-        """List all git branches."""
-        result = self._run_git(["branch", "-a"])
-        return result.stdout if result.returncode == 0 else f"Error: {result.stderr.strip()}"
-
     # -- change creation and manipulation -------------------------------------
-
-    def new_change(self, revision: str = "") -> str:
-        """Check out *revision*, positioning HEAD for new work.
-
-        In a worktree context this is typically a no-op since ``create_workspace``
-        already positions the worktree at the right revision.
-        """
-        if not revision:
-            return ""
-        result = self._run_git(["checkout", revision])
-        return result.stdout + result.stderr
 
     def commit(self, message: str) -> str:
         """Stage all changes and commit.
@@ -152,50 +136,6 @@ class GitBackend(VcsBackend):
         self._run_git(["add", "-A"])
         result = self._run_git(["commit", "-m", message])
         return result.stdout + result.stderr
-
-    def describe(self, revision: str, message: str) -> str:
-        """Rewrite the commit message of *revision* using git plumbing.
-
-        If *revision* is HEAD or a branch whose tip is reachable, this uses
-        ``git commit-tree`` to create a replacement commit and force-updates
-        the branch. This avoids needing a worktree checkout.
-        """
-        # Resolve the revision to a concrete commit
-        rev_result = self._run_git(["rev-parse", revision])
-        if rev_result.returncode != 0:
-            return f"Error: {rev_result.stderr.strip()}"
-        commit_hash = rev_result.stdout.strip()
-
-        # Get the tree of the commit
-        tree_result = self._run_git(["rev-parse", f"{commit_hash}^{{tree}}"])
-        if tree_result.returncode != 0:
-            return f"Error: {tree_result.stderr.strip()}"
-        tree_hash = tree_result.stdout.strip()
-
-        # Get parent(s)
-        parent_result = self._run_git(["rev-parse", f"{commit_hash}^"])
-        parents = []
-        if parent_result.returncode == 0:
-            parents = ["-p", parent_result.stdout.strip()]
-
-        # Create new commit with same tree/parents but new message
-        cmd = ["commit-tree", tree_hash] + parents + ["-m", message]
-        new_commit_result = self._run_git(cmd)
-        if new_commit_result.returncode != 0:
-            return f"Error: {new_commit_result.stderr.strip()}"
-        new_hash = new_commit_result.stdout.strip()
-
-        # If revision is a branch name, update it; otherwise try to update HEAD
-        branch_check = self._run_git(["rev-parse", "--verify", f"refs/heads/{revision}"])
-        if branch_check.returncode == 0:
-            self._run_git(["branch", "-f", revision, new_hash])
-        else:
-            # Revision might be HEAD or a raw hash -- update HEAD if it matches
-            head_result = self._run_git(["rev-parse", "HEAD"])
-            if head_result.returncode == 0 and head_result.stdout.strip() == commit_hash:
-                self._run_git(["reset", "--soft", new_hash])
-
-        return new_hash
 
     def squash(self, from_rev: str, into_rev: str) -> str:
         """Squash changes from *from_rev* into *into_rev* via cherry-pick and amend."""

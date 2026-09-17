@@ -253,10 +253,6 @@ This detection runs both on the host (CLI commands) and inside containers (entry
 | Read file from revision | `jj file show -r <rev> <path>` | `git show <rev>:<path>` |
 | Common ancestor | `fork_point(A \| B)` | `git merge-base A B` |
 
-## MCP Orchestrator (deprecated)
-
-The `orchestrator` MCP is no longer wired into cld images or host-side claude. `cld/mcp/orchestrator.py` and `scripts/mcp/run-orchestrator.sh` remain in the source tree for reference but are not registered anywhere. Use the `messenger` MCP (below) for inter-agent coordination.
-
 ## Messenger
 
 Lets any cld container (ticket, master or repo agent) send a message to any other and get a reply on its next turn, backed by a shared mailbox directory on the host -- no threads, no polling required from the user. Full design and mental model: `docs/design-agent-messaging.md`.
@@ -305,14 +301,12 @@ cld/                               Python package (CLI + shared logic)
     jj.py                          jujutsu backend (preferred)
     git.py                         git backend (fallback)
     detect.py                      auto-detection logic
-  mcp/orchestrator.py              MCP server for agent orchestration (deprecated, not wired)
   mcp/messenger.py                 MCP server for the mailbox transport
   mcp/graphql.py                   MCP server for GraphQL testing -- thin client over the broker's `graphql` action
   messenger/mailbox.py             filesystem mailbox transport
   messenger/agent_loop.py          repo agent supervisor daemon
 
 scripts/
-  mcp/run-orchestrator.sh          venv wrapper (deprecated, kept for reference)
   mcp/run-messenger.sh             venv wrapper for the messenger MCP server
   mcp/run-graphql.sh               venv wrapper for the graphql-tester MCP server
 
