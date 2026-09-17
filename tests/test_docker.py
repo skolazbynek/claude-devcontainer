@@ -1206,28 +1206,6 @@ class TestBuildTicketContainerArgs:
         args = build_ticket_container_args(manifest, cfg)
         assert _env_value(args, "CLD_REPO_BOOTSTRAP") is None
 
-    def test_per_repo_mysql_secret_from_registry(self, tmp_path, monkeypatch):
-        cnf = tmp_path / "lide.cnf"
-        cnf.write_text("[client]\n")
-        manifest, cfg = self._setup(
-            tmp_path, monkeypatch,
-            repos={"lide-api": RepoEntry(path=str(tmp_path / "lide-api"), mysql_config=str(cnf))},
-        )
-        args = build_ticket_container_args(manifest, cfg)
-        assert f"{cnf}:/run/secrets/mysql-lide-api.cnf:ro" in args
-        # No secret for the repo without a registry mysql_config.
-        assert not any("mysql-diskuze-api" in a for a in args)
-
-    def test_missing_mysql_file_skipped_with_warning(self, tmp_path, monkeypatch, caplog):
-        manifest, cfg = self._setup(
-            tmp_path, monkeypatch,
-            repos={"lide-api": RepoEntry(path=str(tmp_path / "lide-api"), mysql_config="/nope.cnf")},
-        )
-        with caplog.at_level("WARNING"):
-            args = build_ticket_container_args(manifest, cfg)
-        assert not any("mysql-" in a for a in args)
-        assert "mysql_config not found" in caplog.text
-
     def test_mailbox_mounted(self, tmp_path, monkeypatch):
         manifest, cfg = self._setup(tmp_path, monkeypatch)
         args = build_ticket_container_args(manifest, cfg)

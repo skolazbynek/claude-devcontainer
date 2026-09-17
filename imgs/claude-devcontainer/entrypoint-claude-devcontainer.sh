@@ -17,14 +17,11 @@ if [ -n "${TICKET_MODE:-}" ]; then
     # per-repo work, or the host-side readiness wait returns early.
     rm -f /tmp/cld-ticket-ready
     # /tmp/bin survives too, and it is first on PATH (container-init.sh), so
-    # the previous boot's generated wrappers shadow `which claude` /
-    # `command -v mysql` on a warm start: each regenerated wrapper would exec
-    # the stale wrapper's own path -- for claude an infinite self-exec loop.
-    # Drop them so this boot resolves real binaries fresh. The claude wrapper
-    # is rewritten below; the mysql wrappers are regenerated here because the
-    # source-time generate_mysql_wrappers already ran against the stale PATH.
+    # the previous boot's generated wrapper shadows `which claude` on a warm
+    # start: the regenerated wrapper would exec the stale wrapper's own path,
+    # an infinite self-exec loop. Drop it so this boot resolves the real
+    # binary fresh. The claude wrapper is rewritten below.
     rm -f /tmp/bin/*
-    generate_mysql_wrappers /run/secrets /tmp/bin
     : "${CLD_TICKET_MANIFEST:?CLD_TICKET_MANIFEST must be set in TICKET_MODE}"
     if ! command -v jq &>/dev/null; then
         echo "Error: TICKET_MODE requires jq in the image" >&2

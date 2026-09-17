@@ -80,7 +80,7 @@ def test_mask_secrets_key_value_masked():
 
 
 def test_mask_secrets_run_secrets_path():
-    out = mask_secrets("--mount=/run/secrets/mysql.cnf -ro")
+    out = mask_secrets("--mount=/run/secrets/broker-key -ro")
     assert "/run/secrets/<redacted>" in out
 
 

@@ -111,32 +111,14 @@ class TestAddRmRoundTrip:
         cfg = Config.from_env(user_config=config_path, project_config=tmp_path / "missing")
         assert cfg.repos == {"my-api": RepoEntry(path="~/projects/my-api", default_rev="main")}
 
-    def test_mysql_config_round_trips(self, config_path, tmp_path, home):
-        add_repo(config_path, "my-api", "~/projects/my-api", mysql_config="~/.config/cld/m.cnf")
-        data = tomllib.loads(config_path.read_text())
-        assert data["repos"]["my-api"] == {
-            "path": "~/projects/my-api", "mysql_config": "~/.config/cld/m.cnf",
-        }
-        cfg = Config.from_env(user_config=config_path, project_config=tmp_path / "missing")
-        assert cfg.repos["my-api"].mysql_config == "~/.config/cld/m.cnf"
-
-    def test_cli_add_passes_mysql_config(self, config_path):
-        with patch("cld.cli.add_repo") as add, \
-             patch("cld.cli._user_config_path", return_value=config_path):
-            result = runner.invoke(
-                app, ["repos", "add", "my-api", "/p", "--mysql-config", "/c.cnf"],
-            )
-        assert result.exit_code == 0, result.output
-        assert add.call_args.kwargs["mysql_config"] == "/c.cnf"
-
 
 class TestParseRepos:
     def test_full_entry(self):
         raw = {"my-api": {
-            "path": "/x", "default_rev": "main", "bootstrap": True, "mysql_config": "/c.cnf",
+            "path": "/x", "default_rev": "main", "bootstrap": True,
         }}
         assert parse_repos(raw) == {"my-api": RepoEntry(
-            path="/x", default_rev="main", bootstrap=True, mysql_config="/c.cnf",
+            path="/x", default_rev="main", bootstrap=True,
         )}
 
     def test_defaults(self):

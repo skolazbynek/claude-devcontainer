@@ -91,7 +91,7 @@ cld repos add lide-api ~/projects/lide-api [--default-rev R] [--bootstrap]
 cld repos rm lide-api                            # refused while a ticket container mounts it
 ```
 
-Each entry is a `[repos.<name>]` TOML table: `path`, optional `default_rev` (anchor offered at launch; empty means `trunk()`), `bootstrap` (run `poetry install` in the repo's `pyproject_dir` on first boot), and `mysql_config` (host path to a `.cnf` mounted for that repo only, hand-edited into the config). `cld repos add/rm` rewrites the config with tomlkit, preserving your comments and unrelated keys. Ad-hoc paths are also accepted at launch (the basename becomes the subdir name).
+Each entry is a `[repos.<name>]` TOML table: `path`, optional `default_rev` (anchor offered at launch; empty means `trunk()`), and `bootstrap` (run `poetry install` in the repo's `pyproject_dir` on first boot). `cld repos add/rm` rewrites the config with tomlkit, preserving your comments and unrelated keys. Ad-hoc paths are also accepted at launch (the basename becomes the subdir name).
 
 ### Lifecycle
 
@@ -129,7 +129,6 @@ Verified deliberate differences from the v1 roles:
 - **Parallel same-base siblings need no placeholder commits.** The overlap check now derives each occupant's *effective* anchor (the scratch commit in isolated mode) from the jj store at check time, for v1 headless kinds too, so two isolated containers anchored on the same base no longer over-block each other.
 - **A kept repo whose anchor changed on a repo-set change reattaches at its old bookmark.** `cld start <ticket> <new set>` recreates the container, but a kept repo's bookmark survives, and the boot's reattach branch wins over the new `anchor_base` -- the new anchor takes effect only after `cld shutdown` forgets the bookmark.
 - **One GraphQL test server per ticket session, even multi-repo.** The broker's `graphql start` names the server container by session; a `start --repo b` while a server for repo a runs returns the running server's status rather than launching a second one. `graphql stop` tears down against the repo the server was *started* for (its own label), whatever `--repo` says.
-- **Registry rename corner.** Manifests persist name + path, so a rename never orphans a running ticket. But per-repo MySQL secrets resolve **by name** from the registry at every recreate: if a rename reuses an old name for a different path, a recreated ticket that mounted the old repo under that name gets the new entry's secret.
 
 ### Migration from v1
 
@@ -324,7 +323,7 @@ imgs/
   claude-base/                     Common base image (debian, git, jj, docker cli, poetry, claude). No editor, no entrypoint.
     Dockerfile.claude-base
   claude-devcontainer/             Devcontainer image (FROM base, adds neovim + classic vim)
-    container-init.sh              Shared init (MCP config merge, mysql wrapper) -- baked into base
+    container-init.sh              Shared init (MCP config merge) -- baked into base
     vcs-lib.sh                     Shell VCS abstraction (sourced by both entrypoints) -- baked into base
     entrypoint-claude-devcontainer.sh
   claude-run/                      One-shot run image (FROM base, adds run entrypoint + system prompt)
@@ -381,7 +380,7 @@ Containers run as host UID/GID with `--cap-drop=ALL`, `--security-opt=no-new-pri
 
 **Known gaps -- read carefully before shipping anything sensitive into a container:**
 
-- **No outbound network firewall.** Once an agent is running, it can reach any host on the public internet and exfiltrate anything mounted in (`~/.claude` tokens, `~/.claude.json` MCP creds, `~/.config/*` creds, `CLD_MYSQL_CONFIG`). Anthropic's reference devcontainer ships an `init-firewall.sh` with default-deny outbound and a small allowlist; cld does not (yet) ship an equivalent.
+- **No outbound network firewall.** Once an agent is running, it can reach any host on the public internet and exfiltrate anything mounted in (`~/.claude` tokens, `~/.claude.json` MCP creds, `~/.config/*` creds). Anthropic's reference devcontainer ships an `init-firewall.sh` with default-deny outbound and a small allowlist; cld does not (yet) ship an equivalent.
 - **No docker socket is mounted (was: host root).** Earlier versions mounted `/var/run/docker.sock` for peer enumeration, which let an agent run `docker run -v /:/host --privileged ...` and read or modify anything on the host -- bypassing every other control. The socket is gone; master's only host channel is now the broker key (a fixed, non-eval action allowlist with label-validated targets -- see the host broker section), and agents have no host channel at all. A leaked broker key grants that action set (run-tests + sibling `cld agent` lifecycle for allowlisted repos), which is strictly narrower than arbitrary host root but still privileged -- protect the key accordingly.
 - **`~/.claude` is mounted rw.** A malicious agent can both read your OAuth tokens and overwrite session state.
 
@@ -401,13 +400,12 @@ Lowest → highest priority:
 
 ### TOML schema
 
-Flat snake_case keys mirroring `Config` field names, valid in both `~/.config/cld/config.toml` (user-wide) and `<repo_root>/.cld/config.toml` (per-repo). Unknown keys are warned about on stderr and ignored. Array-typed keys take a TOML array of strings. `host_project_dir` / `host_home` are container-internal and not exposed via TOML. The one table-typed key is the ticket repo registry, `[repos.<name>]` in the *user* config (see [Repo registry](#repo-registry)): per entry `path`, `default_rev`, `bootstrap`, `mysql_config`.
+Flat snake_case keys mirroring `Config` field names, valid in both `~/.config/cld/config.toml` (user-wide) and `<repo_root>/.cld/config.toml` (per-repo). Unknown keys are warned about on stderr and ignored. Array-typed keys take a TOML array of strings. `host_project_dir` / `host_home` are container-internal and not exposed via TOML. The one table-typed key is the ticket repo registry, `[repos.<name>]` in the *user* config (see [Repo registry](#repo-registry)): per entry `path`, `default_rev`, `bootstrap`.
 
 ```toml
 base_image = "claude-base:latest"
 devcontainer_image = "claude-devcontainer:latest"
 run_image = "claude-run:latest"
-mysql_config = "/path/to/mysql.cnf"
 agent_timeout = 1800
 poll_interval = 30
 debug = false
@@ -420,13 +418,12 @@ Full set of keys:
 | `base_image` | string | `"claude-base:latest"` | Common base Docker image |
 | `devcontainer_image` | string | `"claude-devcontainer:latest"` | Devcontainer image (`cld`, `cld master`) |
 | `run_image` | string | `"claude-run:latest"` | One-shot run image (`cld run`) |
-| `mysql_config` | string | `""` | Path to a `.cnf` file, mounted RO at `/run/secrets/mysql.cnf` |
 | `pyproject_dir` | string | `"."` | Directory (relative to repo root) holding `pyproject.toml` and `.env`. Not a `Config` field -- read directly out of `.cld/config.toml` by `cld-broker.sh` on the host, for the broker's `PROJECT_SUBDIR` and secrets path (see "Host-side test running" in `CLAUDE.md`) |
 | `ssl_certs_path` | string | `""` | Opt-in override: host path (dir or PEM file) that **replaces** the baked CA bundle. Empty = use the baked bundle |
 | `home_mounts_always` | array of strings | `[".claude.json", ".config/anthropic", ".config/claude", ".config/jj"]` | RO `$HOME` paths staged into every container |
 | `home_mounts_devcontainer` | array of strings | `[".gitconfig", ".bashrc", ".config/nvim", ".local/state/nvim", ".cache/nvim"]` | Additional RO `$HOME` paths staged only for interactive devcontainer sessions |
 | `master_targets` | array of strings | `[]` | Host repo paths registered as launchable sibling targets from inside `cld master` (v1; tickets use the registry below) |
-| `repos.<name>` | TOML table | none | Ticket repo registry entry (`path`, `default_rev`, `bootstrap`, `mysql_config`); user config only, managed by `cld repos add/rm` |
+| `repos.<name>` | TOML table | none | Ticket repo registry entry (`path`, `default_rev`, `bootstrap`); user config only, managed by `cld repos add/rm` |
 | `ignore_gitignore` | array of strings | `[]` | Gitignored files (e.g. `.env`) to symlink from `/workspace/origin` into the isolated workspace |
 | `agent_timeout` | int (seconds) | `1800` | Chain orchestrator's per-agent wait timeout |
 | `poll_interval` | int (seconds) | `30` | Chain orchestrator's docker-ps poll interval |

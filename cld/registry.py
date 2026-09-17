@@ -29,7 +29,7 @@ log = get_logger(__name__)
 # names become subdir names under the ticket root and docker label keys.
 _REPO_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
-_ENTRY_KEYS = {"path", "default_rev", "bootstrap", "mysql_config"}
+_ENTRY_KEYS = {"path", "default_rev", "bootstrap"}
 
 _TICKET_KIND_LABEL = "org.cld.kind=ticket"
 _REPO_LABEL_PREFIX = "org.cld.repo."
@@ -42,7 +42,6 @@ class RepoEntry:
     path: str
     default_rev: str = ""
     bootstrap: bool = False
-    mysql_config: str = ""
 
 
 def validate_repo_name(name: str) -> None:
@@ -82,7 +81,6 @@ def parse_repos(raw: dict) -> dict[str, RepoEntry]:
             path=str(path),
             default_rev=str(entry.get("default_rev", "")),
             bootstrap=bool(entry.get("bootstrap", False)),
-            mysql_config=str(entry.get("mysql_config", "")),
         )
     return repos
 
@@ -104,7 +102,6 @@ def add_repo(
     path: str,
     default_rev: str = "",
     bootstrap: bool = False,
-    mysql_config: str = "",
 ) -> None:
     """Append a ``[repos.<name>]`` table to the user config, preserving the rest."""
     validate_repo_name(name)
@@ -126,8 +123,6 @@ def add_repo(
         entry["default_rev"] = default_rev
     if bootstrap:
         entry["bootstrap"] = True
-    if mysql_config:
-        entry["mysql_config"] = mysql_config
     repos[name] = entry
     _write_atomic(config_path, doc)
 

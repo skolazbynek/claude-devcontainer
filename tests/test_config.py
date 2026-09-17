@@ -12,7 +12,7 @@ from cld.registry import RepoEntry
 def _clear_env(monkeypatch):
     for var in (
         "CLD_BASE_IMAGE", "CLD_DEVCONTAINER_IMAGE", "CLD_AGENT_IMAGE",
-        "CLD_MYSQL_CONFIG", "CLD_AGENT_TIMEOUT", "CLD_POLL_INTERVAL", "CLD_DEBUG",
+        "CLD_AGENT_TIMEOUT", "CLD_POLL_INTERVAL", "CLD_DEBUG",
         "CLD_MAILBOX_ROOT", "CLD_AGENT_MAX_TURNS", "CLD_AGENT_KICKOFF_PERSONA",
         "CLD_MAX_TASK_AGENTS", "CLD_PEER_ABSOLUTE_LIMIT", "CLD_ROOT_ASK_LIMIT",
     ):
@@ -159,14 +159,12 @@ class TestReposTable:
         user = _write(
             tmp_path / "user.toml",
             '[repos.lide-api]\npath = "~/projects/lide-api"\ndefault_rev = "main"\n'
-            '[repos.diskuze-api]\npath = "~/projects/diskuze-api"\nbootstrap = true\n'
-            'mysql_config = "~/.config/cld/d.cnf"\n',
+            '[repos.diskuze-api]\npath = "~/projects/diskuze-api"\nbootstrap = true\n',
         )
         cfg = Config.from_env(user_config=user, project_config=tmp_path / "missing")
         assert cfg.repos == {
             "lide-api": RepoEntry(path="~/projects/lide-api", default_rev="main"),
-            "diskuze-api": RepoEntry(path="~/projects/diskuze-api", bootstrap=True,
-                                     mysql_config="~/.config/cld/d.cnf"),
+            "diskuze-api": RepoEntry(path="~/projects/diskuze-api", bootstrap=True),
         }
 
     def test_repos_table_does_not_warn_unknown(self, tmp_path, capsys):

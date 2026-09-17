@@ -71,19 +71,6 @@ class TestBuildContainerArgs:
         volume_args = [args[i+1] for i in range(len(args)-1) if args[i] == "-v"]
         assert any("/workspace/origin" in v for v in volume_args)
 
-    def test_mysql_mount_when_configured(self, jj_repo, tmp_path):
-        mysql_cnf = tmp_path / "mysql.cnf"
-        mysql_cnf.write_text("[client]\nhost=localhost\n")
-        cfg = Config(mysql_config=str(mysql_cnf))
-        args = build_container_args(jj_repo.repo_root, "test-session", cfg)
-        volume_args = [args[i+1] for i in range(len(args)-1) if args[i] == "-v"]
-        assert any("mysql.cnf" in v for v in volume_args)
-
-    def test_no_mysql_mount_without_config(self, jj_repo):
-        args = build_container_args(jj_repo.repo_root, "test-session", Config())
-        volume_args = [args[i+1] for i in range(len(args)-1) if args[i] == "-v"]
-        assert not any("mysql.cnf" in v for v in volume_args)
-
     def test_interactive_mode_adds_it_flag(self, jj_repo):
         args = build_container_args(jj_repo.repo_root, "test-session", Config(), interactive=True)
         assert "-it" in args

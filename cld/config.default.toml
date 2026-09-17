@@ -43,13 +43,11 @@ home_mounts_devcontainer = [
 # only (lowercase letters, digits, dashes). Manage with `cld repos add/rm`,
 # or edit by hand. default_rev is the anchor offered at launch (empty =
 # trunk()); bootstrap = true runs poetry install in the repo's pyproject_dir
-# on first boot; mysql_config is a host path to a MySQL .cnf file mounted
-# for that repo only.
+# on first boot.
 # [repos.my-api]
 # path = "~/projects/my-api"
 # default_rev = "trunk()"
 # bootstrap = false
-# mysql_config = "~/.config/cld/my-api-mysql.cnf"
 
 # Host paths registered as launchable targets from inside `cld master`.
 # Each path is materialized as an empty placeholder directory in master's shell

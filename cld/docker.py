@@ -433,8 +433,8 @@ def build_container_args(
 ) -> list[str]:
     """Build the base ``docker run`` argument list every launcher needs.
 
-    Sets up security constraints, volume mounts (repo, claude config,
-    mysql), and environment variables. No docker socket is mounted (see the
+    Sets up security constraints, volume mounts (repo, claude config),
+    and environment variables. No docker socket is mounted (see the
     note in the body). Devcontainer-only
     mounts (gitconfig, bashrc, nvim) are added by the launcher in cli.py.
 
@@ -604,21 +604,6 @@ def build_container_args(
     # `agent`/`task-agent` launcher actions stay master-only regardless, gated
     # by the org.cld.targets label (only master carries it, see master_targets
     # below), not by broker reachability.
-
-    # MySQL (conditional)
-    if cfg.mysql_config:
-        mysql_path = Path(cfg.mysql_config)
-        mysql_exists = mysql_path.is_file()
-        log.debug("MySQL config probe: path=%s exists=%s", mysql_path, mysql_exists)
-        if mysql_exists:
-            resolved = str(mysql_path.resolve())
-            args += [
-                "-v", f"{resolved}:/run/secrets/mysql.cnf:ro",
-                "-e", "MYSQL_DEFAULTS_FILE=/run/secrets/mysql.cnf",
-            ]
-            log.info(f"MySQL config mounted from: {resolved}")
-        else:
-            log.warning(f"CLD_MYSQL_CONFIG set but file not found: {cfg.mysql_config}")
 
     # Host test broker (persistent roles, plus the bare ephemeral devcontainer):
     # mount the restricted key + known_hosts and make the broker reachable.
@@ -796,21 +781,6 @@ def build_ticket_container_args(manifest: TicketManifest, cfg: Config) -> list[s
     if bootstrap := ticket_repo_bootstrap(manifest, cfg):
         args += ["-e", f"CLD_REPO_BOOTSTRAP={bootstrap}"]
         log.debug("Bootstrap repos: %s", bootstrap)
-
-    # Per-repo MySQL secrets, recomputed from the registry on every recreate
-    # (the manifest carries identity facts only -- design section 2.1). Ad-hoc
-    # repos have no registry entry, hence no secret.
-    for repo in manifest.repos:
-        entry = cfg.repos.get(repo.name)
-        if not entry or not entry.mysql_config:
-            continue
-        mysql_path = Path(entry.mysql_config).expanduser()
-        if not mysql_path.is_file():
-            log.warning("repo '%s': mysql_config not found: %s", repo.name, entry.mysql_config)
-            continue
-        resolved = to_host_path(str(mysql_path.resolve()), cfg)
-        args += ["-v", f"{resolved}:/run/secrets/mysql-{repo.name}.cnf:ro"]
-        log.info("MySQL config for %s mounted from: %s", repo.name, resolved)
 
     # Same trust level as v1 master: the interactive user's own session.
     args += stage_broker(cfg)

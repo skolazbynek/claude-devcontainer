@@ -240,8 +240,8 @@ in v2. Product-level requirements only:
 - **Broker `run-tests` / `graphql`**: gain an explicit repo target, validated
   against the caller's launch-manifest label (today the broker derives the one
   repo from `org.cld.repo-root` and the actions take no target at all).
-- **Secrets**: `mysql_config` and per-repo `.env` resolution become per-repo
-  (keyed by registry name), not one fixed path per container.
+- **Secrets**: per-repo `.env` resolution becomes per-repo (keyed by registry
+  name), not one fixed path per container.
 - **`ignore_gitignore`**: read from each repo's own `.cld/config.toml` and
   applied to that repo's workspace only (today: one flattened env var).
 - **Path translation**: a prefix map (container path → host path per repo)

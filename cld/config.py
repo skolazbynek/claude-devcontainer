@@ -69,7 +69,6 @@ _TOML_KEYS = {
     "base_image",
     "devcontainer_image",
     "run_image",
-    "mysql_config",
     "agent_timeout",
     "poll_interval",
     "debug",
@@ -232,9 +231,6 @@ class Config:
     devcontainer_image: str = "claude-devcontainer:latest"
     run_image: str = "claude-run:latest"
 
-    # Optional MySQL credentials (path to a .cnf file on the host)
-    mysql_config: str = ""
-
     # SSL CA certificates path on the host (dir or file).
     # Empty = auto-detect: /etc/ssl/certs (Linux) then /etc/ssl/cert.pem (macOS).
     # Set explicitly to use a custom CA bundle; leave empty to skip if neither found.
@@ -352,7 +348,6 @@ class Config:
             base_image=_env_str("CLD_BASE_IMAGE", layered.get("base_image", "claude-base:latest")),
             devcontainer_image=_env_str("CLD_DEVCONTAINER_IMAGE", layered.get("devcontainer_image", "claude-devcontainer:latest")),
             run_image=_env_str("CLD_RUN_IMAGE", layered.get("run_image", "claude-run:latest")),
-            mysql_config=_env_str("CLD_MYSQL_CONFIG", layered.get("mysql_config", "")),
             ssl_certs_path=_env_str("CLD_SSL_CERTS_PATH", layered.get("ssl_certs_path", "")),
             host_project_dir=_env_str("CLD_HOST_PROJECT_DIR"),
             host_home=_env_str("CLD_HOST_HOME"),

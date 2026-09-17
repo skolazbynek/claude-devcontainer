@@ -319,7 +319,7 @@ ticket (spec §7).
 ### 5.1 Reading
 
 `Config` gains `repos: dict[str, RepoEntry]` with
-`RepoEntry(path, default_rev="", bootstrap=False, mysql_config="")`.
+`RepoEntry(path, default_rev="", bootstrap=False)`.
 `_load_toml` (`config.py:130-155`) currently returns known scalar/array keys
 only and would warn on a `repos` table; it gains explicit handling: `repos`
 is accepted as a table-of-tables, each entry validated (path exists is *not*
@@ -409,17 +409,11 @@ level as v1 master: the interactive user's own session).
 
 ### 6.2 Per-repo secrets
 
-- `mysql_config` moves from global `Config` to `RepoEntry.mysql_config`
-  (host user config — it is a host secret path, so it belongs in the
-  host-owned registry, not the repo's committed-adjacent `.cld/config.toml`).
-  **[NEEDS SIGN-OFF]** — this relocates an existing user-visible config key
-  for the ticket kind (v1 kinds keep reading the global key untouched).
-  Mounted per repo at `/run/secrets/mysql-<name>.cnf`. The `mysql` wrapper
-  (`container-init.sh:9-14`) becomes per-repo wrappers `mysql-<name>`; plain
-  `mysql` is generated only when exactly one repo has a config.
 - Per-repo `.env` needs no design: broker-side resolution is already
   per-`$REPO` (§6.1), and in-workspace `.env` symlinks are the
   `ignore_gitignore` mechanism below.
+- (The per-repo MySQL config/mount/wrapper surface once designed here was
+  removed entirely — cld carries no MySQL config plumbing anymore.)
 
 ### 6.3 `ignore_gitignore`
 
@@ -653,12 +647,10 @@ verified against the working copy.
   start still sees the previous boot's `/tmp/cld-ticket-ready`; `TICKET_MODE`
   removes it before any per-repo work, or the host-side wait would return
   early.
-- **Stale /tmp/bin wrappers wiped at boot start** (§4.3 only specified
-  generating the claude wrapper): the previous boot's generated wrappers also
-  survive `docker stop`, and /tmp/bin is first on PATH, so on a warm start
-  `which claude` / `command -v mysql` resolve them instead of the real
-  binaries and each regenerated wrapper would exec its own path — for claude
-  an infinite self-exec loop that hangs `cld claude`. `TICKET_MODE` clears
-  /tmp/bin next to the sentinel and reruns `generate_mysql_wrappers` (the
-  source-time run in container-init.sh already ran against the stale PATH);
-  the claude wrapper is rewritten after the loop as before.
+- **Stale /tmp/bin wrapper wiped at boot start** (§4.3 only specified
+  generating the claude wrapper): the previous boot's generated wrapper also
+  survives `docker stop`, and /tmp/bin is first on PATH, so on a warm start
+  `which claude` resolves it instead of the real binary and the regenerated
+  wrapper would exec its own path — an infinite self-exec loop that hangs
+  `cld claude`. `TICKET_MODE` clears /tmp/bin next to the sentinel; the claude
+  wrapper is rewritten after the loop as before.

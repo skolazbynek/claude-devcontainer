@@ -14,7 +14,6 @@ RUN apt-get update && apt-get install -y \
     bubblewrap \
     socat \
     jq \
-    default-mysql-client-core \
     nodejs \
     npm \
     ripgrep \
@@ -133,8 +132,8 @@ COPY --chown=claude:claude .claude/skills/ /opt/cld/.claude/skills/
 # entrypoint writes, which lives on the PATH container-init.sh exports *in the
 # entrypoint's own process*. A user shell arrives by `docker exec -it … bash -l`, which
 # inherits none of it, so without this hook an interactive session runs the raw binary:
-# no skills, no --dangerously-skip-permissions, and no credentialed mysql wrapper
-# either. A login shell sources /etc/profile.d/*.sh, so put the PATH entry there.
+# no skills and no --dangerously-skip-permissions either. A login shell sources
+# /etc/profile.d/*.sh, so put the PATH entry there.
 RUN printf 'export PATH="/tmp/bin:$PATH"\n' > /etc/profile.d/cld-path.sh
 
 USER claude
