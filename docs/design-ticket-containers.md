@@ -654,3 +654,12 @@ verified against the working copy.
   start still sees the previous boot's `/tmp/cld-ticket-ready`; `TICKET_MODE`
   removes it before any per-repo work, or the host-side wait would return
   early.
+- **Stale /tmp/bin wrappers wiped at boot start** (§4.3 only specified
+  generating the claude wrapper): the previous boot's generated wrappers also
+  survive `docker stop`, and /tmp/bin is first on PATH, so on a warm start
+  `which claude` / `command -v mysql` resolve them instead of the real
+  binaries and each regenerated wrapper would exec its own path — for claude
+  an infinite self-exec loop that hangs `cld claude`. `TICKET_MODE` clears
+  /tmp/bin next to the sentinel and reruns `generate_mysql_wrappers` (the
+  source-time run in container-init.sh already ran against the stale PATH);
+  the claude wrapper is rewritten after the loop as before.
