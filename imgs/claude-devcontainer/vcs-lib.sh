@@ -11,24 +11,6 @@
 
 VCS_TYPE=""
 
-detect_vcs() {
-    # Determine VCS type based on repo markers and available tools.
-    # Prefers jj when both the .jj directory and the jj binary exist.
-    if [ -d "$WORKSPACE_ORIGIN/.jj" ] && command -v jj &>/dev/null; then
-        VCS_TYPE="jj"
-    elif [ -d "$WORKSPACE_ORIGIN/.git" ] && command -v git &>/dev/null; then
-        VCS_TYPE="git"
-    elif [ -e "$WORKSPACE_ORIGIN/.git" ] && command -v git &>/dev/null; then
-        # .git can be a file (worktree pointer)
-        VCS_TYPE="git"
-    else
-        echo "Error: No supported VCS repository found at $WORKSPACE_ORIGIN" >&2
-        echo "Expected .jj/ (jujutsu) or .git/ (git) directory" >&2
-        return 1
-    fi
-    echo "Detected VCS: $VCS_TYPE"
-}
-
 # --- Workspace isolation -----------------------------------------------------
 
 cld_detect_backend() {
@@ -215,56 +197,6 @@ cld_enable_watchman() {
         jj config set --workspace fsmonitor.backend watchman && \
         jj config set --workspace fsmonitor.watchman.register-snapshot-trigger true && \
         jj status >/dev/null)
-}
-
-# --- Branch / bookmark management --------------------------------------------
-
-vcs_create_branch() {
-    # Create a named branch/bookmark at a revision.
-    # Args: $1=name  $2=revision (optional, default: current)
-    local name="$1" revision="${2:-}"
-
-    if [ "$VCS_TYPE" = "jj" ]; then
-        local cmd=("jj" "bookmark" "create" "$name")
-        [ -n "$revision" ] && cmd+=("-r" "$revision")
-        "${cmd[@]}" 2>&1
-    else
-        # In git worktree context, branch is already created by worktree add.
-        # This is for additional branches if needed.
-        if [ -n "$revision" ]; then
-            git branch "$name" "$revision" 2>&1
-        else
-            git branch "$name" 2>&1
-        fi
-    fi
-}
-
-vcs_set_branch() {
-    # Force-update a branch/bookmark to point at a revision.
-    # Args: $1=name  $2=revision
-    local name="$1" revision="$2"
-
-    if [ "$VCS_TYPE" = "jj" ]; then
-        jj bookmark set "$name" -r "$revision" 2>&1
-    else
-        git branch -f "$name" "$revision" 2>&1
-    fi
-}
-
-# --- Change creation ---------------------------------------------------------
-
-vcs_new_change() {
-    # Create a new change on top of a revision.
-    # Args: $1=revision
-    local revision="${1:-}"
-
-    if [ "$VCS_TYPE" = "jj" ]; then
-        jj new "$revision" 2>&1
-    else
-        # In git, the worktree is already at the right revision.
-        # Only checkout if explicitly requested.
-        [ -n "$revision" ] && git checkout "$revision" 2>&1
-    fi
 }
 
 # --- Committing --------------------------------------------------------------
