@@ -15,7 +15,7 @@ import typer
 from cld.cli_msg import handle_errors as _handle_errors, msg_app
 from cld.config import Config
 from cld.docker import find_target_repo
-from cld.broker import broker_agent_op, broker_available, broker_task_agent_op, run_action
+from cld.broker import broker_available, broker_task_agent_op, run_action
 from cld.log import get_logger, setup_logging
 from cld.manifest import TicketManifest
 from cld.prompts import list_prompt_items
@@ -35,7 +35,7 @@ def _host_only(verb: str) -> None:
 
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context):
-    """cld inside a container: task-agents, the repo agent, mailbox messaging."""
+    """cld inside a container: task-agents, mailbox messaging, the broker."""
     if ctx.invoked_subcommand is None:
         _host_only("cld")
 
@@ -43,11 +43,6 @@ def main(ctx: typer.Context):
 @app.command("run", hidden=True, context_settings=_ANY_ARGS)
 def run_stub(ctx: typer.Context):
     _host_only("cld run")
-
-
-@app.command("master", hidden=True, context_settings=_ANY_ARGS)
-def master_stub(ctx: typer.Context):
-    _host_only("cld master")
 
 
 @app.command("chain", hidden=True, context_settings=_ANY_ARGS)
@@ -106,39 +101,19 @@ def logs_stub(ctx: typer.Context):
 # --- Broker dispatch ----------------------------------------------------------
 
 
-def _dispatch_agent_to_broker(cfg: Config, op: str, extra_args: list[str] | None = None) -> None:
-    """Delegate a `cld agent <op>` to the host broker.
-
-    This container has no docker daemon (socket removed by design); the broker runs
-    host-side `cld agent <op>` for the cwd-selected target repo and streams its
-    output back. Exits with the broker's exit code. See cld/broker.py.
-    """
-    if not broker_available():
-        typer.echo(
-            "Error: the host broker is not configured for this container, so `cld agent` "
-            "cannot reach the host to launch a sibling agent. Set `broker_key` "
-            "(and `broker_known_hosts`) in cld config and restart master.",
-            err=True,
-        )
-        raise typer.Exit(1)
-    target = str(find_target_repo(cfg))  # resolve_master_target: cwd -> host path
-    log.info("Delegating `cld agent %s` for %s to host broker", op or "start", target)
-    raise typer.Exit(broker_agent_op(target, op, extra_args))
-
-
 def _dispatch_task_agent_to_broker(cfg: Config, op: str, extra_args: list[str]) -> None:
     """Delegate a `cld task-agent <op>` to the host broker.
 
     Spawning and reaping happen host-side for the cwd-selected target repo. The broker
-    stamps `--parent <this master>` on the way through and refuses `--force`, so a
-    master reaps only its own fleet and can never override a reap-readiness refusal
+    stamps `--parent <this container>` on the way through and refuses `--force`, so a
+    caller reaps only its own fleet and can never override a reap-readiness refusal
     (docs/design-task-agents.md §7).
     """
     if not broker_available():
         typer.echo(
             "Error: the host broker is not configured for this container, so `cld task-agent` "
             "cannot reach the host. Set `broker_key` (and `broker_known_hosts`) "
-            "in cld config and restart master. Reading the fleet still works without it: "
+            "in cld config and restart this container. Reading the fleet still works without it: "
             "the messenger's fleet_digest()/read_mailbox() tools and `cld task-agent "
             "transcript` all read the mounted mailbox.",
             err=True,
@@ -291,70 +266,14 @@ def task_agent_transcript(
 
 
 # --- Persistent repo agent ----------------------------------------------------
-agent_app = typer.Typer(
-    help="Persistent per-repo headless Claude agent (mailbox-driven; see docs/design-agent-messaging.md).",
-    invoke_without_command=True,
-)
-app.add_typer(agent_app, name="agent")
+# Host-only: launching or managing a standing repo agent from inside a
+# container was the master role's sibling-launch route (broker `agent` action),
+# removed with it.
 
 
-@agent_app.callback(invoke_without_command=True)
-@_handle_errors
-def agent(
-    ctx: typer.Context,
-    model: str = typer.Option("", "-m", "--model", help="Claude model (first launch only)"),
-    revision: str = typer.Option("", "-r", "--revision", help="Anchor revision (first launch only)"),
-    shared_anchor: bool = typer.Option(
-        False, "--shared-anchor",
-        help="Anchor directly on -r, sharing reach with its existing descendants "
-        "(needs explicit human approval; default is an isolated sibling; first launch only)",
-    ),
-):
-    """Start the persistent repo agent for the cwd-selected repo. Idempotent per repo."""
-    if ctx.invoked_subcommand is not None:
-        return
-    cfg = Config.from_env()
-    setup_logging(cfg)
-    extra: list[str] = []
-    if model:
-        extra += ["-m", model]
-    if revision:
-        extra += ["-r", revision]
-    if shared_anchor:
-        extra += ["--shared-anchor"]
-    _dispatch_agent_to_broker(cfg, "start", extra)
-
-
-@agent_app.command("restart")
-@_handle_errors
-def agent_restart():
-    """Restart the repo agent, picking up image/code changes."""
-    _dispatch_agent_to_broker(Config.from_env(), "restart")
-
-
-@agent_app.command("shutdown")
-@_handle_errors
-def agent_shutdown(
-    all_: bool = typer.Option(False, "--all", help="Stop all agent containers on the host"),
-):
-    """Stop and remove the repo agent (or all with --all)."""
-    _dispatch_agent_to_broker(Config.from_env(), "shutdown", ["--all"] if all_ else None)
-
-
-@agent_app.command("status")
-@_handle_errors
-def agent_status():
-    """Print status of the repo agent (docker + supervisor phase)."""
-    _dispatch_agent_to_broker(Config.from_env(), "status")
-
-
-@agent_app.command("logs")
-@_handle_errors
-def agent_logs(
-    tail: int = typer.Option(80, "-n", "--tail", help="Number of lines to show"),
-):
-    """Tail the repo agent's log output (= supervisor stderr)."""
-    _dispatch_agent_to_broker(Config.from_env(), "logs", ["-n", str(tail)])
+@app.command("agent", hidden=True, context_settings=_ANY_ARGS)
+def agent_stub(ctx: typer.Context):
+    _host_only("cld agent")
 
 
 # --- Mailbox messaging --------------------------------------------------------
@@ -397,16 +316,12 @@ def repos():
     Ticket container (v2): one line per mounted repo from the launch manifest
     -- name, origin path, workspace path, anchor, mode
     (docs/design-ticket-containers.md section 6.6). The manifest env is
-    host-set at launch, like `MASTER_TARGETS` below.
+    host-set at launch.
 
-    v1 master/devcontainer: one path per line, tagged 'own' for the container's
-    own repo (from CLD_HOST_PROJECT_DIR) and 'target' for each `MASTER_TARGETS`
-    entry. Reads the `MASTER_TARGETS` env var, not `cfg.master_targets` -- the
-    host already resolved, validated and expanded `master_targets` from its own
-    config into that env var at launch (see `build_container_args` in
-    cld/docker.py). Re-reading TOML in-container would look at a different
-    (usually absent, since `.cld/` is gitignored) config and disagree with
-    `resolve_master_target`, which is what actually launches peers.
+    v1 agent/task-agent: the single repo the container was launched for,
+    tagged 'own'. Its host path comes from the host-set CLD_HOST_PROJECT_DIR,
+    not from in-container TOML -- `.cld/` is gitignored, so a re-read would
+    usually find nothing and disagree with the host.
     """
     cfg = Config.from_env()
     setup_logging(cfg)
@@ -422,9 +337,6 @@ def repos():
         return
     if cfg.host_project_dir:
         typer.echo(f"{cfg.host_project_dir}\town")
-    for entry in os.environ.get("MASTER_TARGETS", "").split(":"):
-        if entry:
-            typer.echo(f"{entry}\ttarget")
 
 
 @app.command()

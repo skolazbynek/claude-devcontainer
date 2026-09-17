@@ -5,8 +5,8 @@
 #
 #     <action> <session> <base64-argv>
 #
-# The broker serves ANY repo that has a running master, agent, task-agent or
-# ticket container -- no per-repo config, no whitelist. It resolves the target
+# The broker serves ANY repo that has a running agent, task-agent or ticket
+# container -- no per-repo config, no whitelist. It resolves the target
 # repo from the calling container's host-set labels (established at launch,
 # not caller input): the single `org.cld.repo-root` for v1 kinds, or -- for a
 # multi-repo ticket container -- the flat `org.cld.repo.<name>` labels, picked
@@ -14,16 +14,15 @@
 # (resolve_repo_target). The caller controls only: the action, a validated
 # session id, and the decoded argv. Nothing is ever eval'd.
 #
-# Sessions come in two v1 shapes: `cld_master_*` (a `cld master`) and
-# `cld_agent_*` (both the standing repo agent and task-agents -- kind is a
-# label, not a name, see cld/docker.py:task_agent_container_name), plus the v2
-# ticket containers. Any of these may call `run-tests` / `list-containers`.
-# The `agent` / `task-agent` launcher actions (spawning siblings) stay
-# master-only in practice even though the session regex admits every kind of
-# caller: they gate on the `org.cld.targets` label via validate_target, which
-# only master sessions ever carry (set from `master_targets`, see
-# build_container_args) -- a repo agent or task-agent session always fails
-# validate_target for lack of any registered target.
+# v1 sessions are all named `cld_agent_*` (both the standing repo agent and
+# task-agents -- kind is a label, not a name, see
+# cld/docker.py:task_agent_container_name), plus the v2 ticket containers. Any
+# of these may call `run-tests` / `list-containers`. The `task-agent` launcher
+# action gates on validate_target, which since the removal of the master role
+# (the only kind that ever carried an `org.cld.targets` allowlist) accepts
+# nothing but the caller's own `org.cld.repo-root` -- and a container resolves
+# its cwd to a container path, not that host path, so in practice the launcher
+# route is unusable until it is reworked ticket-scoped.
 #
 # The regex below is a format check only, not an authorization boundary --
 # `$session` doubles as the docker container name, and the label read below
@@ -120,7 +119,7 @@ action_run_tests() {
 }
 
 # Enumerate cld containers for the messenger / `cld agent status`. Read-only:
-# the sole argv is an optional kind filter (agent|master). Emits one
+# the sole argv is an optional kind filter (agent|task-agent|ticket). Emits one
 # tab-separated `name<TAB>kind<TAB>repo<TAB>raw-status` line per container.
 action_list_containers() {
     local kind="${1:-}"
@@ -139,7 +138,7 @@ action_list_containers() {
         done
 }
 
-# Shared by both launcher actions: a container that pushes a deliverable branch
+# The task-agent launcher: a container that pushes a deliverable branch
 # needs the host user's ssh-agent, and `stage_ssh_agent` (cld/docker.py) forwards
 # whatever socket $SSH_AUTH_SOCK names. sshd builds a fresh session environment,
 # so that variable only exists here if broker.conf sets it -- and a conf
@@ -223,9 +222,12 @@ parse_repo_arg() {
     esac
 }
 
-# Shared by both launcher actions: <target> is validated against the master's
-# host-set labels (org.cld.repo-root + org.cld.targets), never trusted from the
-# caller alone -- so an action can only ever run for a repo the host sanctioned.
+# <target> is validated against the caller's host-set labels
+# (org.cld.repo-root + org.cld.targets), never trusted from the caller alone --
+# so an action can only ever run for a repo the host sanctioned. Nothing sets
+# org.cld.targets since the master role was removed (it was the only kind that
+# carried one), so today this accepts the caller's own repo-root and nothing
+# else; the read stays for the ticket-scoped rework of this route.
 validate_target() {
     local target="$1" targets allowed=0 t
     targets=$(docker inspect "$session" --format '{{index .Config.Labels "org.cld.targets"}}' 2>/dev/null) || true
@@ -238,35 +240,13 @@ validate_target() {
         || { echo "denied: target '$target' is not a repo" >&2; exit 3; }
 }
 
-# Launch / manage a sibling `cld agent` on the host for one of this master's
-# registered repos. The caller (cld inside master) sends <target> <op> [args];
-# <op> is checked against a fixed set, so this can never run an arbitrary command.
-action_agent() {
-    local target="${1:-}" op="${2:-}"
-    shift 2 2>/dev/null || { echo "denied: agent needs <target> <op>" >&2; exit 2; }
-    case "$op" in
-        start|restart|shutdown|status|logs) ;;
-        *) echo "denied: bad agent op '$op'" >&2; exit 2 ;;
-    esac
-    validate_target "$target"
-    stage_agent_socket
-
-    # `cld agent` (no subcommand) starts; the rest are subcommands.
-    cd "$target" || { echo "cannot cd to $target" >&2; exit 3; }
-    if [ "$op" = start ]; then
-        exec cld agent "$@"
-    else
-        exec cld agent "$op" "$@"
-    fi
-}
-
-# Launch / manage a task-scoped agent for one of this master's registered repos
-# (docs/design-task-agents.md §9). Same target validation as `agent`, plus three
+# Launch / manage a task-scoped agent for one of the caller's registered repos
+# (docs/design-task-agents.md §9). Target validation as above, plus three
 # argv rules that make this safe to expose to a container:
 #
 #   --force   denied outright. Overriding a reap-readiness refusal is a human act;
-#             a master must not be able to discard uncaptured work or break a third
-#             agent's edge (§7).
+#             a container must not be able to discard uncaptured work or break a
+#             third agent's edge (§7).
 #   --parent  denied from the caller and appended by us as the validated $session,
 #             so an agent's recorded owner is host-set and cannot be forged.
 #   prompts   every positional must be an `@ref`. Refs are resolved host-side and their
@@ -278,7 +258,7 @@ action_task_agent() {
     local target="${1:-}" op="${2:-}"
     shift 2 2>/dev/null || { echo "denied: task-agent needs <target> <op>" >&2; exit 2; }
     # Exactly the ops the container route delegates. `transcript` is absent on
-    # purpose: the mailbox is bind-mounted into master, so it never needs the host.
+    # purpose: the mailbox is bind-mounted into the caller, never needing the host.
     case "$op" in
         start|status|logs|shutdown) ;;
         *) echo "denied: bad task-agent op '$op'" >&2; exit 2 ;;
@@ -843,7 +823,7 @@ REPO=""
 if [ "$KIND" != ticket ]; then
     REPO=$(docker inspect "$session" --format '{{index .Config.Labels "org.cld.repo-root"}}' 2>/dev/null) || true
     [ -n "$REPO" ] && { [ -d "$REPO/.jj" ] || [ -d "$REPO/.git" ]; } \
-        || { echo "no master/agent/task-agent container for session $session" >&2; exit 3; }
+        || { echo "no agent/task-agent container for session $session" >&2; exit 3; }
 fi
 
 # Per-action context (REV, secrets, target validation) is resolved inside each

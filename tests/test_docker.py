@@ -23,7 +23,6 @@ from cld.docker import (
     find_repo_root,
     in_master_container,
     parse_peers_env,
-    resolve_master_target,
     resolve_anchor_checked,
     stage_home_ro,
     stage_broker,
@@ -218,62 +217,12 @@ class TestStageHomeRo:
         assert args[1].startswith(str(tmp_path.resolve()) + "/.bashrc:")
 
 
-class TestResolveMasterTarget:
-    def test_errors_when_not_in_master(self, tmp_path):
-        # clean_env fixture already unsets HUB_MODE
-        with pytest.raises(RuntimeError, match="not running inside a cld master"):
-            resolve_master_target(tmp_path, Config())
-
-    def test_own_repo_via_workspace_origin(self, monkeypatch):
-        monkeypatch.setenv("HUB_MODE", "1")
-        cfg = Config(host_project_dir="/host/side/cld")
-        # /workspace/current is master's ephemeral workspace path. Path.resolve
-        # is lenient about non-existent paths so this works even on the host.
-        from pathlib import Path
-        assert resolve_master_target(Path("/workspace/current"), cfg) == "/host/side/cld"
-        assert resolve_master_target(Path("/workspace/origin/sub"), cfg) == "/host/side/cld"
-
-    def test_own_repo_errors_without_host_project_dir(self, monkeypatch):
-        monkeypatch.setenv("HUB_MODE", "1")
-        from pathlib import Path
-        with pytest.raises(RuntimeError, match="CLD_HOST_PROJECT_DIR is unset"):
-            resolve_master_target(Path("/workspace/current"), Config())
-
-    def test_matches_master_targets_entry(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HUB_MODE", "1")
-        target = tmp_path / "projects" / "foo"
-        (target / "subdir").mkdir(parents=True)
-        monkeypatch.setenv("MASTER_TARGETS", f"{target}:{tmp_path}/other")
-        assert resolve_master_target(target, Config()) == str(target)
-        assert resolve_master_target(target / "subdir", Config()) == str(target)
-
-    def test_matches_via_container_mirror(self, monkeypatch):
-        # Placeholder dirs live at the container mirror ($HOME/...) of a host
-        # target; resolve translates cwd back to the host path before matching.
-        monkeypatch.setenv("HUB_MODE", "1")
-        host_target = "/home/host/projects/foo"
-        monkeypatch.setenv("MASTER_TARGETS", host_target)
-        cfg = Config(host_home="/home/host")
-        from pathlib import Path
-        from cld.docker import CONTAINER_HOME
-        mirror = Path(f"{CONTAINER_HOME}/projects/foo")
-        assert resolve_master_target(mirror, cfg) == host_target
-        assert resolve_master_target(mirror / "subdir", cfg) == host_target
-
-    def test_unknown_cwd_errors(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HUB_MODE", "1")
-        monkeypatch.setenv("MASTER_TARGETS", "")
-        elsewhere = tmp_path / "unrelated"
-        elsewhere.mkdir()
-        with pytest.raises(RuntimeError, match="not a registered target"):
-            resolve_master_target(elsewhere, Config())
-
-
 class TestEnsureImageNested:
-    def test_raises_inside_master_no_daemon(self, monkeypatch):
-        # Inside master there is no docker daemon (socket removed) and container
-        # launches are delegated to the host broker, so ensure_image must never
-        # be reached; if it is, it fails clearly rather than touching docker.
+    def test_raises_inside_hub_container_no_daemon(self, monkeypatch):
+        # A container has no docker daemon (socket removed), so ensure_image
+        # must never be reached from one; if it is, it fails clearly rather
+        # than touching docker. HUB_MODE is the flag it still checks -- see
+        # in_master_container().
         monkeypatch.setenv("HUB_MODE", "1")
         import cld.docker as docker_mod
         from pathlib import Path
@@ -290,14 +239,14 @@ class TestEnsureImageNested:
 
 class TestInMasterContainer:
     def test_true_when_hub_mode_set(self, monkeypatch):
+        # No launcher sets HUB_MODE since the master role was removed; the flag
+        # (and the broker dispatch keyed on it) stays until that rework.
         monkeypatch.setenv("HUB_MODE", "1")
         assert in_master_container() is True
 
-    def test_false_when_only_master_mode_set(self, monkeypatch):
-        # MASTER_MODE alone (without HUB_MODE) should not happen in practice --
-        # build_container_args always sets both for master -- but this pins the
-        # actual check to HUB_MODE, not MASTER_MODE.
-        monkeypatch.setenv("MASTER_MODE", "1")
+    def test_false_when_only_agent_mode_set(self, monkeypatch):
+        # Every persistent role gets AGENT_MODE; that must not read as a hub.
+        monkeypatch.setenv("AGENT_MODE", "1")
         assert in_master_container() is False
 
     def test_false_when_unset(self):
@@ -460,8 +409,8 @@ class TestBuildContainerArgsTaskAgent:
         args = self._args(tmp_path)
         assert "AGENT_MODE=1" in args
         assert "TASK_AGENT_MODE=1" in args
-        assert "MASTER_MODE=1" not in args
         assert "HUB_MODE=1" not in args
+        assert not any(a.startswith("org.cld.targets=") for a in args)
 
     def test_spawn_facts_in_env(self, tmp_path):
         args = self._args(tmp_path)
@@ -508,29 +457,22 @@ class TestBuildContainerArgsTaskAgent:
         )
         assert any("broker-key" in a for a in args)
 
-    @pytest.mark.parametrize("kwargs", [
-        {"master": True, "agent": True},
-        {"master": True, "task_agent": TaskAgentSpec(slug="t")},
-        {"agent": True, "task_agent": TaskAgentSpec(slug="t")},
-    ])
-    def test_roles_mutually_exclusive(self, tmp_path, kwargs):
+    def test_roles_mutually_exclusive(self, tmp_path):
         with pytest.raises(ValueError, match="mutually exclusive"):
-            build_container_args(tmp_path, "s", Config(), **kwargs)
+            build_container_args(
+                tmp_path, "s", Config(), agent=True, task_agent=TaskAgentSpec(slug="t"),
+            )
 
 
 class TestBuildContainerArgsBrokerWiring:
-    """Broker key reaches every persistent role -- master, agent, task-agent --
-    not just master. Access-time policy (master authorization) lives in the
-    agent/task-agent persona prompts, not in this wiring."""
+    """Broker key reaches every persistent role -- agent and task-agent alike.
+    Access-time policy (master authorization) lives in the agent/task-agent
+    persona prompts, not in this wiring."""
 
     def _cfg(self, tmp_path):
         key = tmp_path / "broker_key"
         key.write_text("k")
         return Config(mailbox_root=str(tmp_path / "mb"), broker_key=str(key))
-
-    def test_master_role_gets_broker(self, tmp_path):
-        args = build_container_args(tmp_path, "cld_master_r", self._cfg(tmp_path), master=True)
-        assert any("broker-key" in a for a in args)
 
     def test_agent_role_gets_broker(self, tmp_path):
         args = build_container_args(tmp_path, "cld_agent_r", self._cfg(tmp_path), agent=True)
@@ -897,12 +839,13 @@ class TestOverlapKindMatrix:
             with pytest.raises(RuntimeError, match="inside the live reach"):
                 resolve_anchor_checked(cfg, jj_repo.repo_root, inside, caller_kind="task-agent")
 
-    def test_interactive_v1_caller_vs_ticket_blocks(self, tmp_path, jj_repo):
+    def test_default_caller_kind_vs_ticket_blocks(self, tmp_path, jj_repo):
+        """Only `ticket` gets warn strength -- the default caller kind blocks."""
         occupant_anchor, inside = self._commits(jj_repo)
         cfg, records = self._fleet(tmp_path, jj_repo, occupant_anchor, "ticket")
         with patch("cld.docker.docker_occupant_list", return_value=records):
             with pytest.raises(RuntimeError, match="inside the live reach"):
-                resolve_anchor_checked(cfg, jj_repo.repo_root, inside, caller_kind="master")
+                resolve_anchor_checked(cfg, jj_repo.repo_root, inside)
 
     def test_shared_ticket_vs_ticket_still_warns(self, tmp_path, jj_repo, caplog):
         base = jj_repo.resolve_revision("@-")
@@ -943,9 +886,12 @@ class TestDockerOccupantList:
         with names_patch, run_patch:
             assert [r["kind"] for r in docker_occupant_list()] == ["run"]
 
-    def test_interactive_kind_never_occupies(self):
+    def test_non_blocking_kind_never_occupies(self):
+        # A ticket carries no org.cld.anchor label (it occupies via its
+        # manifest instead), so a kind outside ANCHOR_BLOCKING_KINDS found by
+        # the label scan is dropped.
         names_patch, run_patch = self._v1(
-            [("cld_x", "running")], [_ps("/r|aaa|isolated|master|cld_x\n")],
+            [("cld_x", "running")], [_ps("/r|aaa|isolated|ticket|cld_x\n")],
         )
         with names_patch, run_patch:
             assert docker_occupant_list() == []

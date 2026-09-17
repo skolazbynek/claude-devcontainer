@@ -14,10 +14,10 @@ on the mode (PRODUCT_DESIGN.md section 8): isolated (default) — the anchor is
 B itself, so only B's own descendants are editable; shared — the anchor is A,
 so any pre-existing descendant of A is inside the container's editable tree.
 
-The host (or a master delegating to a peer) passes:
-- ``AGENT_REVISION_HINT``: the revision to anchor on (resolved commit hash from
-  the host's jj view, or an unresolved revset string when the delegating master
-  has no RW view of the target repo).
+The host passes:
+- ``AGENT_REVISION_HINT``: the revision to anchor on (a commit hash the host
+  resolved from its own jj view; a symbolic revset still works, since
+  ``resolve_anchor`` is idempotent on a hash).
 - ``AGENT_SCRATCH``: a base64 envelope of the scratch payload. Ticket
   containers (v2) pass none: they have no brief, so the entrypoint invokes
   ``python3 -m cld.vcs.scratch --default-payload`` and the session-marker

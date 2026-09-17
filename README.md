@@ -2,7 +2,7 @@
 
 Run Claude Code in Docker containers with VCS workspace isolation. Supports **jujutsu (jj)** natively and **falls back to git** when jj is not installed. Each container gets its own isolated workspace (jj workspace or git worktree) and branch, so multiple agents can work on the same repo concurrently without conflicts.
 
-The primary interactive workflow is the **ticket container** (v2): one container per ticket, mounting one or more registered repos, driven from the host shell via `cld claude <ticket>`. See [Ticket containers](#ticket-containers-v2). The v1 interactive role `cld master` still works during the coexistence period but is superseded by tickets.
+The primary interactive workflow is the **ticket container** (v2): one container per ticket, mounting one or more registered repos, driven from the host shell via `cld claude <ticket>`. See [Ticket containers](#ticket-containers-v2).
 
 ## Prerequisites
 
@@ -26,7 +26,7 @@ poetry run cld --help
 cld build [--no-cache]
 ```
 
-The v1 verbs (`cld master`, `cld agent`, `cld run`, `cld chain`) must be run from within a VCS repository (jj or git) -- they operate on the cwd repo. The ticket verbs (`cld start`, `cld claude`, ...) run from anywhere: their repos come from the registry or from explicit paths.
+The v1 verbs (`cld agent`, `cld run`, `cld chain`) must be run from within a VCS repository (jj or git) -- they operate on the cwd repo. The ticket verbs (`cld start`, `cld claude`, ...) run from anywhere: their repos come from the registry or from explicit paths.
 
 ## Usage
 
@@ -53,11 +53,7 @@ cld chain list
 cld chain validate chains/my-chain.yaml
 cld chain dry-run @review-implement
 
-# --- v1 interactive role (superseded by ticket containers; still works) ---
-
-# Persistent per-repo interactive devcontainer (start-or-attach; idempotent per repo)
-cld master                                # start or re-attach
-cld master {restart | shutdown [--all] | status | logs}
+# --- v1 headless role (superseded by ticket containers; still works) ---
 
 # Persistent per-repo headless Claude agent (mailbox-driven)
 cld agent                                 # start; never attaches
@@ -122,20 +118,20 @@ Commits, the op log, and the per-repo ticket bookmark live in each host repo's s
 Verified deliberate differences from the v1 roles:
 
 - **Default anchor is `default_rev` -> `trunk()`, not `@`.** A v2 launch happens from anywhere, so each repo's `@` is invisible and may be unrelated WIP. Stacked work uses an explicit `repo@rev`. (v1 kinds keep defaulting to `@`.)
-- **Host-side `cld msg` prefers a single running ticket.** Identity resolution is: explicit `--ticket` flag or `CLD_TICKET` env, else the one running ticket container if exactly one exists, else the v1 fallback (the cwd repo's master). cwd is deliberately not mapped to tickets -- several tickets can mount one repo.
+- **Host-side `cld msg` prefers a single running ticket.** Identity resolution is: explicit `--ticket` flag or `CLD_TICKET` env, else the one running ticket container if exactly one exists, else the cwd repo's own host identity (the mailbox the v1 master used to own). cwd is deliberately not mapped to tickets -- several tickets can mount one repo.
 - **Parallel same-base siblings need no placeholder commits.** The overlap check now derives each occupant's *effective* anchor (the scratch commit in isolated mode) from the jj store at check time, for v1 headless kinds too, so two isolated containers anchored on the same base no longer over-block each other.
 - **A kept repo whose anchor changed on a repo-set change reattaches at its old bookmark.** `cld start <ticket> <new set>` recreates the container, but a kept repo's bookmark survives, and the boot's reattach branch wins over the new `anchor_base` -- the new anchor takes effect only after `cld shutdown` forgets the bookmark.
 - **One GraphQL test server per ticket session, even multi-repo.** The broker's `graphql start` names the server container by session; a `start --repo b` while a server for repo a runs returns the running server's status rather than launching a second one. `graphql stop` tears down against the repo the server was *started* for (its own label), whatever `--repo` says.
 
 ### Migration from v1
 
-1. **Shut down all v1 masters and agents first** (`cld master shutdown --all`, `cld agent shutdown --all`) -- bookmark/workspace hygiene in every repo store.
-2. **Seed the registry from your `master_targets` entries:** `cld repos add <name> <path>` for each. (`master_targets` itself keeps working for the v1 master while the roles coexist.)
+1. **Shut down all v1 agents first** (`cld agent shutdown --all`) -- bookmark/workspace hygiene in every repo store. (The `cld master` role is gone; if a master container from an older cld is still around, remove it with `docker rm -f` and `jj bookmark forget` its session.)
+2. **Register each repo you work on:** `cld repos add <name> <path>`.
 3. Muscle memory:
 
 | v1 | v2 |
 |---|---|
-| `cld master` | `cld start <ticket> <repo>` + `cld claude <ticket>` |
+| `cld master` (removed) | `cld start <ticket> <repo>` + `cld claude <ticket>` |
 | in-container shell work | `cld claude <ticket>` (daily) / `cld shell <ticket>` (sandbox debugging) |
 | `cld master shutdown` | `cld shutdown <ticket>` |
 | `cld master status` / `logs` | `cld status [<ticket>]` / `cld logs <ticket>` |
@@ -251,9 +247,9 @@ This detection runs both on the host (CLI commands) and inside containers (entry
 
 ## Messenger
 
-Lets any cld container (ticket, master or repo agent) send a message to any other and get a reply on its next turn, backed by a shared mailbox directory on the host -- no threads, no polling required from the user. Full design and mental model: `docs/design-agent-messaging.md`.
+Lets any cld container (ticket, repo agent or task-agent) send a message to any other and get a reply on its next turn, backed by a shared mailbox directory on the host -- no threads, no polling required from the user. Full design and mental model: `docs/design-agent-messaging.md`.
 
-Ticket containers get a mailbox named `cld_ticket_<slug>` and can be addressed by the ticket slug; a slug that is also some repo's basename is an ambiguity error naming both. Host-side `cld msg` acts as: the `--ticket` flag (or `CLD_TICKET` env), else the single running ticket container if exactly one exists, else the cwd repo's master.
+Ticket containers get a mailbox named `cld_ticket_<slug>` and can be addressed by the ticket slug; a slug that is also some repo's basename is an ambiguity error naming both. Host-side `cld msg` acts as: the `--ticket` flag (or `CLD_TICKET` env), else the single running ticket container if exactly one exists, else the cwd repo's own host identity.
 
 ```bash
 # Register for host use (user-scoped, works from any directory)
@@ -262,7 +258,7 @@ claude mcp add -s user messenger -- /path/to/cld/scripts/mcp/run-messenger.sh
 # Start a persistent, headless repo agent for the current repo
 cld agent
 
-# From any other container (master or another agent), message it by repo basename
+# From any other container (a ticket or another agent), message it by repo basename
 # (inside Claude): mcp__messenger__send(to="my-repo", subject="...", body="...", expects_reply=True)
 ```
 
@@ -324,30 +320,9 @@ prompts/                           Reusable task prompts for agents
 
 **Image hierarchy:** `claude-base` is the parent of both `claude-devcontainer` and `claude-run` (siblings). Always build base first; `cld build` handles all three in order.
 
-### Managing sibling agents from `cld master`
-
-> **Superseded by ticket containers** (a multi-repo ticket mounts all its repos directly -- see [Ticket containers](#ticket-containers-v2)). Kept while the v1 master role coexists; everything below still works.
-
-To spin up / restart / shut down persistent agents for repos other than master's own, set `master_targets` in your config (list of host paths registered as launch targets for master; each becomes an empty placeholder directory inside master's shell so `cd <path>` works, without ever bind-mounting the repo into master):
-
-```toml
-master_targets = ["~/repos/foo", "~/work/bar"]
-```
-
-Then inside master's shell:
-
-```bash
-cd /home/you/repos/repoB    # RO mount, safe to browse
-cld agent                   # launches a sibling agent container for repoB
-cld agent status
-cld agent shutdown
-```
-
-Master itself has no filesystem view of the target repo -- only a placeholder directory so `cd` works. `cld agent` in master resolves that placeholder to the target's host path and hands it to the host broker, which runs host-side `cld agent` for RepoB (validated against master's `org.cld.targets` label). The peer container it launches gets RW at `/workspace/origin`, does its own anchor staging on boot, and forgets its bookmark on SIGTERM so master never writes to RepoB. `cld repos` inside master's shell lists what it can target.
-
 ### Workspace isolation
 
-Containers mount the host repo RW at `/workspace/origin` (ticket containers: one mount per repo at `/workspace/origin/<name>`). The container's own entrypoint runs `jj workspace add` / `git worktree add` on boot; the workspace directory lives in the container's own filesystem layer at `/workspace/current` (tickets: `/workspace/<slug>/<name>`), never on the host. jj writes all store objects through the RW origin mount, and watchman snapshots edits into the store autonomously, so work is durable and host-visible without a host-side workspace directory. The `-r` flag pins the anchor revision for v1 kinds (default: `@` for jj, `HEAD` for git; tickets default to the registry `default_rev`, falling back to `trunk()`). On shutdown, the session's bookmark and workspace registration are forgotten from the origin store -- host-side by `cld shutdown` / `cld <role> shutdown`, plus the v1 master entrypoint's own TERM trap; committed work persists.
+Containers mount the host repo RW at `/workspace/origin` (ticket containers: one mount per repo at `/workspace/origin/<name>`). The container's own entrypoint runs `jj workspace add` / `git worktree add` on boot; the workspace directory lives in the container's own filesystem layer at `/workspace/current` (tickets: `/workspace/<slug>/<name>`), never on the host. jj writes all store objects through the RW origin mount, and watchman snapshots edits into the store autonomously, so work is durable and host-visible without a host-side workspace directory. The `-r` flag pins the anchor revision for v1 kinds (default: `@` for jj, `HEAD` for git; tickets default to the registry `default_rev`, falling back to `trunk()`). On shutdown, the session's bookmark and workspace registration are forgotten from the origin store host-side, by `cld shutdown` / `cld <role> shutdown`; committed work persists.
 
 ### Host file protection
 
@@ -357,12 +332,12 @@ All RO `$HOME` mounts (claude/anthropic/jj configs, `~/.claude.json`, plus devco
 
 ### No docker socket in containers
 
-No container mounts `/var/run/docker.sock` (it was equivalent to host root; see the security notes below). The two things that needed in-container docker now go through the host broker over SSH:
+No container mounts `/var/run/docker.sock` (it was equivalent to host root; see the security notes below). What needs in-container docker goes through the host broker over SSH:
 
-- **Peer enumeration** (`list_agents`, `cld agent status`): master calls the broker's `list-containers` action, which runs `docker ps` on the host and streams structured records back. Agents don't enumerate at all -- message replies address the sender by the full name carried in the message, delivered by filesystem, so agents need no host channel.
-- **Launching a sibling `cld agent` from inside master**: `cld agent` in master resolves the cwd's target repo and calls the broker's `agent` action, which runs host-side `cld agent` for that repo (validated against the master's host-set `org.cld.targets` label). Arg-building, anchor staging, and image builds all happen natively on the host.
+- **Peer enumeration** (`list_agents`): the broker's `list-containers` action runs `docker ps` on the host and streams structured records back. Agents don't enumerate at all -- message replies address the sender by the full name carried in the message, delivered by filesystem, so agents need no host channel.
+- **Running tests and the GraphQL server** (`run-tests`, `graphql`): host-side, against the repo the caller's own `org.cld.repo-root` label names, with secrets mounted into a throwaway container the caller never sees.
 
-See `cld/broker.py` (the host-vs-broker seam) and `broker/cld-broker.sh` (the actions). Path translation (`CLD_HOST_PROJECT_DIR`/`CLD_HOST_HOME`) still converts container paths to host paths for target resolution; it is now set unconditionally rather than riding along with the socket mount.
+See `cld/broker.py` (the host-vs-broker seam) and `broker/cld-broker.sh` (the actions). Path translation (`CLD_HOST_PROJECT_DIR`/`CLD_HOST_HOME`) still converts container paths to host paths; it is set unconditionally rather than riding along with the socket mount.
 
 ### Security model and known gaps
 
@@ -371,7 +346,7 @@ Containers run as host UID/GID with `--cap-drop=ALL`, `--security-opt=no-new-pri
 **Known gaps -- read carefully before shipping anything sensitive into a container:**
 
 - **No outbound network firewall.** Once an agent is running, it can reach any host on the public internet and exfiltrate anything mounted in (`~/.claude` tokens, `~/.claude.json` MCP creds, `~/.config/*` creds). Anthropic's reference devcontainer ships an `init-firewall.sh` with default-deny outbound and a small allowlist; cld does not (yet) ship an equivalent.
-- **No docker socket is mounted (was: host root).** Earlier versions mounted `/var/run/docker.sock` for peer enumeration, which let an agent run `docker run -v /:/host --privileged ...` and read or modify anything on the host -- bypassing every other control. The socket is gone; master's only host channel is now the broker key (a fixed, non-eval action allowlist with label-validated targets -- see the host broker section), and agents have no host channel at all. A leaked broker key grants that action set (run-tests + sibling `cld agent` lifecycle for allowlisted repos), which is strictly narrower than arbitrary host root but still privileged -- protect the key accordingly.
+- **No docker socket is mounted (was: host root).** Earlier versions mounted `/var/run/docker.sock` for peer enumeration, which let an agent run `docker run -v /:/host --privileged ...` and read or modify anything on the host -- bypassing every other control. The socket is gone; a container's only host channel is now the broker key (a fixed, non-eval action allowlist with label-validated targets -- see the host broker section). A leaked broker key grants that action set (run-tests, container enumeration, the GraphQL server lifecycle) for the labeled repos, which is strictly narrower than arbitrary host root but still privileged -- protect the key accordingly.
 - **`~/.claude` is mounted rw.** A malicious agent can both read your OAuth tokens and overwrite session state.
 
 ## Configuration
@@ -406,31 +381,30 @@ Full set of keys:
 | Key | Type | Default | Purpose |
 |---|---|---|---|
 | `base_image` | string | `"claude-base:latest"` | Common base Docker image |
-| `devcontainer_image` | string | `"claude-devcontainer:latest"` | Devcontainer image (`cld master`, `cld agent`, `cld task-agent`, ticket containers) |
+| `devcontainer_image` | string | `"claude-devcontainer:latest"` | Devcontainer image (`cld agent`, `cld task-agent`, ticket containers) |
 | `run_image` | string | `"claude-run:latest"` | One-shot run image (`cld run`) |
 | `pyproject_dir` | string | `"."` | Directory (relative to repo root) holding `pyproject.toml` and `.env`. Not a `Config` field -- read directly out of `.cld/config.toml` by `cld-broker.sh` on the host, for the broker's `PROJECT_SUBDIR` and secrets path (see "Host-side test running" in `CLAUDE.md`) |
 | `ssl_certs_path` | string | `""` | Opt-in override: host path (dir or PEM file) that **replaces** the baked CA bundle. Empty = use the baked bundle |
 | `home_mounts_always` | array of strings | `[".claude.json", ".config/anthropic", ".config/claude", ".config/jj"]` | RO `$HOME` paths staged into every container |
 | `home_mounts_devcontainer` | array of strings | `[".gitconfig", ".bashrc", ".config/nvim", ".local/state/nvim", ".cache/nvim"]` | Additional RO `$HOME` paths staged only for interactive devcontainer sessions |
-| `master_targets` | array of strings | `[]` | Host repo paths registered as launchable sibling targets from inside `cld master` (v1; tickets use the registry below) |
 | `repos.<name>` | TOML table | none | Ticket repo registry entry (`path`, `default_rev`, `bootstrap`); user config only, managed by `cld repos add/rm` |
 | `ignore_gitignore` | array of strings | `[]` | Gitignored files (e.g. `.env`) to symlink from `/workspace/origin` into the isolated workspace |
 | `agent_timeout` | int (seconds) | `1800` | Chain orchestrator's per-agent wait timeout |
 | `poll_interval` | int (seconds) | `30` | Chain orchestrator's docker-ps poll interval |
 | `chain_max_parallel` | int | `4` | Max agents launched concurrently in a chain's parallel group |
 | `chain_default_model` | string | `""` | Model override for chain agents; empty = each step's own default |
-| `ssh_auth_sock` | string | unset (auto-detect) | SSH agent forwarding into every devcontainer-image launch (`master`, `agent`, `task-agent`). Unset = auto-detect host `$SSH_AUTH_SOCK`; `""` = explicitly disable; a path = use that socket. Launches the broker makes on a master's behalf need `SSH_AUTH_SOCK` in `broker.conf` -- see `broker/README.md` |
-| `mailbox_root` | string | `"~/.cld/mailboxes"` | Host root of the inter-container mailbox tree (bind-mounted RW into every master/agent) |
+| `ssh_auth_sock` | string | unset (auto-detect) | SSH agent forwarding into every devcontainer-image launch (`agent`, `task-agent`, tickets). Unset = auto-detect host `$SSH_AUTH_SOCK`; `""` = explicitly disable; a path = use that socket. Launches the broker makes on a container's behalf need `SSH_AUTH_SOCK` in `broker.conf` -- see `broker/README.md` |
+| `mailbox_root` | string | `"~/.cld/mailboxes"` | Host root of the inter-container mailbox tree (bind-mounted RW into every agent, task-agent and ticket container) |
 | `agent_max_turns` | int | `120` | Per-message turn cap passed to the repo agent's `claude -p --max-turns` |
 | `agent_kickoff_persona` | string | `"agent"` | Persona used to kick off a new `cld agent` Claude session |
-| `broker_key` | string | `""` | Host path to the restricted broker **private** key. Setting this enables `cld broker <action>` inside `cld master`. Master-only |
+| `broker_key` | string | `""` | Host path to the restricted broker **private** key. Setting this enables `cld broker <action>` inside a container |
 | `broker_endpoint` | string | `"host.docker.internal:2222"` | Broker SSH endpoint, `[user@]host:port` (default login user `zet`) |
 | `broker_known_hosts` | string | `""` | Host path to the pinned `known_hosts` for the broker; required for the client's strict host-key check |
 | `log_level` | string | `"INFO"` | Root level for the `cld` logger hierarchy: `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `log_color` | string | `"auto"` | ANSI color in log output: `auto` (TTY-detect) / `always` / `never` |
 | `debug` | bool | `false` | Diagnostics flag; back-compat alias for `log_level = "DEBUG"` when `log_level` is otherwise unset |
 
-Every key above also has a `CLD_*` env var equivalent that overrides it (see below) except the array-typed ones (`home_mounts_always`, `home_mounts_devcontainer`, `master_targets`, `ignore_gitignore`), the `repos` registry table, and `pyproject_dir` (not a `Config` field), which are TOML-only.
+Every key above also has a `CLD_*` env var equivalent that overrides it (see below) except the array-typed ones (`home_mounts_always`, `home_mounts_devcontainer`, `ignore_gitignore`), the `repos` registry table, and `pyproject_dir` (not a `Config` field), which are TOML-only.
 
 ### `CLD_*` env vars (defaults shown)
 

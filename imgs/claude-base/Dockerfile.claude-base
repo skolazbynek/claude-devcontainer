@@ -118,7 +118,7 @@ COPY --chown=claude:claude cld/ /opt/cld/cld/
 COPY --chown=claude:claude prompts/ /opt/cld/prompts/
 ENV PYTHONPATH=/opt/cld
 
-# Bake in cld's own tool skills (e.g. agent-start, messenger-*) so they're
+# Bake in cld's own tool skills (e.g. messenger-*, task-agent-*) so they're
 # available in every container regardless of which repo is mounted at
 # /workspace/origin -- including sibling master_targets repos, which never
 # see this repo's own .claude/skills/. Loaded via `claude --add-dir /opt/cld`

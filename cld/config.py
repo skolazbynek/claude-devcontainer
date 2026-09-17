@@ -74,7 +74,6 @@ _TOML_KEYS = {
     "debug",
     "home_mounts_always",
     "home_mounts_devcontainer",
-    "master_targets",
     "ssl_certs_path",
     "chain_max_parallel",
     "chain_default_model",
@@ -157,12 +156,6 @@ def _load_toml(path: Path, registry_layer: bool = False) -> dict:
     except (OSError, tomllib.TOMLDecodeError) as e:
         _log.warning("failed to read %s: %s", path, e)
         return {}
-    if "master_extra_mounts_ro" in data:
-        raise RuntimeError(
-            f"{path}: 'master_extra_mounts_ro' has been renamed to 'master_targets' "
-            "(and its semantics changed -- see docs/design-master-sibling-launch.md). "
-            "Rename the key; the values (host paths) are still valid as-is."
-        )
     renamed = {k: k.removeprefix("host_") for k in data if k.startswith("host_broker_")}
     if renamed:
         pairs = ", ".join(f"'{old}' -> '{new}'" for old, new in sorted(renamed.items()))
@@ -252,13 +245,6 @@ class Config:
         ".cache/nvim",
     )
 
-    # Host paths registered as launchable targets from inside `cld master`.
-    # Placeholder directories are created at these paths inside master's shell
-    # (no bind mount, no repo content); `cd <path> && cld agent` launches a
-    # peer container with -v <path>:/workspace/origin:rw. Master itself never
-    # sees or writes to the target repo.
-    master_targets: tuple[str, ...] = ()
-
     # Named repo registry for ticket containers: [repos.<name>] tables in the
     # user config (PRODUCT_DESIGN.md section 4). Managed with `cld repos`.
     repos: dict[str, RepoEntry] = field(default_factory=dict)
@@ -305,7 +291,7 @@ class Config:
     peer_absolute_limit: int = 10
     root_ask_limit: int = 5
 
-    # The cld broker: if broker_key is set, master/agent/task-agent containers
+    # The cld broker: if broker_key is set, agent/task-agent/ticket containers
     # mount the restricted private key and get a `cld broker` wrapper that ships
     # pytest args to a host-side SSH broker running the `runtests` container.
     # Empty = off. Agents and task-agents are instructed (via their personas)
@@ -315,8 +301,8 @@ class Config:
     broker_endpoint: str = "host.docker.internal:2222"
     broker_known_hosts: str = ""
 
-    # Host-side OpenTelemetry collector (see otel/): if set, master/agent/
-    # task-agent containers and the bare devcontainer point Claude Code's
+    # Host-side OpenTelemetry collector (see otel/): if set, agent/task-agent/
+    # ticket containers point Claude Code's
     # own OTEL metrics export at it, tagged with this session's name as the
     # standard `service.name` resource attribute. Empty = off. The collector
     # itself is a plain, cld-independent OTel Collector -- see otel/README.md.
@@ -363,7 +349,6 @@ class Config:
             home_mounts_devcontainer=tuple(layered.get("home_mounts_devcontainer", (
                 ".gitconfig", ".bashrc", ".config/nvim", ".local/state/nvim", ".cache/nvim",
             ))),
-            master_targets=tuple(layered.get("master_targets", ())),
             repos=parse_repos(layered.get("repos", {})),
             chain_max_parallel=_env_int("CLD_CHAIN_MAX_PARALLEL", int(layered.get("chain_max_parallel", 4))),
             chain_default_model=_env_str("CLD_CHAIN_DEFAULT_MODEL", layered.get("chain_default_model", "")),

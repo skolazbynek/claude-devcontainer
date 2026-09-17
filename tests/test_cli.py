@@ -12,15 +12,13 @@ from typer.testing import CliRunner
 from cld.cli import (
     _assert_reap_ready,
     _forget_session_state,
-    _persistent_container_name,
-    _persistent_container_status,
     _reap_task_agent,
     _shutdown_persistent_container,
     app,
 )
 from cld.task_agent import parse_peer_specs, resolve_task_agent
 from cld.config import Config
-from cld.docker import agent_container_name, master_container_name, task_agent_container_name
+from cld.docker import agent_container_name, task_agent_container_name
 
 
 runner = CliRunner()
@@ -107,35 +105,17 @@ class TestRootGroup:
         no default command left, so click prints the help and exits 2."""
         result = runner.invoke(app, [])
         assert result.exit_code == 2
-        assert "run" in result.output and "master" in result.output
+        assert "run" in result.output and "agent" in result.output
 
     # Prompt refs are a `cld run` / `cld task-agent start` surface: click reads a group
     # callback's first positional as a subcommand name, so the root group and
-    # `cld master` take -p only and anything positional is a usage error (exit 2),
-    # not a dropped arg.
-    @pytest.mark.parametrize("argv", [["@personas/x"], ["tsak.md"], ["master", "shutdwn"]])
+    # `cld agent` take options only and anything positional is a usage error
+    # (exit 2), not a dropped arg.
+    @pytest.mark.parametrize("argv", [["@personas/x"], ["tsak.md"], ["agent", "shutdwn"]])
     def test_positionals_are_a_usage_error(self, argv):
         with patch("cld.cli._run_persistent_devcontainer"):
             result = runner.invoke(app, argv)
         assert result.exit_code == 2
-
-
-class TestPersistentContainerHelpers:
-    def test_name_master(self, tmp_path):
-        assert _persistent_container_name("master", tmp_path) == master_container_name(tmp_path)
-
-    def test_name_agent(self, tmp_path):
-        assert _persistent_container_name("agent", tmp_path) == agent_container_name(tmp_path)
-
-    def test_status_delegates_to_master(self):
-        with patch("cld.cli.docker_master_status", return_value="running") as m:
-            assert _persistent_container_status("master", "x") == "running"
-            m.assert_called_once_with("x")
-
-    def test_status_delegates_to_agent(self):
-        with patch("cld.cli.docker_agent_status", return_value="stopped") as a:
-            assert _persistent_container_status("agent", "y") == "stopped"
-            a.assert_called_once_with("y")
 
 
 class TestAgentSubcommand:
@@ -159,7 +139,6 @@ class TestAgentSubcommand:
         assert "started for" in result.output
         assert not execvp_mock.called
         assert bca.call_args.kwargs["agent"] is True
-        assert bca.call_args.kwargs["master"] is False
         run_calls = [c.args[0] for c in run_mock.call_args_list]
         assert any(c[:3] == ["docker", "run", "-d"] for c in run_calls)
 
@@ -215,15 +194,6 @@ class TestAgentStatusCommand:
         assert "3" in result.output
 
 
-class TestMasterStatusCommand:
-    def test_master_status_skips_state_json(self, tmp_path):
-        with patch("cld.cli.find_target_repo", return_value=tmp_path), \
-             patch("cld.cli.docker_master_status", return_value="absent"):
-            result = runner.invoke(app, ["master", "status"])
-        assert result.exit_code == 0, result.output
-        assert "Supervisor" not in result.output
-
-
 class TestAgentLogsCommand:
     def test_absent_errors(self, tmp_path):
         with patch("cld.cli.require_docker"), \
@@ -256,14 +226,12 @@ class TestAgentShutdown:
         assert result.exit_code == 0, result.output
         assert "No agent container found" in result.output
 
-    def test_all_uses_docker_agent_list_not_master(self):
+    def test_all_uses_docker_agent_list(self):
         with patch("cld.cli.require_docker"), \
-             patch("cld.cli.docker_agent_list", return_value=[]) as agent_list, \
-             patch("cld.cli.docker_master_list") as master_list:
+             patch("cld.cli.docker_agent_list", return_value=[]) as agent_list:
             result = runner.invoke(app, ["agent", "shutdown", "--all"])
         assert result.exit_code == 0, result.output
         assert agent_list.called
-        assert not master_list.called
         assert "No agent containers found" in result.output
 
 
@@ -290,12 +258,12 @@ class TestShutdownForgetsSessionState:
         backend = self._jj_backend()
         with patch("cld.ticket.get_backend", return_value=backend), \
              patch("cld.cli._stop_and_remove_container") as stop_mock:
-            ok = _shutdown_persistent_container("master", "cld_master_x", str(tmp_path), "cld_master_x")
+            ok = _shutdown_persistent_container("agent", "cld_agent_x", str(tmp_path), "cld_agent_x")
         assert ok
-        stop_mock.assert_called_once_with("cld_master_x")
+        stop_mock.assert_called_once_with("cld_agent_x")
         forget_calls = [c.args[0] for c in backend.run.call_args_list]
-        assert ["bookmark", "forget", "cld_master_x"] in forget_calls
-        assert ["workspace", "forget", "cld_master_x"] in forget_calls
+        assert ["bookmark", "forget", "cld_agent_x"] in forget_calls
+        assert ["workspace", "forget", "cld_agent_x"] in forget_calls
 
     def test_git_backend_skips_forget(self, tmp_path):
         backend = MagicMock()
@@ -312,60 +280,45 @@ class TestShutdownForgetsSessionState:
         backend.run.return_value = MagicMock(returncode=1, stderr="conflict")
         with patch("cld.ticket.get_backend", return_value=backend), \
              patch("cld.cli._stop_and_remove_container"):
-            ok = _shutdown_persistent_container("master", "cld_master_x", str(tmp_path), "cld_master_x")
+            ok = _shutdown_persistent_container("agent", "cld_agent_x", str(tmp_path), "cld_agent_x")
         assert ok
 
     def test_missing_repo_root_is_non_fatal(self, tmp_path):
         gone = tmp_path / "gone"
         with patch("cld.ticket.get_backend") as get_backend_mock, \
              patch("cld.cli._stop_and_remove_container"):
-            _forget_session_state(str(gone), "cld_master_x")
+            _forget_session_state(str(gone), "cld_agent_x")
         get_backend_mock.assert_not_called()
 
     def test_get_backend_failure_is_non_fatal(self, tmp_path):
         with patch("cld.ticket.get_backend", side_effect=RuntimeError("no vcs")), \
              patch("cld.cli._stop_and_remove_container"):
-            ok = _shutdown_persistent_container("master", "cld_master_x", str(tmp_path), "cld_master_x")
+            ok = _shutdown_persistent_container("agent", "cld_agent_x", str(tmp_path), "cld_agent_x")
         assert ok
 
     def test_shutdown_all_forgets_each_session(self, tmp_path):
         repo_a = tmp_path / "a"; repo_a.mkdir()
         repo_b = tmp_path / "b"; repo_b.mkdir()
         containers = [
-            {"name": "cld_master_a", "repo_root": str(repo_a), "session": "cld_master_a"},
-            {"name": "cld_master_b", "repo_root": str(repo_b), "session": "cld_master_b"},
+            {"name": "cld_agent_a", "repo_root": str(repo_a), "session": "cld_agent_a"},
+            {"name": "cld_agent_b", "repo_root": str(repo_b), "session": "cld_agent_b"},
         ]
         backend = self._jj_backend()
         with patch("cld.cli.require_docker"), \
-             patch("cld.cli.docker_master_list", return_value=containers), \
+             patch("cld.cli.docker_agent_list", return_value=containers), \
              patch("cld.ticket.get_backend", return_value=backend), \
              patch("cld.cli._stop_and_remove_container"):
-            result = runner.invoke(app, ["master", "shutdown", "--all"])
+            result = runner.invoke(app, ["agent", "shutdown", "--all"])
         assert result.exit_code == 0, result.output
         forget_calls = [c.args[0] for c in backend.run.call_args_list]
-        assert ["bookmark", "forget", "cld_master_a"] in forget_calls
-        assert ["bookmark", "forget", "cld_master_b"] in forget_calls
-        assert ["workspace", "forget", "cld_master_a"] in forget_calls
-        assert ["workspace", "forget", "cld_master_b"] in forget_calls
+        assert ["bookmark", "forget", "cld_agent_a"] in forget_calls
+        assert ["bookmark", "forget", "cld_agent_b"] in forget_calls
+        assert ["workspace", "forget", "cld_agent_a"] in forget_calls
+        assert ["workspace", "forget", "cld_agent_b"] in forget_calls
 
 
 class TestRestartPreservesBookmark:
     """Restart bypasses `_shutdown_persistent_container` so the bookmark survives."""
-
-    def test_master_restart_does_not_forget_bookmark(self, tmp_path):
-        with patch("cld.cli.require_docker"), \
-             patch("cld.cli.find_target_repo", return_value=tmp_path), \
-             patch("cld.cli.docker_master_status", return_value="running"), \
-             patch("cld.cli._shutdown_persistent_container") as shutdown_mock, \
-             patch("cld.cli._forget_session_state") as forget_mock, \
-             patch("cld.cli._stop_and_remove_container") as stop_mock, \
-             patch("cld.cli._run_persistent_devcontainer") as launch_mock:
-            result = runner.invoke(app, ["master", "restart"])
-        assert result.exit_code == 0, result.output
-        shutdown_mock.assert_not_called()
-        forget_mock.assert_not_called()
-        stop_mock.assert_called_once()
-        launch_mock.assert_called_once()
 
     def test_agent_restart_does_not_forget_bookmark(self, tmp_path):
         with patch("cld.cli.require_docker"), \

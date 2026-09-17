@@ -97,7 +97,7 @@ class TestSendCli:
 class TestResolveSelf:
     """Host-side identity chain (design-ticket-containers.md section 6.5):
     SESSION_NAME (in-container) > explicit ticket (arg or CLD_TICKET) > the
-    single running ticket container > the v1 cwd-repo master > error."""
+    single running ticket container > the cwd repo's host identity > error."""
 
     @pytest.fixture(autouse=True)
     def _host(self, monkeypatch, tmp_path):
@@ -172,14 +172,14 @@ class TestResolveSelf:
         )
         assert resolve_self() == ("cld_ticket_b", self.mailbox_root)
 
-    def test_no_tickets_falls_back_to_cwd_master(self, monkeypatch, tmp_path):
+    def test_no_tickets_falls_back_to_cwd_host_identity(self, monkeypatch, tmp_path):
         monkeypatch.setattr(identity_mod, "list_cld_containers", lambda kind: [])
         repo_root = tmp_path / "repo"
         monkeypatch.setattr(
             identity_mod, "get_backend",
             lambda: type("B", (), {"repo_root": repo_root})(),
         )
-        assert resolve_self()[0] == identity_mod.master_container_name(repo_root)
+        assert resolve_self()[0] == identity_mod.host_identity_name(repo_root)
 
     def test_ambiguous_tickets_outside_a_repo_error_lists_them(self, monkeypatch):
         monkeypatch.setattr(

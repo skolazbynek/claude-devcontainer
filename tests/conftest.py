@@ -17,10 +17,11 @@ _LEAKY_VARS = (
     "WORKSPACE_ORIGIN",
     "CLD_HOST_PROJECT_DIR",
     "CLD_HOST_HOME",
-    "MASTER_MODE",
     "AGENT_MODE",
+    # No launcher sets HUB_MODE since the master role was removed, but the
+    # broker dispatch still reads it (cld/docker.py:in_master_container) and a
+    # stale one in the developer's shell would flip that dispatch under tests.
     "HUB_MODE",
-    "MASTER_TARGETS",
 ) + (
     "CLD_LOG_LEVEL",
     "CLD_LOG_COLOR",

@@ -120,9 +120,9 @@ EOF
     echo "[cld] ticket '${TICKET}' ready (${N_REPOS} repos)"
 
     # PID 1 idles; harness sessions arrive via `docker exec` from the host.
-    # Unlike v1 master, TERM (docker stop) tears nothing down: stop is the
-    # *pause* verb, and all bookmark/workspace forgetting lives host-side in
-    # `cld shutdown` (design 4.3).
+    # TERM (docker stop) tears nothing down: stop is the *pause* verb, and all
+    # bookmark/workspace forgetting lives host-side in `cld shutdown`
+    # (design 4.3).
     trap 'exit 0' TERM INT
     sleep infinity &
     wait $!
@@ -133,19 +133,12 @@ cd "$WORKSPACE_ORIGIN"
 
 # v1 single-repo boot: the three-branch workspace logic (warm restart /
 # reattach / first launch) lives in cld_boot_workspace (vcs-lib.sh), shared
-# with the ticket loop above. Base revision comes from AGENT_REVISION_HINT (a
-# resolved hash from the host, or an unresolved revset when a `cld master`
-# delegated to this peer; see docs/design-master-sibling-launch.md).
-#
-# FIRST_LAUNCH records which of the three branches we took. The brief lives in
-# scratch commit B (a child of anchor A), so every descendant carries it and
-# file presence can no longer tell a first launch from a restart -- only this
-# flag can.
+# with the ticket loop above. Base revision comes from AGENT_REVISION_HINT, a
+# hash the host resolved from its own jj view.
 if ! cld_boot_workspace "$WORKSPACE_ORIGIN" /workspace/current "$BOOKMARK" \
         "${AGENT_REVISION_HINT:-@}" "${AGENT_ANCHOR_MODE:-isolated}" env; then
     exit 1
 fi
-FIRST_LAUNCH=$CLD_BOOT_FIRST_LAUNCH
 AGENT_ANCHOR_HASH="$CLD_BOOT_ANCHOR"
 export AGENT_ANCHOR_HASH
 
@@ -188,8 +181,8 @@ if command -v poetry &>/dev/null; then
 fi
 
 CLAUDE_BIN=$(which claude)
-# --add-dir /opt/cld surfaces the baked-in .claude/skills/ (agent-start,
-# messenger-*) regardless of which repo is mounted at /workspace/origin;
+# --add-dir /opt/cld surfaces the baked-in .claude/skills/ (messenger-*,
+# task-agent-*) regardless of which repo is mounted at /workspace/origin;
 # settings.json's permissions.additionalDirectories grants file access only
 # and does not trigger skill auto-loading, so this must be a CLI flag.
 CLAUDE_EXTRA_ARGS="--dangerously-skip-permissions --add-dir /opt/cld"
@@ -198,79 +191,6 @@ if [ -n "${AGENT_MODEL:-}" ]; then
 fi
 printf '#!/bin/bash\nexec %s %s "$@"\n' "$CLAUDE_BIN" "$CLAUDE_EXTRA_ARGS" > /tmp/bin/claude
 chmod +x /tmp/bin/claude
-
-# The launcher composed the prompt refs and -p into one brief and shipped it in the
-# anchor scratch, so it is committed in anchor B (docs/design-prompt-chaining.md).
-# It therefore stays readable here for the whole session -- which is the point --
-# so its presence says nothing about whether it has already been consumed.
-BRIEF_FILE="$WORKSPACE_CURRENT/.cld-run/brief.md"
-COMPOSED_PROMPT=""
-[ -f "$BRIEF_FILE" ] && COMPOSED_PROMPT="$(cat "$BRIEF_FILE")"
-
-# Materialize registered sibling targets as empty placeholder directories so
-# `cd <target>` inside the shell succeeds. Gated on HUB_MODE, the capability
-# flag (see in_master_container() in cld/docker.py) -- master gets no bind
-# mount of the sibling repo; cld-inside-the-container resolves cwd to the host
-# path via config lookup. See docs/design-master-sibling-launch.md.
-if [ -n "${HUB_MODE:-}" ] && [ -n "${MASTER_TARGETS:-}" ]; then
-    IFS=':' read -r -a _cld_targets <<< "$MASTER_TARGETS"
-    for t in "${_cld_targets[@]}"; do
-        [ -n "$t" ] || continue
-        # $t is a host path (e.g. /home/<user>/projects/x). The unprivileged
-        # container user can only create under its own $HOME, so mirror the
-        # target by swapping the host-home prefix ($CLD_HOST_HOME) for $HOME.
-        # build_container_args guarantees every target lives under host home.
-        _mirror="$t"
-        case "$t" in
-            "${CLD_HOST_HOME:-/nonexistent}"/*) _mirror="$HOME/${t#"${CLD_HOST_HOME}"/}";;
-        esac
-        mkdir -p "$_mirror" 2>/dev/null || echo "[WARN] could not create placeholder $_mirror (target $t)" >&2
-    done
-    unset _cld_targets _mirror
-fi
-
-if [ -n "${MASTER_MODE:-}" ]; then
-    # Signal readiness as soon as setup is done, before the optional first-launch
-    # prompt, so the host can attach immediately no matter how long the prompt runs.
-    # /tmp (not /run, which is root-owned 755) is writable by the non-root container user.
-    touch /tmp/cld-master-ready
-fi
-
-# A task-agent's task belongs to the supervisor's composed kickoff prompt (see
-# docs/design-task-agents.md §11), so it must NOT be consumed by a one-shot
-# pre-run here -- the supervisor reads the same inputs itself.
-#
-# Gated on FIRST_LAUNCH: a warm restart or bookmark reattach lands on a
-# workspace descending from B, so a presence-only check would re-run the user's
-# original prompt unattended on top of finished work, once per restart. The
-# host agrees -- it passes an empty brief and refuses -p on re-attach.
-if [ -n "$COMPOSED_PROMPT" ] && [ "$FIRST_LAUNCH" = 1 ] && [ -z "${TASK_AGENT_MODE:-}" ]; then
-    [ -n "${MASTER_MODE:-}" ] && \
-        echo "[INFO] Running first-launch prompt; attach anytime with 'cld master'."
-    claude -- "$COMPOSED_PROMPT" || true
-fi
-
-if [ -n "${MASTER_MODE:-}" ]; then
-    # PID 1 idles; user shells arrive via `docker exec` from the host.
-    # Trap SIGTERM (docker stop) to forget the session bookmark from the
-    # origin's jj store before exit. This is the "peer self-cleanup" leg of
-    # docs/design-master-sibling-launch.md's shutdown mechanism -- master
-    # containers own their bookmark's full lifecycle.
-    _cld_master_shutdown() {
-        (cd "$WORKSPACE_ORIGIN" && jj bookmark forget "$SESSION_NAME" 2>&1) || true
-        exit 0
-    }
-    # SIGUSR1 (docker kill --signal from `cld master restart`) exits without
-    # forgetting the bookmark, so the fresh container reattaches at its tip.
-    _cld_master_restart() {
-        exit 0
-    }
-    trap _cld_master_shutdown TERM INT
-    trap _cld_master_restart USR1
-    sleep infinity &
-    wait $!
-    exit 0
-fi
 
 if [ -n "${AGENT_MODE:-}" ]; then
     if [ "$MAILBOX_OK" -ne 0 ]; then
@@ -283,5 +203,5 @@ fi
 
 # Every v1 launcher sets one of the modes above; reaching here means the
 # container was started without one, which is a launcher bug, not a session.
-echo "Error: no container mode set (expected TICKET_MODE, MASTER_MODE or AGENT_MODE)" >&2
+echo "Error: no container mode set (expected TICKET_MODE or AGENT_MODE)" >&2
 exit 1

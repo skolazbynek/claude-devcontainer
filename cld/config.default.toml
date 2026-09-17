@@ -49,13 +49,6 @@ home_mounts_devcontainer = [
 # default_rev = "trunk()"
 # bootstrap = false
 
-# Host paths registered as launchable targets from inside `cld master`.
-# Each path is materialized as an empty placeholder directory in master's shell
-# (no bind mount, no repo content); `cd <path> && cld agent` launches a peer
-# container with -v <path>:/workspace/origin:rw. Master itself never sees or
-# writes to the target repo.
-# master_targets = ["~/repos/foo", "~/work/bar"]
-
 # SSH agent forwarding into devcontainer sessions.
 # Omit this key to auto-detect from the host's $SSH_AUTH_SOCK.
 # Set to "" to disable forwarding. Set to an explicit socket path to override.
@@ -73,8 +66,8 @@ home_mounts_devcontainer = [
 # peer_absolute_limit = 10  # hop budget for a peer edge whose --peer spec omits one
 # root_ask_limit = 3        # asks allowed on a peer edge while one stays unanswered
 
-# The cld broker (master only). Set broker_key to enable `cld broker <action>`
-# wrapper inside master that runs the repo's tests on the host via the standalone
+# The cld broker. Set broker_key to enable the `cld broker <action>` wrapper
+# inside a container, which runs the repo's tests on the host via the standalone
 # `runtests` container, keeping secrets off the container. Requires host-side
 # setup (see broker/README.md). Off until broker_key is set.
 # broker_key = "~/.cld/broker/broker_key"
@@ -82,7 +75,7 @@ home_mounts_devcontainer = [
 # broker_known_hosts = "~/.cld/broker/known_hosts"
 
 # Host-side OpenTelemetry collector (see otel/README.md). Set otel_endpoint to
-# point master/agent/task-agent containers and the bare devcontainer at it --
+# point agent/task-agent/ticket containers at it --
 # Claude Code's own OTEL export is used as-is, tagged with the session name as
 # a standard `service.name` resource attribute. The collector itself is a
 # plain, cld-independent OTel Collector, not cld infrastructure. Off until set.

@@ -45,7 +45,8 @@ class TestHostOnlyStubs:
 
     @pytest.mark.parametrize("argv", [
         ["run", "task.md"],
-        ["master"],
+        ["agent"],
+        ["agent", "status"],
         ["chain", "run", "c.yaml"],
         ["build"],
         [],
@@ -68,7 +69,7 @@ class TestHostOnlyStubs:
     def test_hidden_from_help(self):
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
-        for verb in ("run", "master", "chain", "build", "start", "claude",
+        for verb in ("run", "agent", "chain", "build", "start", "claude",
                      "shell", "stop", "restart", "shutdown", "status", "logs"):
             assert f"│ {verb}" not in result.output
         assert "task-agent" in result.output
@@ -185,45 +186,6 @@ class TestTaskAgentDispatch:
         assert "start here" in result.output
 
 
-class TestAgentDispatch:
-    def _op(self, stack, available=True):
-        stack.enter_context(patch("cld.cli_container.broker_available", return_value=available))
-        stack.enter_context(patch("cld.cli_container.find_target_repo", return_value=Path("/host/myrepo")))
-        return stack.enter_context(patch("cld.cli_container.broker_agent_op", return_value=0))
-
-    def test_bare_agent_starts(self):
-        with ExitStack() as stack:
-            op = self._op(stack)
-            result = runner.invoke(app, ["agent", "-m", "opus"])
-        assert result.exit_code == 0, result.output
-        assert op.call_args.args == ("/host/myrepo", "start", ["-m", "opus"])
-
-    @pytest.mark.parametrize("verb,extra", [
-        ("restart", None), ("status", None), ("logs", ["-n", "80"]),
-    ])
-    def test_subcommands_dispatch(self, verb, extra):
-        with ExitStack() as stack:
-            op = self._op(stack)
-            result = runner.invoke(app, ["agent", verb])
-        assert result.exit_code == 0, result.output
-        assert op.call_args.args[1] == verb
-        assert op.call_args.args[2] == extra
-
-    def test_shutdown_all_forwards_the_flag(self):
-        with ExitStack() as stack:
-            op = self._op(stack)
-            assert runner.invoke(app, ["agent", "shutdown", "--all"]).exit_code == 0
-        assert op.call_args.args[2] == ["--all"]
-
-    def test_missing_broker_is_explained(self):
-        with ExitStack() as stack:
-            op = self._op(stack, available=False)
-            result = runner.invoke(app, ["agent", "status"])
-        assert result.exit_code == 1
-        assert "host broker is not configured" in result.output
-        assert not op.called
-
-
 class TestBrokerExitCodes:
     """typer.Exit subclasses RuntimeError, so _handle_errors has to let it through."""
 
@@ -231,8 +193,8 @@ class TestBrokerExitCodes:
         with ExitStack() as stack:
             stack.enter_context(patch("cld.cli_container.broker_available", return_value=True))
             stack.enter_context(patch("cld.cli_container.find_target_repo", return_value=Path("/host/myrepo")))
-            stack.enter_context(patch("cld.cli_container.broker_agent_op", return_value=rc))
-            return runner.invoke(app, ["agent", "status"])
+            stack.enter_context(patch("cld.cli_container.broker_task_agent_op", return_value=rc))
+            return runner.invoke(app, ["task-agent", "status"])
 
     def test_zero_stays_zero(self):
         assert self._invoke(0).exit_code == 0
@@ -242,29 +204,15 @@ class TestBrokerExitCodes:
 
 
 class TestRepos:
-    def test_lists_own_and_targets(self, monkeypatch):
-        # master_targets deliberately empty here: the real channel into a
-        # container is the MASTER_TARGETS env var (host-resolved, see
-        # build_container_args in cld/docker.py), not TOML re-read in-container.
-        monkeypatch.setenv("MASTER_TARGETS", "/host/side/foo:/host/side/bar")
+    def test_lists_the_containers_own_repo(self, monkeypatch):
+        # The host-set CLD_HOST_PROJECT_DIR is the channel, not TOML re-read
+        # in-container (see build_container_args in cld/docker.py).
+        monkeypatch.delenv("CLD_TICKET_MANIFEST", raising=False)
         cfg = Config(host_project_dir="/host/side/cld")
         with patch("cld.cli_container.Config.from_env", return_value=cfg):
             result = runner.invoke(app, ["repos"])
         assert result.exit_code == 0, result.output
         assert "/host/side/cld\town" in result.output
-        assert "/host/side/foo\ttarget" in result.output
-        assert "/host/side/bar\ttarget" in result.output
-
-    def test_ignores_stale_toml_master_targets(self, monkeypatch):
-        # Even if cfg.master_targets is (wrongly) populated in-container, e.g.
-        # by a stray .cld/config.toml, MASTER_TARGETS is authoritative.
-        monkeypatch.delenv("MASTER_TARGETS", raising=False)
-        cfg = Config(host_project_dir="/host/side/cld", master_targets=("/stale/toml/path",))
-        with patch("cld.cli_container.Config.from_env", return_value=cfg):
-            result = runner.invoke(app, ["repos"])
-        assert result.exit_code == 0, result.output
-        assert "/host/side/cld\town" in result.output
-        assert "/stale/toml/path" not in result.output
 
     def _ticket_manifest_json(self):
         return json.dumps({
@@ -284,7 +232,6 @@ class TestRepos:
         """In a ticket container (v2) `repos` renders CLD_TICKET_MANIFEST:
         name, origin path, workspace path, anchor, mode (design section 6.6)."""
         monkeypatch.setenv("CLD_TICKET_MANIFEST", self._ticket_manifest_json())
-        monkeypatch.setenv("MASTER_TARGETS", "/host/side/foo")  # must be ignored
         with patch("cld.cli_container.Config.from_env", return_value=Config()):
             result = runner.invoke(app, ["repos"])
         assert result.exit_code == 0, result.output
@@ -297,16 +244,15 @@ class TestRepos:
             f"diskuze-api\t/workspace/origin/diskuze-api\t/workspace/lide-2600/diskuze-api"
             f"\t{'b' * 12}\tshared"
         ) in lines
-        assert "target" not in result.output
+        assert "\town" not in result.output
 
     def test_v1_output_when_no_manifest_env(self, monkeypatch):
         monkeypatch.delenv("CLD_TICKET_MANIFEST", raising=False)
-        monkeypatch.setenv("MASTER_TARGETS", "/host/side/foo")
         with patch("cld.cli_container.Config.from_env",
                    return_value=Config(host_project_dir="/host/side/cld")):
             result = runner.invoke(app, ["repos"])
         assert result.exit_code == 0, result.output
-        assert "/host/side/foo\ttarget" in result.output
+        assert "/host/side/cld\town" in result.output
 
 
 class TestMsg:
@@ -402,8 +348,8 @@ class TestMsg:
         with patch("cld.cli_msg.agents_cmd.show") as show:
             assert runner.invoke(app, ["msg", "agents"]).exit_code == 0
             assert show.call_args.args == (None,)
-            assert runner.invoke(app, ["msg", "agents", "--kind", "master"]).exit_code == 0
-            assert show.call_args.args == ("master",)
+            assert runner.invoke(app, ["msg", "agents", "--kind", "task-agent"]).exit_code == 0
+            assert show.call_args.args == ("task-agent",)
 
 
 class TestPrompts:

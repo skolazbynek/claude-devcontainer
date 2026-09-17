@@ -851,19 +851,19 @@ class TestListContainers:
     def test_parses_docker_output(self, tmp_path):
         ps_result = type("R", (), {
             "returncode": 0,
-            "stdout": "cld_agent_repoA\tUp 2 hours\ncld_master_repoB_abcd1234\tExited (0) 1 hour ago\n",
+            "stdout": "cld_agent_repoA\tUp 2 hours\ncld_ticket_lide-2600\tExited (0) 1 hour ago\n",
             "stderr": "",
         })()
         inspect_results = [
             type("R", (), {"returncode": 0, "stdout": "agent|/home/u/repoA\n"})(),
-            type("R", (), {"returncode": 0, "stdout": "master|/home/u/repoB\n"})(),
+            type("R", (), {"returncode": 0, "stdout": "ticket|/home/u/repoB\n"})(),
         ]
         with patch("cld.broker.in_master_container", return_value=False), \
              patch("cld.broker.subprocess.run", side_effect=[ps_result, *inspect_results]):
             containers = list_containers()
         assert containers == [
             {"name": "cld_agent_repoA", "kind": "agent", "repo": "/home/u/repoA", "status": "running"},
-            {"name": "cld_master_repoB_abcd1234", "kind": "master", "repo": "/home/u/repoB", "status": "stopped"},
+            {"name": "cld_ticket_lide-2600", "kind": "ticket", "repo": "/home/u/repoB", "status": "stopped"},
         ]
 
     def test_docker_failure_returns_empty(self, tmp_path):
@@ -876,12 +876,12 @@ class TestListContainers:
 class TestResolveRecipient:
     _CONTAINERS = [
         {"name": "cld_agent_repoA", "kind": "agent", "repo": "/home/u/repoA", "status": "running"},
-        {"name": "cld_master_repoA_abcd1234", "kind": "master", "repo": "/home/u/repoA", "status": "running"},
-        {"name": "cld_master_repoB_ef567890", "kind": "master", "repo": "/x/repoB", "status": "running"},
+        {"name": "cld_agent_repoA_add-oauth", "kind": "task-agent", "repo": "/home/u/repoA", "status": "running"},
+        {"name": "cld_agent_repoB_fix-tests", "kind": "task-agent", "repo": "/x/repoB", "status": "running"},
     ]
 
     def test_full_name_used_verbatim(self):
-        assert resolve_recipient("cld_master_repoB_ef567890", self._CONTAINERS) == "cld_master_repoB_ef567890"
+        assert resolve_recipient("cld_agent_repoB_fix-tests", self._CONTAINERS) == "cld_agent_repoB_fix-tests"
 
     def test_existing_mailbox_short_circuits_without_enumeration(self, tmp_path):
         # Reply path: `to` names an existing mailbox dir -> return verbatim and
@@ -890,11 +890,11 @@ class TestResolveRecipient:
         with patch("cld.messenger.mailbox.list_containers", side_effect=AssertionError("enumerated")):
             assert resolve_recipient("cld_agent_repoA", root=tmp_path) == "cld_agent_repoA"
 
-    def test_shortname_prefers_agent_over_master(self):
+    def test_shortname_prefers_the_standing_agent(self):
         assert resolve_recipient("repoA", self._CONTAINERS) == "cld_agent_repoA"
 
     def test_shortname_resolves_to_only_match(self):
-        assert resolve_recipient("repoB", self._CONTAINERS) == "cld_master_repoB_ef567890"
+        assert resolve_recipient("repoB", self._CONTAINERS) == "cld_agent_repoB_fix-tests"
 
     def test_unknown_shortname_raises(self):
         with pytest.raises(ValueError, match="No container found"):
@@ -902,7 +902,7 @@ class TestResolveRecipient:
 
     def test_ambiguous_shortname_raises(self):
         containers = self._CONTAINERS + [
-            {"name": "cld_master_repoA2_zz", "kind": "master", "repo": "/other/repoA", "status": "running"},
+            {"name": "cld_agent_repoA2_zz", "kind": "task-agent", "repo": "/other/repoA", "status": "running"},
         ]
         with pytest.raises(ValueError, match="Ambiguous shortname"):
             resolve_recipient("repoA", containers)

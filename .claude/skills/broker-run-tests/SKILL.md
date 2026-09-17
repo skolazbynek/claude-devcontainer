@@ -79,8 +79,8 @@ cld broker run-tests tests/unit/test_foo.py
 
 The action name is required -- `run-tests` here. (A repo's broker admin may have
 defined extra actions, `cld broker <name> <args>`; the ones that always exist
-are `run-tests`, `list-containers`, `agent` and `task-agent`, and the last three
-are what the `agent-start` / `task-agent-*` skills go through rather than
+are `run-tests`, `list-containers`, `task-agent` and `graphql`, and the last
+three are what the `task-agent-*` / messenger skills go through rather than
 something you call directly.)
 
 The command runs synchronously and streams pytest's own stdout/stderr; its

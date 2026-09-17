@@ -5,9 +5,9 @@ refs** instead -- `@<path-under-prompts>` or a filesystem path, personas and tas
 interchangeable -- plus one inline description. The refs are composed host-side, in
 argument order, into a single brief. See docs/design-prompt-chaining.md.
 
-That is `cld run`, `cld task-agent start` and `cld chain run`. Bare `cld` and
-`cld master` take `-p` only: they are group callbacks, whose first positional click
-resolves as a subcommand name.
+That is `cld run`, `cld task-agent start` and `cld chain run`. A group callback
+never sees positionals -- click resolves its first one as a subcommand name --
+so refs live on real commands only.
 """
 
 import re

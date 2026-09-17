@@ -18,7 +18,7 @@ hostpub=$(awk '{print $1, $2}' "$OUT/broker_ssh_host_ed25519_key.pub")
 cat <<EOF
 
 Keys written to $OUT/
-  broker_key                    -> mount into master (cld broker_key)
+  broker_key                    -> mounted into cld containers (cld broker_key)
   broker_key.pub                -> public half
   broker_authorized_keys        -> install as AuthorizedKeysFile (see sshd_cld_broker.conf)
   broker_ssh_host_ed25519_key   -> HostKey for the dedicated sshd instance

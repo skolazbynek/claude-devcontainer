@@ -237,11 +237,14 @@ def ensure_image(
 
 
 def in_master_container() -> bool:
-    """True when running inside a hub container (`cld master`).
+    """True when ``HUB_MODE`` is set in this process's environment.
 
-    Checks ``HUB_MODE``, the capability flag (broker reach, sibling-target
-    resolution, mailbox), rather than ``MASTER_MODE``, which also drives
-    entrypoint boot behavior and is therefore not a capability test.
+    The flag used to mark a `cld master` "hub" container (broker dispatch,
+    mailbox, sibling-target resolution). The master role is gone and nothing
+    launches a container with ``HUB_MODE`` any more, so this is False
+    everywhere in practice; the remaining callers (the broker client's
+    host-vs-broker dispatch above all) keep their branch pending that
+    dispatch's own rework, rather than being silently rewired here.
     """
     return bool(os.environ.get("HUB_MODE"))
 
@@ -249,13 +252,10 @@ def in_master_container() -> bool:
 def find_target_repo(cfg: Config) -> Path:
     """Return the host path of the repo to target for a peer launch.
 
-    On the host, delegates to `find_repo_context()` (cwd-walk for .jj/.git).
-    Inside master, uses `resolve_master_target(Path.cwd(), cfg)` -- either
-    master's own repo (host path from CLD_HOST_PROJECT_DIR) or one of the
-    registered `master_targets` entries.
+    Delegates to `find_repo_context()` (cwd-walk for .jj/.git); *cfg* is kept
+    in the signature because callers pass it and the ticket-aware resolver
+    (design-ticket-containers.md section 6.5) will need it.
     """
-    if in_master_container():
-        return Path(resolve_master_target(Path.cwd(), cfg))
     return find_repo_context()[0]
 
 
@@ -267,9 +267,9 @@ def anchor_env_args(
     The host resolves the base revision to a commit hash from its jj view; the
     peer entrypoint uses it as the base for ``jj workspace add`` and then creates
     the scratch commit B inside that workspace via ``stage_from_env``. See
-    docs/design-anchor-change.md. Only ever called host-side now: launches from
-    inside master are delegated to the host broker (see cld/broker.py), so
-    the container itself never builds a peer's args.
+    docs/design-anchor-change.md. Only ever called host-side: a container has
+    no docker daemon, so it never builds a peer's args itself (see
+    cld/broker.py).
 
     ``mode``: ``"isolated"`` (default) -- the entrypoint exports B itself as
     ``AGENT_ANCHOR_HASH``, so only B's own descendants are editable. ``"shared"``
@@ -301,57 +301,6 @@ def anchor_env_args(
         "-e", f"AGENT_SCRATCH={payload}",
         "-e", f"AGENT_ANCHOR_MODE={mode}",
     ]
-
-
-def resolve_master_target(cwd: Path, cfg: Config) -> str:
-    """From inside a master "hub", return the host path of the target repo
-    selected by *cwd*.
-
-    Resolution:
-    - cwd (or ancestor) under ``/workspace/current`` or ``/workspace/origin``
-      → the hub's own repo, host path from ``CLD_HOST_PROJECT_DIR``.
-    - cwd (or ancestor) matches an entry in ``MASTER_TARGETS`` (colon-separated)
-      → that entry.
-    - Otherwise → RuntimeError with a hint about adding the path to
-      ``master_targets`` in cld config.
-
-    Only meaningful inside a hub container (``in_master_container()``); raises
-    RuntimeError elsewhere.
-    """
-    if not in_master_container():
-        raise RuntimeError("resolve_master_target: not running inside a cld master container")
-    cwd = cwd.resolve()
-
-    def _is_within(child: Path, parent: str) -> bool:
-        parent_p = Path(parent)
-        try:
-            child.relative_to(parent_p)
-            return True
-        except ValueError:
-            return False
-
-    if _is_within(cwd, "/workspace/current") or _is_within(cwd, "/workspace/origin"):
-        if not cfg.host_project_dir:
-            raise RuntimeError(
-                "resolve_master_target: cwd is under /workspace/* but CLD_HOST_PROJECT_DIR "
-                "is unset -- master container was launched without host-path plumbing"
-            )
-        return cfg.host_project_dir
-
-    targets = [t for t in os.environ.get("MASTER_TARGETS", "").split(":") if t]
-    # Placeholder dirs live at the container mirror of each host target (the
-    # devcontainer entrypoint swaps the host-home prefix for $HOME). Translate
-    # cwd back to its host path before matching so a cwd under the mirror
-    # resolves to the registered host target.
-    cwd_host = Path(to_host_path(str(cwd), cfg))
-    for entry in targets:
-        if _is_within(cwd_host, entry):
-            return entry
-
-    raise RuntimeError(
-        f"cwd {cwd} is not a registered target in this master. "
-        "Add its host path to `master_targets` in cld config and restart master."
-    )
 
 
 def to_host_path(path: str, cfg: Config) -> str:
@@ -422,7 +371,6 @@ def build_container_args(
     session_name: str,
     cfg: Config,
     *,
-    master: bool = False,
     agent: bool = False,
     task_agent: TaskAgentSpec | None = None,
     anchor_hash: str = "",
@@ -435,11 +383,10 @@ def build_container_args(
     note in the body). Devcontainer-only
     mounts (gitconfig, bashrc, nvim) are added by the launcher in cli.py.
 
-    ``master``, ``agent`` and ``task_agent`` are mutually exclusive
-    persistent-container roles (``agent`` is the headless messaging agent,
-    unrelated to the one-shot `cld agent` command; ``task_agent`` is the
-    task-scoped one); any of them adds the ``org.cld.kind`` label set and
-    mounts the shared mailbox tree. With none of them set the container is a
+    ``agent`` and ``task_agent`` are mutually exclusive persistent-container
+    roles (``agent`` is the headless messaging agent, ``task_agent`` the
+    task-scoped one); either adds the ``org.cld.kind`` label set and
+    mounts the shared mailbox tree. With neither set the container is a
     one-shot `cld run`: ``--rm``, anonymous, no broker or mailbox.
 
     ``anchor_hash``/``anchor_mode``, when given, are stamped as host-set
@@ -450,8 +397,8 @@ def build_container_args(
     they're the source of truth the overlap check reads back via
     ``docker_occupant_list``.
     """
-    if sum((master, agent, bool(task_agent))) > 1:
-        raise ValueError("master, agent and task_agent are mutually exclusive roles")
+    if agent and task_agent:
+        raise ValueError("agent and task_agent are mutually exclusive roles")
 
     home = os.path.expanduser("~")
     host_home = to_host_path(home, cfg)
@@ -459,21 +406,15 @@ def build_container_args(
 
     args: list[str] = []
 
-    if master or agent or task_agent:
-        kind = "master" if master else "task-agent" if task_agent else "agent"
+    if agent or task_agent:
+        kind = "task-agent" if task_agent else "agent"
         args += [
             "--name", session_name,
             "--label", f"org.cld.kind={kind}",
             "--label", f"org.cld.repo-root={host_repo_root}",
             "--label", f"org.cld.session={session_name}",
-            "-e", f"{'MASTER_MODE' if master else 'AGENT_MODE'}=1",
+            "-e", "AGENT_MODE=1",
         ]
-        if master:
-            # HUB_MODE is the capability flag `in_master_container()` actually
-            # checks (sibling-target resolution, broker dispatch) -- unlike
-            # MASTER_MODE, which also drives entrypoint boot behavior (idle
-            # sleep vs. attach).
-            args += ["-e", "HUB_MODE=1"]
         if task_agent:
             # TASK_AGENT_MODE modifies the AGENT_MODE branch (same mailbox
             # precondition, readiness sentinel and supervisor exec) rather than
@@ -570,13 +511,10 @@ def build_container_args(
         log.debug(f"Workspace files to link: {workspace_files}")
 
     # No docker socket is mounted into any container (it was equivalent to host
-    # root). In-container docker needs -- peer enumeration and sibling `cld
-    # agent` launches from inside master -- go through the host broker over SSH
-    # (see cld/broker.py, broker/cld-broker.sh). The broker key is mounted for
-    # the persistent roles (master, agent, task-agent) by stage_broker below; the
-    # `agent`/`task-agent` launcher actions stay master-only regardless, gated
-    # by the org.cld.targets label (only master carries it, see master_targets
-    # below), not by broker reachability.
+    # root). In-container docker needs -- peer enumeration above all -- go
+    # through the host broker over SSH (see cld/broker.py,
+    # broker/cld-broker.sh). The broker key is mounted for the persistent roles
+    # (agent, task-agent) by stage_broker below.
 
     # Host test broker (persistent roles): mount the restricted key +
     # known_hosts and make the broker reachable.
@@ -584,52 +522,14 @@ def build_container_args(
     # they can run `cld broker run-tests`, but their personas instruct them to
     # only invoke it with explicit per-run authorization from their master --
     # see prompts/personas/agent.md and prompts/personas/task-agent.md.
-    if master or agent or task_agent:
+    if agent or task_agent:
         args += stage_broker(cfg)
         args += stage_otel(cfg, session_name)
 
-    # Mailbox tree -- shared RW mount so every master, agent and task-agent
-    # container sees the same mailbox filesystem.
-    if master or agent or task_agent:
+    # Mailbox tree -- shared RW mount so every agent and task-agent container
+    # sees the same mailbox filesystem.
+    if agent or task_agent:
         args += stage_mailbox(cfg)
-
-    # Master only: publish the registered sibling target paths as an env var so
-    # the entrypoint can materialize them as empty placeholder directories (see
-    # docs/design-master-sibling-launch.md). Master gets no bind mount of a
-    # sibling repo -- the placeholder just lets
-    # `cd <path>` succeed and lets cld-inside-the-container resolve cwd to the
-    # host path. Host paths must exist on the host so the peer's -v mount will
-    # succeed later; we fail fast here rather than at peer-launch time.
-    if master and cfg.master_targets:
-        expanded_targets: list[str] = []
-        for entry in cfg.master_targets:
-            expanded = os.path.expanduser(entry)
-            if not Path(expanded).exists():
-                log.error(
-                    "master_targets entry does not exist on host: %s "
-                    "(expanded from %r). Remove it or create the directory.",
-                    expanded, entry,
-                )
-                sys.exit(1)
-            # Peer placeholders are mirrored under the container $HOME (the only
-            # writable root), so a target must live under the host home dir.
-            if expanded != home and not expanded.startswith(home + os.sep):
-                log.error(
-                    "master_targets entry is not under your home directory: %s "
-                    "(expanded from %r). Placeholders can only be mirrored under "
-                    "%s inside master; move the repo under your home dir or "
-                    "launch it directly (not via master).",
-                    expanded, entry, home,
-                )
-                sys.exit(1)
-            expanded_targets.append(expanded)
-            log.info("Master target registered: %s", expanded)
-        joined = ":".join(expanded_targets)
-        args += ["-e", f"MASTER_TARGETS={joined}"]
-        # Host-set, immutable allowlist the broker validates sibling `cld agent`
-        # launches against (a container can rewrite its MASTER_TARGETS env but
-        # not this label). See action_agent in broker/cld-broker.sh.
-        args += ["--label", f"org.cld.targets={joined}"]
 
     log.debug("Container args: %s", mask_secrets(repr(args)))
     return args
@@ -751,7 +651,8 @@ def build_ticket_container_args(manifest: TicketManifest, cfg: Config) -> list[s
         args += ["-e", f"CLD_REPO_BOOTSTRAP={bootstrap}"]
         log.debug("Bootstrap repos: %s", bootstrap)
 
-    # Same trust level as v1 master: the interactive user's own session.
+    # The interactive user's own session, so it gets the full persistent-role
+    # wiring: broker, otel, mailbox.
     args += stage_broker(cfg)
     args += stage_otel(cfg, session)
     args += stage_mailbox(cfg)
@@ -760,8 +661,15 @@ def build_ticket_container_args(manifest: TicketManifest, cfg: Config) -> list[s
     return args
 
 
-def master_container_name(repo_root: Path) -> str:
-    """Deterministic container name for the master devcontainer of *repo_root*."""
+def host_identity_name(repo_root: Path) -> str:
+    """The messenger identity the *host* acts as for *repo_root*.
+
+    Named after the v1 master container that used to own this mailbox, and
+    kept byte-identical to it so existing mailbox directories keep resolving
+    (cld/messenger/identity.py). No container carries this name any more: it
+    is the last-resort sender/reader identity for a host-side `cld msg` that
+    resolves to no ticket.
+    """
     sha = hashlib.sha1(str(repo_root).encode()).hexdigest()[:8]
     return f"cld_master_{repo_root.name}_{sha}"
 
@@ -787,7 +695,7 @@ def ticket_container_name(ticket: str) -> str:
 def agent_container_name(repo_root: Path) -> str:
     """Deterministic container name for the repo agent of *repo_root*.
 
-    Unlike ``master_container_name`` this skips the sha8 disambiguator: at
+    Unlike ``host_identity_name`` this skips the sha8 disambiguator: at
     most one agent per repo basename may run host-wide (see design doc Q4).
     """
     return f"cld_agent_{repo_root.name}"
@@ -840,10 +748,6 @@ def _docker_status(name: str) -> str:
     return "running" if result.stdout.strip() == "running" else "stopped"
 
 
-def docker_master_status(name: str) -> str:
-    return _docker_status(name)
-
-
 def docker_agent_status(name: str) -> str:
     return _docker_status(name)
 
@@ -869,7 +773,7 @@ _INSPECT_FORMAT = "|".join(f'{{{{index .Config.Labels "{label}"}}}}' for _, labe
 
 
 def _docker_kind_list(kind: str, *, running_only: bool = False) -> list[dict]:
-    """Return containers of *kind* ('master', 'agent', 'task-agent') with their org.cld.* labels.
+    """Return containers of *kind* ('agent', 'task-agent', 'ticket') with their org.cld.* labels.
 
     Records are ``{name, repo_root, session, kind, parent, task}``; the last two are
     empty for roles that don't set them. ``running_only`` filters docker-side --
@@ -901,11 +805,6 @@ def _docker_kind_list(kind: str, *, running_only: bool = False) -> list[dict]:
         values = (inspect.stdout.strip().split("|") + [""] * len(keys))[:len(keys)]
         containers.append({"name": name, **dict(zip(keys, values, strict=True))})
     return containers
-
-
-def docker_master_list() -> list[dict]:
-    """Return all master containers with their org.cld.* labels."""
-    return _docker_kind_list("master")
 
 
 def docker_agent_list() -> list[dict]:
@@ -948,13 +847,12 @@ _OCCUPANT_INSPECT_FORMAT = (
     '{{index .Config.Labels "org.cld.session"}}'
 )
 
-# Kinds whose reach strictly blocks another container's anchor. The interactive
-# role (master) is deliberately excluded: a master must be able to spawn
-# task-agents into its own tree, that's the
-# normal nesting, not a hazard. Headless roles (agent, task-agent, run) can
-# still silently rewrite their stack with nobody watching, so they keep
-# blocking. Tickets occupy trees too, but only at warn strength against other
-# tickets (stacked tickets are legitimate) -- see resolve_anchor_checked.
+# Kinds whose reach strictly blocks another container's anchor. Headless roles
+# (agent, task-agent, run) can silently rewrite their stack with nobody
+# watching, so they block; any other kind carrying an anchor label does not.
+# Tickets occupy trees too, but they are collected separately (from their
+# manifest label) and only warn against other tickets -- stacked tickets are
+# legitimate, see resolve_anchor_checked.
 ANCHOR_BLOCKING_KINDS = {"agent", "task-agent", "run"}
 
 
@@ -990,10 +888,10 @@ def docker_occupant_list() -> list[dict]:
 
     Stopped persistent containers (ticket, agent, task-agent) still own their
     bookmarks and can be restarted into their trees, so they are included;
-    stopped ``run`` corpses cannot return (``--rm``) and are not. The
-    interactive kind (master) never occupies a tree. ``repo_root`` is
-    realpath-normalized at record-build time so a symlinked launch path cannot
-    bypass the check.
+    stopped ``run`` corpses cannot return (``--rm``) and are not. A kind
+    outside ``ANCHOR_BLOCKING_KINDS`` never occupies from the label scan.
+    ``repo_root`` is realpath-normalized at record-build time so a symlinked
+    launch path cannot bypass the check.
     """
     records: list[dict] = []
     for name, state in _docker_names_with_state(ANCHOR_LABEL):
@@ -1071,7 +969,7 @@ def resolve_anchor_checked(
     repo_root: Path,
     revision: str,
     mode: str = "isolated",
-    caller_kind: str = "master",
+    caller_kind: str = "agent",
 ) -> str:
     """Resolve *revision* to a commit hash, checking overlap with every other
     cld container's reach in the same repo.
@@ -1096,9 +994,8 @@ def resolve_anchor_checked(
 
     The outcome depends on the (caller, occupant) kind pair: ticket vs ticket
     overlap warns and proceeds (stacked tickets are legitimate; silence would
-    hide accidents); every other pairing blocks. A live master never occupies:
-    spawning task-agents into its own tree is the normal nesting, not the
-    hazard this guards against.
+    hide accidents); every other pairing blocks, including any caller kind
+    this function does not recognize.
 
     Fail-closed: a probe that cannot be evaluated counts as overlap -- block
     for non-ticket callers, warn ("could not verify") for ticket callers. A
@@ -1286,7 +1183,7 @@ def stage_broker(cfg: Config) -> list[str]:
     known_hosts) RO, adds a host-gateway alias so the container can reach the
     host-side sshd, and sets ``CLD_BROKER_ENDPOINT`` so the in-container client
     (``cld broker <action>``) can reach it. No-op unless ``cfg.broker_key`` is set.
-    Called for master, agent, task-agent and the bare ephemeral devcontainer
+    Called for agent, task-agent and ticket containers
     (see the call site in ``build_container_args``); the broker's sshd accepts
     any ``cld_*`` session and resolves its role from the ``org.cld.kind`` label
     set at launch, not from the name -- see ``broker/cld-broker.sh``. See

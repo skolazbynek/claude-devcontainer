@@ -683,10 +683,11 @@ def gated_send(
 def list_containers(kind: str | None = None) -> list[dict]:
     """Enumerate cld containers, ``{name, kind, repo, status}`` per entry.
 
-    *kind* filters to ``"agent"`` or ``"master"``; omit for both. Delegates to
-    the host-docker seam: the local daemon on the host, the SSH broker inside
-    master (there is no docker socket in-container). Stopped masters are
-    included; agent containers run ``--rm`` and disappear once exited.
+    *kind* filters to one ``org.cld.kind`` value (``"agent"``,
+    ``"task-agent"``, ``"ticket"``); omit for all. Delegates to the
+    host-docker seam: the local daemon on the host, the SSH broker in a
+    container (there is no docker socket in-container). Stopped containers are
+    included.
     """
     from cld.broker import list_cld_containers
     return list_cld_containers(kind)
@@ -704,7 +705,7 @@ def resolve_recipient(to: str, containers: list[dict] | None = None, root: Path 
     Otherwise enumerate, in order (design-ticket-containers.md section 6.5):
     exact container name, then ticket slug, then repo basename -- a shortname
     matching both a ticket slug and a repo basename is an ambiguity error
-    naming both. Among basename matches, prefer an ``agent`` over a ``master``.
+    naming both. Among basename matches, prefer the standing ``agent``.
     Raises ValueError if *to* is a basename matching containers from two
     different repo roots (ambiguous), or isn't found at all.
     """

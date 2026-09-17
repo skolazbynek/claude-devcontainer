@@ -1,6 +1,5 @@
 """Layer 2: Docker integration tests against the real daemon."""
 
-import os
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -9,10 +8,10 @@ import pytest
 
 from cld.config import Config
 from cld.docker import (
+    TaskAgentSpec,
     build_container_args,
     docker_agent_list,
     docker_agent_status,
-    docker_master_list,
     ensure_image,
     require_docker,
 )
@@ -76,24 +75,17 @@ class TestBuildContainerArgs:
         args = build_container_args(jj_repo.repo_root, "test-session", Config())
         assert "-it" not in args
 
-    def test_master_and_agent_mutually_exclusive(self, jj_repo):
+    def test_agent_and_task_agent_mutually_exclusive(self, jj_repo):
         with pytest.raises(ValueError, match="mutually exclusive"):
-            build_container_args(jj_repo.repo_root, "test-session", Config(), master=True, agent=True)
+            build_container_args(
+                jj_repo.repo_root, "test-session", Config(),
+                agent=True, task_agent=TaskAgentSpec(slug="t"),
+            )
 
     def test_plain_mode_has_no_mailbox_mount(self, jj_repo):
         args = build_container_args(jj_repo.repo_root, "test-session", Config())
         volume_args = [args[i+1] for i in range(len(args)-1) if args[i] == "-v"]
         assert not any("/var/cld/mailboxes" in v for v in volume_args)
-
-    def test_master_mode_mounts_mailbox_and_labels(self, jj_repo, tmp_path):
-        cfg = Config(mailbox_root=str(tmp_path / "mailboxes"))
-        args = build_container_args(jj_repo.repo_root, "cld_master_x_abcd1234", cfg, master=True)
-        volume_args = [args[i+1] for i in range(len(args)-1) if args[i] == "-v"]
-        env_pairs = [args[i+1] for i in range(len(args)-1) if args[i] == "-e"]
-        assert any(v.endswith(":/var/cld/mailboxes:rw") for v in volume_args)
-        assert "org.cld.kind=master" in args
-        assert "MASTER_MODE=1" in env_pairs
-        assert (tmp_path / "mailboxes").is_dir()
 
     def test_agent_mode_mounts_mailbox_and_labels(self, jj_repo, tmp_path):
         cfg = Config(mailbox_root=str(tmp_path / "mailboxes"))
@@ -103,41 +95,16 @@ class TestBuildContainerArgs:
         assert any(v.endswith(":/var/cld/mailboxes:rw") for v in volume_args)
         assert "org.cld.kind=agent" in args
         assert "AGENT_MODE=1" in env_pairs
+        assert (tmp_path / "mailboxes").is_dir()
 
-    def test_master_publishes_hub_mode_and_targets(self, jj_repo, tmp_path):
-        # Master's hub capability: the registered sibling targets reach the
-        # entrypoint as MASTER_TARGETS and the broker as the host-set,
-        # immutable org.cld.targets label it validates launches against.
-        home = tmp_path / "home"
-        (home / ".claude").mkdir(parents=True)
-        # Placeholders are mirrored under the container $HOME, so a registered
-        # target has to live under the host home dir.
-        target = home / "sibling-repo"
-        target.mkdir()
-        cfg = Config(
-            mailbox_root=str(tmp_path / "mailboxes"),
-            master_targets=(str(target),),
-        )
-        with patch.dict(os.environ, {"HOME": str(home)}):
-            args = build_container_args(
-                jj_repo.repo_root, "cld_master_x_abcd1234", cfg, master=True,
-            )
+    def test_no_role_publishes_hub_mode_or_targets(self, jj_repo, tmp_path):
+        """Both went with the master role: nothing produces them any more."""
+        cfg = Config(mailbox_root=str(tmp_path / "mailboxes"))
+        args = build_container_args(jj_repo.repo_root, "cld_agent_x", cfg, agent=True)
         env_pairs = [args[i+1] for i in range(len(args)-1) if args[i] == "-e"]
-        assert "HUB_MODE=1" in env_pairs
-        assert any(e.startswith("MASTER_TARGETS=") and str(target) in e for e in env_pairs)
-        assert any(a == f"org.cld.targets={target}" for a in args)
-
-    def test_master_target_outside_home_fails_fast(self, jj_repo, tmp_path):
-        # Placeholders can only be mirrored under the container $HOME, so a
-        # target outside the host home dir must be rejected at build time
-        # rather than silently failing to materialize inside master.
-        outside = tmp_path / "repo-outside-home"
-        outside.mkdir()
-        cfg = Config(master_targets=(str(outside),), mailbox_root=str(tmp_path / "mb"))
-        with pytest.raises(SystemExit):
-            build_container_args(
-                jj_repo.repo_root, "cld_master_x_abcd1234", cfg, master=True
-            )
+        assert "HUB_MODE=1" not in env_pairs
+        assert not any(e.startswith("MASTER_TARGETS=") for e in env_pairs)
+        assert not any(a.startswith("org.cld.targets=") for a in args)
 
     def test_nested_mailbox_mount_does_not_mkdir_or_touch_docker(self, jj_repo, caplog):
         """When host_project_dir/host_home make us 'nested' (cld running inside
@@ -174,7 +141,6 @@ class TestDockerAgentHelpers:
         # No real agent containers running in this environment; just verify
         # the docker label query round-trips without error.
         assert isinstance(docker_agent_list(), list)
-        assert isinstance(docker_master_list(), list)
 
 
 @skip_no_docker

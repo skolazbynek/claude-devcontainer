@@ -7,9 +7,10 @@ target that mailbox, and outgoing messages list it as the sender. Which one
 env or the *ticket* argument) wins, but only if its container actually exists
 (running or stopped) -- otherwise sends would be attributed to a mailbox
 nothing ever reads; else the single running ticket container, if there is
-exactly one; else the v1 fallback, the cwd repo's master. A cwd-walk mapping
-cwd to tickets is deliberately not attempted -- several tickets can mount one
-repo, so cwd is not an identity.
+exactly one; else the cwd repo's host identity (``host_identity_name``, the
+mailbox the v1 master used to own). A cwd-walk mapping cwd to tickets is
+deliberately not attempted -- several tickets can mount one repo, so cwd is
+not an identity.
 """
 
 import os
@@ -17,7 +18,7 @@ from pathlib import Path
 
 from cld.broker import list_cld_containers
 from cld.config import Config
-from cld.docker import MAILBOX_MOUNT, master_container_name, ticket_container_name
+from cld.docker import MAILBOX_MOUNT, host_identity_name, ticket_container_name
 from cld.vcs import get_backend
 
 
@@ -52,4 +53,4 @@ def resolve_self(ticket: str = "") -> tuple[str, Path]:
             f"{len(running)} ticket containers are running ({listing}) -- "
             "set CLD_TICKET=<ticket> to act as one"
         ) from None
-    return master_container_name(repo_root), mailbox_root
+    return host_identity_name(repo_root), mailbox_root

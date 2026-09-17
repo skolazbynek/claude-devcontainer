@@ -24,8 +24,8 @@ log_error() {
 # user.email/user.name from ~/.config/jj.
 copy_host_configs
 
-# Anchor: base revision arrives as AGENT_REVISION_HINT (resolved commit hash
-# from the host, or unresolved revset when a `cld master` delegated to us).
+# Anchor: base revision arrives as AGENT_REVISION_HINT (a commit hash the host
+# resolved from its own jj view).
 # Scratch commit B (child of anchor A, carrying `.cld-run/*`) is created
 # INSIDE /workspace/current by `python3 -m cld.vcs.scratch` -- the origin
 # working copy is never touched.
@@ -120,7 +120,7 @@ AGENT_MODEL="${AGENT_MODEL:-sonnet}"
 log "Using model: $AGENT_MODEL"
 
 # No `--add-dir /opt/cld` here, unlike the devcontainer: the base image's baked skills
-# are all master/agent surfaces (broker, mailbox, task-agent fleet) and a one-shot run
+# are all agent surfaces (broker, mailbox, task-agent fleet) and a one-shot run
 # has neither a mailbox mount nor a broker key, so loading them would only offer tools
 # that cannot work.
 if claude -p "$SYSTEM_PROMPT" \

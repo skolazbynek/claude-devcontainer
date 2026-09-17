@@ -16,7 +16,7 @@ def _cp(returncode=0, stdout="", stderr=""):
 def configured(monkeypatch):
     """A container with an endpoint and a mounted key -- i.e. the broker is reachable."""
     monkeypatch.setenv("CLD_BROKER_ENDPOINT", "host.docker.internal:2222")
-    monkeypatch.setenv("SESSION_NAME", "cld_master_cld_ab12")
+    monkeypatch.setenv("SESSION_NAME", "cld_agent_cld")
     with patch("cld.broker.Path.exists", return_value=True):
         yield
 
@@ -36,23 +36,23 @@ class TestListCldContainers:
             out = broker.list_cld_containers()
         assert out == [{"name": "cld_agent_a", "kind": "agent", "repo": "/repo/a", "status": "running"}]
 
-    def test_master_uses_broker_and_parses_lines(self, configured):
+    def test_hub_flag_uses_broker_and_parses_lines(self, configured):
         lines = _cp(stdout=(
             "cld_agent_a\tagent\t/repo/a\tUp 3 hours\n"
-            "cld_master_b_1234\tmaster\t/repo/b\tExited (0) 2 hours ago\n"
+            "cld_ticket_lide-2600\tticket\t/repo/b\tExited (0) 2 hours ago\n"
         ))
         with patch("cld.broker.in_master_container", return_value=True), \
              patch("cld.broker.subprocess.run", return_value=lines) as run:
             out = broker.list_cld_containers("agent")
         assert run.call_args[0][0][0] == "ssh"
         assert _argv_of(run) == ["agent"]                      # the kind filter
-        assert run.call_args[0][0][-1].startswith("list-containers cld_master_cld_ab12 ")
+        assert run.call_args[0][0][-1].startswith("list-containers cld_agent_cld ")
         assert out == [
             {"name": "cld_agent_a", "kind": "agent", "repo": "/repo/a", "status": "running"},
-            {"name": "cld_master_b_1234", "kind": "master", "repo": "/repo/b", "status": "stopped"},
+            {"name": "cld_ticket_lide-2600", "kind": "ticket", "repo": "/repo/b", "status": "stopped"},
         ]
 
-    def test_master_broker_failure_returns_empty(self, configured):
+    def test_broker_failure_returns_empty(self, configured):
         with patch("cld.broker.in_master_container", return_value=True), \
              patch("cld.broker.subprocess.run", return_value=_cp(returncode=3, stderr="denied")):
             assert broker.list_cld_containers() == []
@@ -122,27 +122,12 @@ class TestRunAction:
         assert broker.KEY_MOUNT in cmd
 
 
-class TestBrokerAgentOp:
-    def test_forwards_target_op_and_extra(self, configured):
-        with patch("cld.broker.subprocess.run", return_value=_cp(returncode=0)) as run:
-            rc = broker.broker_agent_op("/repo/y", "start", ["-m", "opus", "-r", "@"])
-        assert rc == 0
-        assert run.call_args[0][0][-1].startswith("agent cld_master_cld_ab12 ")
-        assert _argv_of(run) == ["/repo/y", "start", "-m", "opus", "-r", "@"]
-        # lifecycle streams (no capture) so the broker output reaches the user
-        assert run.call_args.kwargs["capture_output"] is False
-
-    def test_propagates_exit_code(self, configured):
-        with patch("cld.broker.subprocess.run", return_value=_cp(returncode=1)):
-            assert broker.broker_agent_op("/repo/y", "shutdown") == 1
-
-
 class TestGraphqlOp:
     def test_forwards_op_and_args_capturing_by_default(self, configured):
         with patch("cld.broker.subprocess.run", return_value=_cp(returncode=0, stdout="ok")) as run:
             result = broker.graphql_op("status")
         assert result.stdout == "ok"
-        assert run.call_args[0][0][-1].startswith("graphql cld_master_cld_ab12 ")
+        assert run.call_args[0][0][-1].startswith("graphql cld_agent_cld ")
         assert _argv_of(run) == ["status"]
         assert run.call_args.kwargs["capture_output"] is True
 
@@ -175,12 +160,12 @@ class TestGraphqlOp:
 
 class TestBrokerTaskAgentOp:
     def test_uses_its_own_action_and_forwards_argv(self, configured):
-        """A separate action from `agent`: different op set, and its own argv rules."""
+        """Its own broker action, with its own op set and argv rules."""
         argv = ["@implementer", "-n", "add-oauth", "-p", "do it", "--peer", "cld_agent_x_y:3"]
         with patch("cld.broker.subprocess.run", return_value=_cp(returncode=0)) as run:
             rc = broker.broker_task_agent_op("/repo/y", "start", argv)
         assert rc == 0
-        assert run.call_args[0][0][-1].startswith("task-agent cld_master_cld_ab12 ")
+        assert run.call_args[0][0][-1].startswith("task-agent cld_agent_cld ")
         assert _argv_of(run) == ["/repo/y", "start", *argv]
         assert run.call_args.kwargs["capture_output"] is False
 

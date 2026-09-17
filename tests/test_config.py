@@ -230,18 +230,13 @@ class TestPathMap:
         assert "CLD_PATH_MAP" in capsys.readouterr().err
 
 
-class TestMasterTargets:
-    def test_master_targets_loaded(self, tmp_path):
-        proj = _write(
-            tmp_path / ".cld/config.toml",
-            'master_targets = ["~/projects/foo", "/abs/bar"]\n',
-        )
-        cfg = Config.from_env(user_config=tmp_path / "u", project_config=proj)
-        assert cfg.master_targets == ("~/projects/foo", "/abs/bar")
+class TestRetiredMasterKeys:
+    """`master_targets` (and the `master_extra_mounts_ro` it replaced) went with
+    the master role: both are now plain unknown keys, warned about and dropped."""
 
-    def test_deprecated_key_errors_with_migration_hint(self, tmp_path):
-        proj = _write(tmp_path / ".cld/config.toml", 'master_extra_mounts_ro = ["~/repos"]\n')
-        with pytest.raises(RuntimeError) as excinfo:
-            _load_toml(proj)
-        assert "master_extra_mounts_ro" in str(excinfo.value)
-        assert "master_targets" in str(excinfo.value)
+    @pytest.mark.parametrize("key", ["master_targets", "master_extra_mounts_ro"])
+    def test_ignored_with_a_warning(self, tmp_path, key, capsys):
+        proj = _write(tmp_path / ".cld/config.toml", f'{key} = ["~/projects/foo"]\n')
+        cfg = Config.from_env(user_config=tmp_path / "u", project_config=proj)
+        assert not hasattr(cfg, "master_targets")
+        assert f"unknown key '{key}'" in capsys.readouterr().err

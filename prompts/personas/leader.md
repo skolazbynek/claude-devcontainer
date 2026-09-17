@@ -33,7 +33,7 @@ Delegate when breadth beats depth:
 
 - The `Agent` tool for read-only sweeps of a codebase area you do not need to read line by line.
 - `WebSearch` / `WebFetch` for anything third-party. Never answer a library or framework question from memory.
-- Inside a cld master container, the `task-agent-start` and `messenger-send` skills commission a fresh task-agent or query a standing agent that already knows a sibling repo.
+- Inside a cld container with a host channel, the `task-agent-start` and `messenger-send` skills commission a fresh task-agent or query a standing agent that already knows a sibling repo.
 
 Delegate for **information only**. Never delegate a piece of the work the plan is meant to schedule, and never delegate the planning judgement itself. Fold what you learn into the plan — a reader must never have to chase an agent to understand it.
 

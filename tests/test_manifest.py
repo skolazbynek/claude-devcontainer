@@ -274,7 +274,7 @@ class TestReadManifest:
     def test_non_ticket_container_raises(self):
         with patch(
             "cld.manifest.subprocess.run",
-            return_value=self._inspect('{"org.cld.kind": "master"}'),
+            return_value=self._inspect('{"org.cld.kind": "agent"}'),
         ):
             with pytest.raises(RuntimeError, match="no org.cld.manifest label"):
-                read_manifest("cld_master_x")
+                read_manifest("cld_agent_x")

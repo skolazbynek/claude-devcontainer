@@ -1,7 +1,7 @@
 """Mailbox messaging verbs, shared by the host and container CLIs.
 
 `cld msg …` works on both sides: `cld.messenger.identity.resolve_self()` maps a
-container to its own mailbox and the host to the cwd repo's master. The error
+container to its own mailbox and the host to the cwd repo's own identity. The error
 decorator lives here too, so both apps share exactly one definition.
 """
 
@@ -31,7 +31,7 @@ def handle_errors(func):
         except typer.Exit:
             # click's Exit subclasses RuntimeError, so without this it lands in the
             # handler below and every deliberate exit code becomes 1 -- including the 0
-            # an in-master broker dispatch raises on success, and including the clean
+            # an in-container broker dispatch raises on success, and including the clean
             # `Error: ...` paths, which also gained a redundant "Command failed: 1" line.
             raise
         except (RuntimeError, ValueError, subprocess.CalledProcessError, OSError) as e:
@@ -122,7 +122,7 @@ def msg_archive(
 @msg_app.command("agents")
 @handle_errors
 def msg_agents(
-    kind: str = typer.Option("", "--kind", help="Restrict to one kind: agent or master"),
+    kind: str = typer.Option("", "--kind", help="Restrict to one kind: agent, task-agent or ticket"),
 ):
     """List cld containers that can be messaged."""
     agents_cmd.show(kind or None)

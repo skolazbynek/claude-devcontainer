@@ -46,9 +46,8 @@ cld stop LIDE-2600         # pause; `cld start LIDE-2600` warm-starts it
 cld shutdown LIDE-2600     # end of ticket; commits survive in every repo store
 ```
 
-**Coming from v1?** Shut down v1 masters/agents first
-(`cld master shutdown --all`, `cld agent shutdown --all`), then
-`cld repos add` each of your `master_targets` entries. Verb map and behavior
+**Coming from v1?** Shut down v1 agents first (`cld agent shutdown --all`),
+then `cld repos add` each repo you work on. Verb map and behavior
 changes: README, "Ticket containers (v2)".
 
 # Quick start: task-agents

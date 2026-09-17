@@ -170,12 +170,12 @@ printf 'REPO=%s\\n' "$REPO"
         assert "is not a repo" in result.stderr
 
     def test_v1_kind_refuses_repo_flag(self, fakebin, repos):
-        result = self._resolve(fakebin, self._labels(repos), "master", "lide-api")
+        result = self._resolve(fakebin, self._labels(repos), "agent", "lide-api")
         assert result.returncode == 2
         assert "only for ticket containers" in result.stderr
 
     def test_v1_kind_keeps_dispatcher_repo(self, fakebin, repos):
-        result = self._resolve(fakebin, "", "master", "", repo_preset="/v1/repo")
+        result = self._resolve(fakebin, "", "agent", "", repo_preset="/v1/repo")
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "REPO=/v1/repo"
 
@@ -257,8 +257,8 @@ esac
 
     def test_v1_caller_unchanged(self, fakebin, repos):
         result = self._dispatch(
-            fakebin, "cld_master_x_ab12", ["-k", "login"],
-            {"FAKE_KIND": "master", "FAKE_REPO_ROOT": f"{repos}/lide-api"},
+            fakebin, "cld_agent_lide-api", ["-k", "login"],
+            {"FAKE_KIND": "agent", "FAKE_REPO_ROOT": f"{repos}/lide-api"},
         )
         assert result.returncode == 0, result.stderr
         assert f"-v {repos}/lide-api:/repo" in result.stdout
@@ -266,8 +266,8 @@ esac
 
     def test_v1_caller_repo_flag_denied(self, fakebin, repos):
         result = self._dispatch(
-            fakebin, "cld_master_x_ab12", ["--repo", "lide-api", "-k", "login"],
-            {"FAKE_KIND": "master", "FAKE_REPO_ROOT": f"{repos}/lide-api"},
+            fakebin, "cld_agent_lide-api", ["--repo", "lide-api", "-k", "login"],
+            {"FAKE_KIND": "agent", "FAKE_REPO_ROOT": f"{repos}/lide-api"},
         )
         assert result.returncode == 2
         assert "only for ticket containers" in result.stderr

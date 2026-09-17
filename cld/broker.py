@@ -144,7 +144,10 @@ def list_cld_containers(kind: str | None = None) -> list[dict]:
 
     Host: reads the local daemon. Inside a container: the broker's
     ``list-containers`` action. *kind* filters to one ``org.cld.kind`` label value:
-    ``"master"``, ``"agent"`` or ``"task-agent"``.
+    ``"agent"``, ``"task-agent"`` or ``"ticket"``.
+
+    The in-container branch keys on ``in_master_container()``, whose env has no
+    producer left; it stays until that dispatch is reworked (cld/docker.py).
     """
     if not in_master_container():
         return _list_via_local_docker(kind)
@@ -161,17 +164,6 @@ def list_cld_containers(kind: str | None = None) -> list[dict]:
     return records
 
 
-def broker_agent_op(target: str, op: str, extra_args: list[str] | None = None) -> int:
-    """Delegate a `cld agent <op>` for *target* to the host broker.
-
-    Only meaningful in a container (the host runs `cld agent` directly). Streams the
-    broker-invoked `cld agent` output to the user and returns its exit code. *op* is
-    one of start/restart/shutdown/status/logs; *extra_args* are forwarded verbatim
-    (e.g. ``-m``/``-r`` for start, ``--all`` for shutdown).
-    """
-    return run_action("agent", target, op, *(extra_args or [])).returncode
-
-
 def graphql_op(
     op: str, *args: str, capture: bool = True, repo: str = "",
 ) -> subprocess.CompletedProcess:
@@ -185,8 +177,8 @@ def graphql_op(
     ``--repo <name>`` the broker validates against the caller's manifest
     labels (design-ticket-containers.md section 6.1); empty means the
     caller's single repo, which is all a v1 kind has. Defaults to
-    ``capture=True`` (unlike ``broker_agent_op``/``broker_task_agent_op``,
-    which stream to the user) because every caller here is an MCP tool that
+    ``capture=True`` (unlike ``broker_task_agent_op``, which streams to the
+    user) because every caller here is an MCP tool that
     needs the broker's stdout back as a return value, not a human watching a
     terminal.
     """
@@ -197,9 +189,11 @@ def graphql_op(
 def broker_task_agent_op(target: str, op: str, extra_args: list[str] | None = None) -> int:
     """Delegate a `cld task-agent <op>` for *target* to the host broker.
 
-    Same seam as ``broker_agent_op``, separate action: the broker's task-agent action
-    has its own op set and enforces the argv rules a container must not be able to
-    bypass -- it denies ``--force`` and a caller-supplied ``--parent``, and stamps the
-    calling master's session as the parent itself (see broker/cld-broker.sh).
+    The broker's task-agent action enforces the argv rules a container must not
+    be able to bypass -- it denies ``--force`` and a caller-supplied
+    ``--parent``, and stamps the calling session as the parent itself (see
+    broker/cld-broker.sh). *target* is authorized against the caller's host-set
+    labels, which since the master role's removal means only the caller's own
+    ``org.cld.repo-root``; the ticket-scoped rework of this route is pending.
     """
     return run_action("task-agent", target, op, *(extra_args or [])).returncode

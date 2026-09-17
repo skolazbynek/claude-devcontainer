@@ -1,8 +1,8 @@
 """MCP server exposing the mailbox transport: send / list_inbox / read_message / archive / list_agents.
 
 Every tool operates on the *calling* container's own mailbox, identified by
-the ``SESSION_NAME`` env var (already set for both master and agent
-containers by the launcher/entrypoint).
+the ``SESSION_NAME`` env var (set for every cld container by the
+launcher/entrypoint).
 """
 
 import os
@@ -41,9 +41,9 @@ def _mailbox_root() -> Path:
 def send(to: str, subject: str, body: str, expects_reply: bool = False, answers: str = "") -> dict:
     """Send a message to another container's mailbox.
 
-    to: a full container name, or a repo-basename shortname when exactly one agent or
-    master owns that repo. Peers and task-agents must be addressed by full name -- with
-    several task-agents per repo a basename identifies nothing.
+    to: a full container name, a ticket slug, or a repo-basename shortname when exactly
+    one agent owns that repo. Peers and task-agents must be addressed by full name --
+    with several task-agents per repo a basename identifies nothing.
 
     expects_reply: set it only when you cannot proceed without an answer. It obliges the
     recipient to reply, and the recipient is obliged by nothing else -- so a message you
@@ -171,8 +171,8 @@ def read_mailbox(name: str, since: str = "") -> list[dict]:
 def list_agents(kind: str = "") -> list[dict]:
     """List cld containers via Docker labels.
 
-    kind: 'master', 'agent' (the standing per-repo agent) or 'task-agent' (one per task,
-    see docs/design-task-agents.md); omit for all of them.
+    kind: 'agent' (the standing per-repo agent), 'task-agent' (one per task, see
+    docs/design-task-agents.md) or 'ticket'; omit for all of them.
     """
     log.info("MCP tool: list_agents (kind=%s)", kind or "<all>")
     return mailbox.list_containers(kind or None)

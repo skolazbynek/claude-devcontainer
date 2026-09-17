@@ -318,8 +318,8 @@ def exec_shell(ticket: str) -> None:
 
 def _stop_and_remove(container: str) -> None:
     """Plain stop + rm, idempotent. The ticket entrypoint's TERM trap tears
-    nothing down (stop is the pause verb; all forgetting is host-side), so no
-    restart-vs-shutdown signal split like v1 master's USR1."""
+    nothing down (stop is the pause verb; all forgetting is host-side), so this
+    needs no restart-vs-shutdown signal split."""
     log.info("Stopping container: %s", container)
     subprocess.run(["docker", "stop", container], capture_output=True)
     subprocess.run(["docker", "rm", container], capture_output=True)
@@ -408,7 +408,7 @@ def shutdown_all_tickets() -> None:
 def forget_session_state(repo_root_str: str, session: str) -> None:
     """Drop the session's bookmark and workspace registration from a repo's jj store.
 
-    Shared by the v1 master/agent/task-agent teardown and per-repo ticket
+    Shared by the v1 agent/task-agent teardown and per-repo ticket
     teardown. Best-effort: both entries are independent (bookmark = named
     commit pointer, workspace = registered working-copy path). A workspace
     left behind makes the next first-launch `jj workspace add --name <session>`
