@@ -90,7 +90,7 @@ Each entry is a `[repos.<name>]` TOML table: `path`, optional `default_rev` (anc
 
 | Verb | Semantics |
 |---|---|
-| `cld start <ticket> [repo[@rev]...]` | Create-or-start. On a TTY with no repos: interactive picker over the registry. Each repo arg is a registry name or path, with an optional `@rev` anchor override. Against an existing ticket, a different repo set shows a diff, asks to confirm, and recreates the container. |
+| `cld start <ticket> [repo[@rev]...]` | Create-or-start. On a TTY with no repos: interactive picker over the registry. Each repo arg is a registry name or path, with an optional `@rev` anchor override. Against an existing ticket, a different repo set shows a diff, asks to confirm, and recreates the container. Bare `cld start` (no args at all) targets the cwd's repo directly -- ad hoc, regardless of registration -- under a ticket named after the repo directory. |
 | `cld claude <ticket> [-- args...]` | The daily verb: exec the harness at the ticket root. Everything after `--` passes to claude (`--model`, `--continue`, `--resume`, `-p`). One live session per container (POC): a second `cld claude` is refused, naming the holder. |
 | `cld shell <ticket>` | Escape hatch: interactive bash in the container, for debugging the sandbox itself. |
 | `cld stop <ticket>` | Pause (`docker stop`). Workspaces stay in place; `cld start` on a stopped ticket is a warm start. |

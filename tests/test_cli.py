@@ -161,6 +161,22 @@ class TestTicketVerbs:
         assert result.exit_code == 0, result.output
         assert mocks["start_ticket"].call_args.args[2] == []
 
+    def test_start_with_no_args_targets_cwd_repo_ad_hoc(self):
+        """Bare `cld start`: cwd's repo root, ad hoc (not by registry name),
+        ticket named after the repo directory."""
+        with ExitStack() as stack:
+            stack.enter_context(patch("cld.cli.require_docker"))
+            stack.enter_context(
+                patch("cld.cli.find_target_repo", return_value=Path("/home/z/diskuze-api"))
+            )
+            start_ticket = stack.enter_context(patch("cld.cli.start_ticket"))
+            result = runner.invoke(app, ["start"])
+        assert result.exit_code == 0, result.output
+        args = start_ticket.call_args.args
+        assert args[1] == "diskuze-api"
+        assert args[2] == ["/home/z/diskuze-api"]
+        assert args[3] == []
+
     def test_claude_passes_everything_after_dashdash_through(self):
         result, mocks = self._invoke(
             ["claude", "LIDE-2600", "--", "--model", "opus", "--continue"],

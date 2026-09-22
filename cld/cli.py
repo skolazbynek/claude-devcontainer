@@ -582,7 +582,7 @@ _PASSTHROUGH_ARGS = {"allow_extra_args": True, "ignore_unknown_options": True}
 @app.command()
 @_handle_errors
 def start(
-    ticket: str = typer.Argument(..., help=_TICKET_HELP),
+    ticket: Optional[str] = typer.Argument(None, help=_TICKET_HELP),
     repos: Optional[list[str]] = typer.Argument(
         None,
         help="Repos to mount: registry names or paths, each with an optional @rev anchor override",
@@ -598,10 +598,18 @@ def start(
     Against an existing ticket, an explicitly different repo set shows the
     diff, asks to confirm, and recreates the container; repos leaving the set
     are torn down as in shutdown (commits survive).
+
+    With no arguments at all, targets the cwd's repo directly -- ad hoc,
+    regardless of registration in `cld repos` -- under a ticket named after
+    the repo directory.
     """
     require_docker()
     cfg = Config.from_env()
     setup_logging(cfg)
+    if ticket is None:
+        repo_root = find_target_repo(cfg)
+        ticket = repo_root.name
+        repos = [str(repo_root)]
     start_ticket(cfg, ticket, repos or [], shared_anchor)
 
 

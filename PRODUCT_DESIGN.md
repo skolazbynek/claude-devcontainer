@@ -115,7 +115,7 @@ path = "~/projects/diskuze-api"
 
 | Verb | Semantics |
 |---|---|
-| `cld start <ticket> [repo[@rev]…]` | Create-or-start. On a TTY with no repos given: interactive picker over the registry [ruled]. Repo args are registry names or paths, each with optional `@rev` anchor override. |
+| `cld start <ticket> [repo[@rev]…]` | Create-or-start. On a TTY with no repos given: interactive picker over the registry [ruled]. Repo args are registry names or paths, each with optional `@rev` anchor override. With *no arguments at all*: targets the cwd's repo directly (ad hoc, bypassing the registry) under a ticket named after the repo directory. |
 | `cld claude <ticket> [-- args…]` | The daily verb: exec the harness at the ticket root. Everything after `--` passes through to claude (`-p`, `--resume`, `--continue`, `--model`). |
 | `cld shell <ticket>` | Escape hatch: interactive bash in the container, for debugging the sandbox itself. |
 | `cld stop <ticket>` | Pause: `docker stop`. Workspaces stay in place; `start` on a stopped ticket is a warm start. |

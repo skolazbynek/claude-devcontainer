@@ -373,6 +373,13 @@ dependency.
   prompts; a fuzzy-finder is a later nicety, not a launch requirement).
   Non-TTY with no repos: hard error naming the picker and the positional
   form (spec §5).
+- **Zero-arg shortcut** (`cld start` with no ticket and no repos): skips the
+  registry and the picker entirely. Resolves the cwd's repo root the same
+  way `find_target_repo` does for task-agents, uses it as an ad-hoc path
+  spec, and names the ticket after the repo directory (`repo_root.name`).
+  Re-running it in the same repo hits the normal create-or-start path for
+  that ticket name (warm start / already-running report), same as typing
+  the ticket name explicitly.
 
 ## 6. Repo-qualified interfaces (spec §10)
 
