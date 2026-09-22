@@ -652,6 +652,41 @@ class TestResolveAnchorChecked:
         with patch("cld.docker.docker_occupant_list", return_value=records):
             assert resolve_anchor_checked(cfg, jj_repo.repo_root, base, "isolated") == base
 
+    def test_exclude_session_drops_own_ticket_record(self, tmp_path, jj_repo):
+        """A ticket reanchoring itself must not be blocked or warned about its
+        own live reach -- exclude_session drops its own occupant record."""
+        _, live_anchor, inside = self._commits(jj_repo)
+        cfg, records = self._fleet(
+            tmp_path, jj_repo, live_anchor, name="cld_ticket_self", kind="ticket",
+        )
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            assert resolve_anchor_checked(
+                cfg, jj_repo.repo_root, inside, caller_kind="ticket",
+                exclude_session="cld_ticket_self",
+            ) == inside
+
+    def test_exclude_session_leaves_other_occupants_blocking(self, tmp_path, jj_repo):
+        """exclude_session only drops the matching record -- a task-agent's
+        live reach still blocks."""
+        _, live_anchor, inside = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, live_anchor, kind="task-agent")
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live reach"):
+                resolve_anchor_checked(
+                    cfg, jj_repo.repo_root, inside, caller_kind="ticket",
+                    exclude_session="cld_ticket_self",
+                )
+
+    def test_exclude_session_leaves_run_container_blocking(self, tmp_path, jj_repo):
+        _, live_anchor, inside = self._commits(jj_repo)
+        cfg, records = self._fleet(tmp_path, jj_repo, live_anchor, kind="run")
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            with pytest.raises(RuntimeError, match="inside the live reach"):
+                resolve_anchor_checked(
+                    cfg, jj_repo.repo_root, inside, caller_kind="ticket",
+                    exclude_session="cld_ticket_self",
+                )
+
     def test_shared_refused_when_live_occupant_inside_tree(self, tmp_path, jj_repo):
         """A shared anchor claiming a tree with a live occupant already inside it is refused."""
         base, live_anchor, _ = self._commits(jj_repo)
@@ -970,6 +1005,16 @@ class TestTicketAnchorResolver:
             # shared: claiming the occupied tree is refused
             with pytest.raises(RuntimeError, match="already inside"):
                 resolver(str(jj_repo.repo_root), base, "shared")
+
+    def test_exclude_session_forwarded_to_the_check(self, tmp_path, jj_repo):
+        """A reanchoring ticket passes its own container name through so the
+        check drops its own occupant record -- without exclusion this record
+        (task-agent kind) would block even a ticket caller."""
+        _, occupant_anchor, records = self._occupied(jj_repo, "task-agent")
+        cfg = Config(mailbox_root=str(tmp_path / "mb"))
+        resolver = ticket_anchor_resolver(cfg, exclude_session="cld_occupant")
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            assert resolver(str(jj_repo.repo_root), occupant_anchor, "isolated") == occupant_anchor
 
 
 class TestParsePeersEnv:

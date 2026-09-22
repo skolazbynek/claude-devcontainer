@@ -37,6 +37,7 @@ cld claude LIDE-2600                        # the daily verb: Claude at the tick
 cld claude LIDE-2600 -- --continue          # resume the ticket's last conversation
 cld claude LIDE-2600 -- --model opus        # anything after -- goes to claude
 cld status LIDE-2600                        # anchors, bookmark tips, live session
+cld restart LIDE-2600 --reanchor lide-api@main  # move the anchor onto a new revision
 ```
 
 ## 4. Pause / finish

@@ -33,6 +33,8 @@ if [ -n "${TICKET_MODE:-}" ]; then
     mkdir -p "$TICKET_ROOT"
     TICKET_ROWS=""
     REPO_INDEX=0
+    export CLD_TICKET_ANCHOR_ENV_FILE="/tmp/cld-ticket-anchors.sh"
+    : > "$CLD_TICKET_ANCHOR_ENV_FILE"
 
     # Workspaces live inside the container's ephemeral filesystem under the
     # ticket root. jj stores everything into each origin's .jj/repo/store via
@@ -87,6 +89,7 @@ if [ -n "${TICKET_MODE:-}" ]; then
                 echo "[WARN] poetry install failed for ${REPO_NAME} (continuing)"
         fi
         REPO_ANCHOR="${CLD_BOOT_ANCHOR:-$REPO_BASE}"
+        cld_record_anchor_env "$REPO_NAME" "$REPO_ANCHOR"
         TICKET_ROWS="${TICKET_ROWS}| ${REPO_NAME} | ${REPO_ANCHOR:0:12} | ${REPO_MODE} | ${REPO_BACKEND} |
 "
     done < <(printf '%s' "$CLD_TICKET_MANIFEST" | jq -c '.repos[]')
@@ -102,6 +105,10 @@ if [ -n "${TICKET_MODE:-}" ]; then
     CLAUDE_BIN=$(which claude)
     cat > /tmp/bin/claude <<EOF
 #!/bin/bash
+# Per-repo *_ANCHOR vars: this wrapper is reached via \`docker exec\`, which
+# does not inherit env the entrypoint exported at runtime, so hand them over
+# by sourcing the file cld_record_anchor_env wrote at boot.
+[ -f "$CLD_TICKET_ANCHOR_ENV_FILE" ] && . "$CLD_TICKET_ANCHOR_ENV_FILE"
 exec 9>>/tmp/cld-session.lock
 if ! flock -n 9; then
     echo "Error: a claude session is already live in this ticket container:" >&2

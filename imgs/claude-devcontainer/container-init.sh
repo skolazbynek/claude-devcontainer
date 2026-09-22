@@ -14,6 +14,19 @@ if [ -n "${CLD_BROKER_ENDPOINT:-}" ] && [ -f /run/secrets/broker-key ]; then
     echo "[INFO] cld broker ready: run tests via 'cld broker run-tests <pytest args>'"
 fi
 
+# Append one repo's resolved anchor as `export NAME_ANCHOR=<hash>` to
+# $CLD_TICKET_ANCHOR_ENV_FILE. `docker exec` only inherits env set at
+# container creation, not vars the entrypoint exports at runtime (PID 1
+# idles; harness/shell sessions attach later via exec), so the anchors are
+# handed to those sessions by sourcing this file instead -- see the claude
+# wrapper heredoc in entrypoint-claude-devcontainer.sh and exec_shell in
+# cld/ticket.py.
+cld_record_anchor_env() {
+    local name="$1" anchor="$2" env_name
+    env_name=$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_' | tr -cs 'A-Z0-9_' '_')
+    printf 'export %s_ANCHOR=%q\n' "$env_name" "$anchor" >> "$CLD_TICKET_ANCHOR_ENV_FILE"
+}
+
 # Look up one repo's value in a per-repo env encoding: "<name>=<value>;..."
 # (CLD_REPO_FILES, CLD_REPO_BOOTSTRAP). Echoes nothing when the name is absent.
 cld_repo_kv_get() {

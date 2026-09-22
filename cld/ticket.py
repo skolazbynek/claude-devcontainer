@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import typer
@@ -34,6 +35,7 @@ from cld.docker import (
 from cld.log import get_logger, log_subprocess
 from cld.manifest import (
     ManifestDiff,
+    RepoManifestEntry,
     TicketManifest,
     diff_manifests,
     keep_attached_anchors,
@@ -42,6 +44,7 @@ from cld.manifest import (
 )
 from cld.registry import pick_repos
 from cld.vcs import get_backend
+from cld.vcs.anchor import find_anchor_commit, move_anchor_commit, revert_ops
 
 log = get_logger(__name__)
 
@@ -187,7 +190,8 @@ def _entry_change(old, new) -> str:
             f"anchor {old.anchor_base[:12]} -> {new.anchor_base[:12]} "
             "(takes effect only after shutdown + start; until then the "
             f"manifest keeps {old.anchor_base[:12]} and the workspace "
-            "reattaches at the existing bookmark)"
+            "reattaches at the existing bookmark; to move it now instead: "
+            f"`cld restart <ticket> --reanchor {new.name}@<rev>`)"
         )
     if old.anchor_mode != new.anchor_mode:
         parts.append(
@@ -305,11 +309,18 @@ def exec_claude(ticket: str, extra_args: list[str]) -> None:
 
 def exec_shell(ticket: str) -> None:
     """Interactive bash at the ticket root -- the escape hatch for debugging
-    the sandbox itself (spec section 5). Login shell, so /tmp/bin is on PATH."""
+    the sandbox itself (spec section 5). Login shell, so /tmp/bin is on PATH.
+
+    Sources the per-repo ``*_ANCHOR`` env file before handing off to the login
+    shell: a login shell doesn't read it on its own (no fixed dotfile the
+    entrypoint can rely on across images), and `docker exec` never inherits
+    env the entrypoint exported at its own runtime.
+    """
     slug, container = _require_running(ticket)
     os.execvp("docker", [
         "docker", "exec", "-it", "-w", f"/workspace/{slug}", container,
-        "/bin/bash", "-l",
+        "/bin/bash", "-c",
+        '[ -f /tmp/cld-ticket-anchors.sh ] && . /tmp/cld-ticket-anchors.sh; exec /bin/bash -l',
     ])
 
 
@@ -342,13 +353,106 @@ def stop_ticket(ticket: str) -> None:
     )
 
 
-def restart_ticket(cfg: Config, ticket: str) -> None:
+def _parse_reanchor(manifest: TicketManifest, specs: list[str]) -> dict[str, str]:
+    """``REPO@REV`` parsing for ``--reanchor`` (design section 4).
+
+    A spec splits at the first ``@``; if the part before it names a manifest
+    repo, the rest is the revision. Otherwise, on a one-repo ticket, the whole
+    spec is the revision (so ``main@origin`` works without a repo prefix).
+    Unlike ``_split_rev`` (cld/manifest.py) this never touches the filesystem.
+    """
+    names = {repo.name for repo in manifest.repos}
+    result: dict[str, str] = {}
+    for spec in specs:
+        name, sep, rev = spec.partition("@")
+        if not (sep and name in names):
+            if len(manifest.repos) != 1:
+                raise RuntimeError(
+                    f"'{spec}': not REPO@REV against a known repo, and the ticket "
+                    f"has {len(manifest.repos)} repos -- known: {', '.join(sorted(names))}"
+                )
+            name, rev = manifest.repos[0].name, spec
+        if not rev:
+            raise RuntimeError(f"'{spec}': empty revision after '@'")
+        if name in result:
+            raise RuntimeError(f"'{name}': named twice in --reanchor")
+        result[name] = rev
+    return result
+
+
+def _reanchor_restart(
+    cfg: Config, container: str, manifest: TicketManifest, reanchor: list[str],
+) -> None:
+    """The ``--reanchor`` path of ``restart_ticket`` (design section 5).
+
+    Validates everything -- parsing, the live-session refusal, jj-only, S
+    found, T resolved -- before touching the container, so a rejected request
+    stops nothing. Then stops (not removes) a running container, moves each
+    repo's anchor commit, and only removes + relaunches once every move has
+    succeeded, so a stop without a successful move still has the old
+    container there to warm-start back into.
+    """
+    slug = manifest.ticket
+    targets = _parse_reanchor(manifest, reanchor)
+    if _docker_status(container) == "running" and _session_state(container) == "live":
+        raise RuntimeError(
+            f"a live claude session is running in '{container}'; end it before reanchoring"
+        )
+    by_name = {repo.name: repo for repo in manifest.repos}
+    resolver = ticket_anchor_resolver(cfg, exclude_session=container)
+    plan = []  # (name, backend, s_hash, target)
+    for name, revision in targets.items():
+        repo = by_name[name]
+        backend = get_backend(Path(repo.path))
+        if backend.name != "jj":
+            raise RuntimeError(f"'{name}': --reanchor needs jj, this repo is '{backend.name}'")
+        s_hash = find_anchor_commit(backend, container)
+        target = resolver(repo.path, revision, repo.anchor_mode)
+        plan.append((name, backend, s_hash, target))
+
+    was_running = _docker_status(container) == "running"
+    if was_running:
+        subprocess.run(["docker", "stop", container], check=True)
+
+    done: list[tuple[object, list[str]]] = []
+    moved: dict[str, tuple[str, str]] = {}
+    try:
+        for name, backend, s_hash, target in plan:
+            repo = by_name[name]
+            ops = move_anchor_commit(backend, s_hash, target, repo.anchor_mode, container)
+            done.append((backend, ops))
+            moved[name] = (repo.anchor_base, target)
+    except RuntimeError as e:
+        for backend, ops in reversed(done):
+            revert_ops(backend, ops)
+        if was_running:
+            _warm_start(container, slug)
+        raise RuntimeError(f"reanchor failed, rolled back: {e}") from e
+
+    def _moved_entry(repo: RepoManifestEntry) -> RepoManifestEntry:
+        if repo.name not in moved:
+            return repo
+        return replace(repo, anchor_base=moved[repo.name][1], rev_source="arg")
+
+    new_manifest = replace(manifest, repos=tuple(_moved_entry(r) for r in manifest.repos))
+    subprocess.run(["docker", "rm", container], capture_output=True)
+    _launch(cfg, new_manifest)
+    for name, (old_base, new_base) in moved.items():
+        typer.echo(
+            f"  {name}: anchor {old_base[:12]} -> {new_base[:12]} "
+            f"(undo: cld restart {slug} --reanchor {name}@{old_base})"
+        )
+    typer.echo(f"Ticket '{slug}' recreated with {len(moved)} repo anchor(s) moved.")
+
+
+def restart_ticket(cfg: Config, ticket: str, reanchor: tuple[str, ...] = ()) -> None:
     """Recreate the container from its persisted manifest (spec section 5).
 
     Labels die with ``docker rm``, so the manifest is read back first -- this
     read-before-remove is what fixes v1's parameter-dropping restart. Anchors
     are not re-resolved: ``anchor_base`` is already a hash, and each repo's
-    workspace reattaches at its bookmark anyway (design section 2.3).
+    workspace reattaches at its bookmark anyway (design section 2.3) --
+    unless *reanchor* names repos to move first (design-anchor-move section 5).
     """
     slug = ticket_slug(ticket)
     container = ticket_container_name(slug)
@@ -357,6 +461,9 @@ def restart_ticket(cfg: Config, ticket: str) -> None:
             f"no ticket container '{container}' to restart; `cld start {slug}` creates one"
         )
     manifest = read_manifest(container)
+    if reanchor:
+        _reanchor_restart(cfg, container, manifest, list(reanchor))
+        return
     _stop_and_remove(container)
     _launch(cfg, manifest)
     typer.echo(

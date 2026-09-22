@@ -950,6 +950,7 @@ def resolve_anchor_checked(
     revision: str,
     mode: str = "isolated",
     caller_kind: str = "agent",
+    exclude_session: str = "",
 ) -> str:
     """Resolve *revision* to a commit hash, checking overlap with every other
     cld container's reach in the same repo.
@@ -986,6 +987,11 @@ def resolve_anchor_checked(
     jj-only -- peer-side anchor staging has no git equivalent; git repos keep
     weaker guarantees. Anchoring on a finished (reaped) sibling's deliverable
     branch still passes in either mode.
+
+    ``exclude_session``, when set, drops the occupant record whose ``name``
+    matches it before the check runs -- a ticket reanchoring itself must not
+    be blocked or warned about its own live reach (``cld/ticket.py``
+    ``_reanchor_restart``).
     """
     from cld.vcs import get_backend
     from cld.vcs.anchor import resolve_anchor
@@ -999,7 +1005,8 @@ def resolve_anchor_checked(
     host_repo = str(Path(to_host_path(str(repo_root), cfg)).resolve())
     occupants = [
         c for c in docker_occupant_list()
-        if c.get("manifest_error") or (c["repo_root"] == host_repo and c["anchor_base"])
+        if c["name"] != exclude_session
+        and (c.get("manifest_error") or (c["repo_root"] == host_repo and c["anchor_base"]))
     ]
     if not occupants:
         return anchor
@@ -1069,13 +1076,21 @@ def resolve_anchor_checked(
     return anchor
 
 
-def ticket_anchor_resolver(cfg: Config) -> Callable[[str, str, str], str]:
+def ticket_anchor_resolver(
+    cfg: Config, exclude_session: str = "",
+) -> Callable[[str, str, str], str]:
     """The ``resolve_manifest`` resolver for the ticket launch path: pins each
     repo's ``(path, revision, mode)`` through the overlap check with ticket
-    semantics -- warn on other tickets' trees, block on headless reach."""
+    semantics -- warn on other tickets' trees, block on headless reach.
+
+    ``exclude_session``, forwarded to ``resolve_anchor_checked``, is set by a
+    reanchoring restart to the ticket's own container name so it is not
+    checked against its own live reach.
+    """
     def resolve(path: str, revision: str, mode: str) -> str:
         return resolve_anchor_checked(
             cfg, Path(path), revision, mode, caller_kind="ticket",
+            exclude_session=exclude_session,
         )
     return resolve
 

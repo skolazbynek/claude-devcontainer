@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from cld.vcs.anchor import find_anchor_commit, move_anchor_commit, revert_ops
 from cld.vcs.jj import JjBackend
 from cld.vcs.scratch import (
     SCRATCH_DIR,
@@ -258,3 +259,210 @@ class TestStageFromEnvDefaultPayload:
         monkeypatch.delenv("AGENT_SCRATCH", raising=False)
         with pytest.raises(RuntimeError, match="AGENT_SCRATCH is required"):
             stage_from_env(default_payload=False)
+
+
+# --- Anchor-move helpers (cld.vcs.anchor) ------------------------------------
+#
+# Mirrors scratchpad design "move a ticket container's anchor commit"
+# section 7 step 1: find_anchor_commit / move_anchor_commit / revert_ops.
+
+
+def _rev(jj_repo, revset: str, template: str = "commit_id") -> str:
+    result = jj_repo.run(["log", "-r", revset, "--no-graph", "-T", template])
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def _op_head(jj_repo) -> str:
+    result = jj_repo.run(["op", "log", "--no-graph", "-T", "id", "-n", "1"])
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def _new_commit(path: Path, filename: str, content: str, message: str) -> None:
+    (path / filename).write_text(content)
+    subprocess.run(["jj", "commit", "-m", message], cwd=path, check=True, capture_output=True)
+
+
+def _stage_and_work(jj_repo, tmp_path, session, mode="isolated", base=None):
+    """Stage S (as the container entrypoint would) and add one work commit C
+    on top, bookmarked at *session* -- the shape ``move_anchor_commit``
+    operates on. Returns (base, s_hash, c_hash)."""
+    base = base if base is not None else _add_second_commit(jj_repo.repo_root)
+    peer = _make_peer_workspace(jj_repo, base, tmp_path)
+    s_hash = stage_in_workspace(peer, session, {"session": f"{session}\n".encode()}, mode=mode)
+    subprocess.run(["jj", "bookmark", "create", session, "-r", "@"],
+                    cwd=peer, check=True, capture_output=True)
+    (peer / "work.txt").write_text("work\n")
+    subprocess.run(["jj", "commit", "-m", "C"], cwd=peer, check=True, capture_output=True)
+    c_hash = _rev(jj_repo, "@-") if False else subprocess.run(
+        ["jj", "log", "-r", "@-", "--no-graph", "-T", "commit_id"],
+        cwd=peer, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    return base, s_hash, c_hash
+
+
+class TestFindAnchorCommit:
+    def test_finds_the_staged_scratch_commit(self, jj_repo, tmp_path):
+        session = "cld_ticket_find"
+        _base, s_hash, _c = _stage_and_work(jj_repo, tmp_path, session)
+        assert find_anchor_commit(jj_repo, session) == s_hash
+
+    def test_no_match_raises(self, jj_repo, tmp_path):
+        with pytest.raises(RuntimeError, match="found 0"):
+            find_anchor_commit(jj_repo, "cld_ticket_nonexistent")
+
+    def test_several_matches_raises(self, jj_repo, tmp_path):
+        """Two unrelated scratch commits both ancestors of a merge commit that
+        carries the bookmark -- heads() returns both, which is unsafe to pick
+        from automatically."""
+        session = "cld_ticket_dup"
+        base = _add_second_commit(jj_repo.repo_root)
+        jj_repo.run(["new", base])
+        (jj_repo.repo_root / "one.txt").write_text("one\n")
+        subprocess.run(["jj", "commit", "-m", f"cld anchor: {session} mode=isolated"],
+                        cwd=jj_repo.repo_root, check=True, capture_output=True)
+        first = _rev(jj_repo, "@-")
+        jj_repo.run(["new", base])
+        (jj_repo.repo_root / "two.txt").write_text("two\n")
+        subprocess.run(["jj", "commit", "-m", f"cld anchor: {session} mode=isolated"],
+                        cwd=jj_repo.repo_root, check=True, capture_output=True)
+        second = _rev(jj_repo, "@-")
+        jj_repo.run(["new", first, second, "-m", "merge"])
+        subprocess.run(["jj", "bookmark", "create", session, "-r", "@"],
+                        cwd=jj_repo.repo_root, check=True, capture_output=True)
+        with pytest.raises(RuntimeError, match="found 2"):
+            find_anchor_commit(jj_repo, session)
+
+
+class TestMoveAnchorCommit:
+    def test_isolated_move_leaves_old_children_behind(self, jj_repo, tmp_path):
+        """isolated: A --- C stays behind; T --- S' is the new shape."""
+        session = "cld_ticket_iso"
+        base, s_hash, c_hash = _stage_and_work(jj_repo, tmp_path, session)
+        jj_repo.run(["new", "root()", "-m", "T"])
+        target = _rev(jj_repo, "@")
+
+        ops = move_anchor_commit(jj_repo, s_hash, target, "isolated", session)
+        assert ops
+
+        new_s = _rev(jj_repo, "description(glob:'cld anchor: " + session + " *')")
+        assert _rev(jj_repo, f"parents({new_s})") == target
+        # C is left behind, reparented straight onto base (S's old parent).
+        assert _rev(jj_repo, f"{c_hash} & {base}::") == c_hash
+
+    def test_shared_move_inserts_after_target(self, jj_repo, tmp_path):
+        """shared: T's old children move onto S'; T --- S' --- <old children>."""
+        session = "cld_ticket_shared"
+        base, s_hash, _c = _stage_and_work(jj_repo, tmp_path, session, mode="shared")
+        jj_repo.run(["new", "root()", "-m", "T"])
+        target = _rev(jj_repo, "@")
+        jj_repo.run(["new", target])
+        (jj_repo.repo_root / "d1.txt").write_text("d1\n")
+        subprocess.run(["jj", "commit", "-m", "D1"], cwd=jj_repo.repo_root, check=True, capture_output=True)
+        jj_repo.run(["new", target])
+        (jj_repo.repo_root / "d2.txt").write_text("d2\n")
+        subprocess.run(["jj", "commit", "-m", "D2"], cwd=jj_repo.repo_root, check=True, capture_output=True)
+
+        ops = move_anchor_commit(jj_repo, s_hash, target, "shared", session)
+        assert ops
+
+        new_s = _rev(jj_repo, "description(glob:'cld anchor: " + session + " *')")
+        assert _rev(jj_repo, f"parents({new_s})") == target
+        # D1/D2 were themselves rewritten (reparented onto S') by the rebase,
+        # so they must be re-found by description rather than their stale
+        # pre-move commit ids.
+        new_d1 = _rev(jj_repo, 'description(exact:"D1\n")')
+        new_d2 = _rev(jj_repo, 'description(exact:"D2\n")')
+        assert _rev(jj_repo, f"{new_d1} & {new_s}::") == new_d1
+        assert _rev(jj_repo, f"{new_d2} & {new_s}::") == new_d2
+
+    def test_target_inside_own_work_is_allowed(self, jj_repo, tmp_path):
+        """The anchor may move into its own descendants (design decision)."""
+        session = "cld_ticket_selfmove"
+        _base, s_hash, c_hash = _stage_and_work(jj_repo, tmp_path, session)
+
+        ops = move_anchor_commit(jj_repo, s_hash, c_hash, "isolated", session)
+        assert ops
+        # C is both S's old child and the rebase target, so jj rewrites it as
+        # part of the same transaction -- re-find it by description rather
+        # than its stale pre-move commit id.
+        new_s = _rev(jj_repo, "description(glob:'cld anchor: " + session + " *')")
+        new_c = _rev(jj_repo, 'description(exact:"C\n")')
+        assert _rev(jj_repo, f"parents({new_s})") == new_c
+
+    def test_bookmark_rule_moves_bookmark_left_behind(self, jj_repo, tmp_path):
+        """After an isolated move, the bookmark (still on C, which is left
+        behind) must be force-moved onto S'."""
+        session = "cld_ticket_bm"
+        base, s_hash, c_hash = _stage_and_work(jj_repo, tmp_path, session)
+        assert _rev(jj_repo, session) == c_hash  # sanity: bookmark starts on C
+        jj_repo.run(["new", "root()", "-m", "T"])
+        target = _rev(jj_repo, "@")
+
+        move_anchor_commit(jj_repo, s_hash, target, "isolated", session)
+
+        new_s = _rev(jj_repo, "description(glob:'cld anchor: " + session + " *')")
+        assert _rev(jj_repo, session) == new_s
+
+    def test_bookmark_already_in_place_is_left_alone(self, jj_repo, tmp_path):
+        """shared move: the bookmark (on the working copy above S) already
+        descends from S' -- no bookmark op should run."""
+        session = "cld_ticket_bmok"
+        base, s_hash, c_hash = _stage_and_work(jj_repo, tmp_path, session, mode="shared")
+        jj_repo.run(["new", "root()", "-m", "T"])
+        target = _rev(jj_repo, "@")
+        before_bookmark = _rev(jj_repo, session)
+
+        move_anchor_commit(jj_repo, s_hash, target, "shared", session)
+
+        # The bookmark's own commit was rewritten by the shared rebase (it
+        # descends from S), but it must still be inside S'::, and jj's normal
+        # bookmark-follows-rewrite behavior must be the only thing that moved it.
+        new_s = _rev(jj_repo, "description(glob:'cld anchor: " + session + " *')")
+        assert _rev(jj_repo, f"{session} & {new_s}::") == _rev(jj_repo, session)
+
+    def test_already_in_place_makes_no_new_op(self, jj_repo, tmp_path):
+        session = "cld_ticket_noop"
+        base, s_hash, _c = _stage_and_work(jj_repo, tmp_path, session)
+
+        op_before = _op_head(jj_repo)
+        ops = move_anchor_commit(jj_repo, s_hash, base, "isolated", session)
+        assert ops == []
+        assert _op_head(jj_repo) == op_before
+
+    def test_conflict_raises_and_reverts(self, jj_repo, tmp_path):
+        """A target that already touched the same scratch path in a
+        conflicting way must raise and leave the repo exactly as it was."""
+        session = "cld_ticket_conflict"
+        base, s_hash, _c = _stage_and_work(jj_repo, tmp_path, session)
+        jj_repo.run(["new", base])
+        (jj_repo.repo_root / SCRATCH_DIR).mkdir(exist_ok=True)
+        (jj_repo.repo_root / SCRATCH_DIR / "session").write_text("colliding content\n")
+        subprocess.run(["jj", "commit", "-m", "T"], cwd=jj_repo.repo_root, check=True, capture_output=True)
+        target = _rev(jj_repo, "@-")
+
+        with pytest.raises(RuntimeError, match="conflict"):
+            move_anchor_commit(jj_repo, s_hash, target, "isolated", session)
+        # revert_ops undoes by appending new operations, not by rewinding the
+        # op log, so op-log-head equality isn't the right check here -- the
+        # repo state (no conflicts, S back on its original parent) is.
+        assert _rev(jj_repo, "conflicts()") == ""
+        assert _rev(jj_repo, f"parents({s_hash})") == base
+
+
+class TestRevertOps:
+    def test_reverts_newest_first(self, jj_repo, tmp_path):
+        session = "cld_ticket_revert"
+        base, s_hash, _c = _stage_and_work(jj_repo, tmp_path, session)
+        jj_repo.run(["new", "root()", "-m", "T"])
+        target = _rev(jj_repo, "@")
+
+        op_before = _op_head(jj_repo)
+        ops = move_anchor_commit(jj_repo, s_hash, target, "isolated", session)
+        assert ops
+
+        revert_ops(jj_repo, ops)
+        assert _rev(jj_repo, f"parents({s_hash})") == base
+        # The bookmark should have followed the revert back onto C.
+        assert _rev(jj_repo, session) != ""

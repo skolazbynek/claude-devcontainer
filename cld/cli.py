@@ -645,12 +645,23 @@ def stop(ticket: str = typer.Argument(..., help=_TICKET_HELP)):
 
 @app.command()
 @_handle_errors
-def restart(ticket: str = typer.Argument(..., help=_TICKET_HELP)):
-    """Recreate a ticket container from its persisted manifest; workspaces reattach at their bookmarks."""
+def restart(
+    ticket: str = typer.Argument(..., help=_TICKET_HELP),
+    reanchor: list[str] = typer.Option(
+        [], "--reanchor", metavar="REPO@REV",
+        help="Move a repo's anchor commit onto REV before recreating "
+        "(repeatable; bare REV allowed on a one-repo ticket).",
+    ),
+):
+    """Recreate a ticket container from its persisted manifest; workspaces reattach at their bookmarks.
+
+    With --reanchor, moves each named repo's anchor commit first (design
+    docs/anchor-move design section 3-5).
+    """
     require_docker()
     cfg = Config.from_env()
     setup_logging(cfg)
-    restart_ticket(cfg, ticket)
+    restart_ticket(cfg, ticket, reanchor)
 
 
 @app.command()

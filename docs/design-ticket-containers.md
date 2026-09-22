@@ -139,6 +139,14 @@ see -- a newly requested anchor only becomes real after shutdown + start. A
 kept name whose `path` changed points at a different store and does take the
 new anchor at once.
 
+### 2.4 Moving the anchor: `cld restart --reanchor`
+
+`cld restart <ticket> --reanchor <repo>@<rev>` (repeatable) moves a repo's
+scratch anchor commit onto a new revision instead of leaving it where first
+launch put it -- see the anchor-move design doc, sections 3 to 5, for the jj
+rebase mechanics, the overlap-check exclusion, the stop/move/rm/relaunch
+ordering and its undo. `jj` only; refuses on a live claude session.
+
 ## 3. The effective-anchor problem
 
 **The problem.** In isolated mode the editable boundary is scratch commit B,

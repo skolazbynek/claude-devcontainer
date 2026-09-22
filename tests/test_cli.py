@@ -201,6 +201,18 @@ class TestTicketVerbs:
         result, mocks = self._invoke(["restart", "t1"], names=["restart_ticket"])
         assert result.exit_code == 0, result.output
         assert mocks["restart_ticket"].call_args.args[1] == "t1"
+        assert mocks["restart_ticket"].call_args.args[2] == []
+
+    def test_restart_reanchor_repeats_in_order(self):
+        result, mocks = self._invoke(
+            ["restart", "t1", "--reanchor", "lide-api@feature-x",
+             "--reanchor", "diskuze-api@main"],
+            names=["restart_ticket"],
+        )
+        assert result.exit_code == 0, result.output
+        assert mocks["restart_ticket"].call_args.args[2] == [
+            "lide-api@feature-x", "diskuze-api@main",
+        ]
 
     def test_shutdown_requires_ticket_xor_all(self):
         for argv in (["shutdown"], ["shutdown", "t1", "--all"]):

@@ -272,6 +272,7 @@ class TestStartRepoSetChange:
         assert f"~ lide-api  anchor {'b' * 12} -> {'d' * 12}" in out
         assert "takes effect only after shutdown + start" in out
         assert "reattaches at the existing bookmark" in out
+        assert "cld restart <ticket> --reanchor lide-api@<rev>" in out
 
     def test_kept_repo_launches_with_its_old_anchor(self, tmp_path):
         """A kept repo reattaches at its existing bookmark (a child of the OLD
@@ -335,6 +336,230 @@ class TestRestartTicket:
         with patch("cld.ticket._docker_status", return_value="absent"), \
              pytest.raises(RuntimeError, match="no ticket container"):
             restart_ticket(Config(), "lide-2600")
+
+
+class TestReanchorRestart:
+    """``cld restart --reanchor`` (anchor-move design section 5)."""
+
+    def _manifest(self, *, mode="isolated"):
+        return TicketManifest(ticket="lide-2600", repos=(
+            RepoManifestEntry(
+                name="lide-api", path="/home/u/lide-api",
+                anchor_base="a" * 40, anchor_mode=mode, rev_source="registry",
+            ),
+            RepoManifestEntry(
+                name="diskuze-api", path="/home/u/diskuze-api",
+                anchor_base="c" * 40, rev_source="registry",
+            ),
+        ))
+
+    def _jj_backend(self, name="jj"):
+        backend = MagicMock()
+        backend.name = name
+        return backend
+
+    def _patches(self, manifest, *, status="running", session="none",
+                 target="d" * 40, s_hash="s" * 40, resolver_calls=None,
+                 move_side_effect=None, backend=None):
+        backend = backend or self._jj_backend()
+        resolver_calls = resolver_calls if resolver_calls is not None else []
+
+        def fake_resolver(cfg, exclude_session=""):
+            def resolve(path, revision, mode):
+                resolver_calls.append((path, revision, mode, exclude_session))
+                return target
+            return resolve
+
+        move = MagicMock(return_value=["op2", "op1"])
+        if move_side_effect is not None:
+            move.side_effect = move_side_effect
+
+        return dict(
+            docker_status=patch("cld.ticket._docker_status", return_value=status),
+            read_manifest=patch("cld.ticket.read_manifest", return_value=manifest),
+            session_state=patch("cld.ticket._session_state", return_value=session),
+            get_backend=patch("cld.ticket.get_backend", return_value=backend),
+            find_anchor=patch("cld.ticket.find_anchor_commit", return_value=s_hash),
+            resolver=patch("cld.ticket.ticket_anchor_resolver", fake_resolver),
+            move=patch("cld.ticket.move_anchor_commit", move),
+            revert=patch("cld.ticket.revert_ops"),
+            subprocess_run=patch("cld.ticket.subprocess.run", return_value=_res()),
+            launch=patch("cld.ticket._launch"),
+            warm_start=patch("cld.ticket._warm_start"),
+        ), backend, move
+
+    def test_no_reanchor_keeps_the_plain_order(self):
+        manifest = self._manifest()
+        order: list[str] = []
+        with patch("cld.ticket._docker_status", return_value="stopped"), \
+             patch("cld.ticket.read_manifest", return_value=manifest), \
+             patch("cld.ticket._stop_and_remove", side_effect=lambda c: order.append("rm")), \
+             patch("cld.ticket._launch", side_effect=lambda c, m: order.append("launch")):
+            restart_ticket(Config(), "lide-2600")
+        assert order == ["rm", "launch"]
+
+    def test_running_ticket_stops_moves_removes_and_launches(self):
+        manifest = self._manifest()
+        calls: list[tuple] = []
+        patches, backend, move = self._patches(manifest, resolver_calls=(rc := []))
+        with patches["docker_status"], patches["read_manifest"], patches["session_state"], \
+             patches["get_backend"], patches["find_anchor"], patches["resolver"], \
+             patches["move"], patches["revert"], \
+             patch("cld.ticket.subprocess.run", side_effect=lambda *a, **k: (calls.append(a[0]), _res())[1]), \
+             patches["launch"] as launch, patches["warm_start"] as warm:
+            restart_ticket(Config(), "lide-2600", ["lide-api@feature-x"])
+        assert calls == [["docker", "stop", "cld_ticket_lide-2600"], ["docker", "rm", "cld_ticket_lide-2600"]]
+        warm.assert_not_called()
+        new_manifest = launch.call_args.args[1]
+        by_name = {r.name: r for r in new_manifest.repos}
+        assert by_name["lide-api"].anchor_base == "d" * 40
+        assert by_name["lide-api"].rev_source == "arg"
+        # Untouched repo keeps its old anchor.
+        assert by_name["diskuze-api"].anchor_base == "c" * 40
+        assert rc == [("/home/u/lide-api", "feature-x", "isolated", "cld_ticket_lide-2600")]
+
+    def test_stopped_ticket_moves_without_docker_stop_or_start(self):
+        manifest = self._manifest()
+        calls: list[tuple] = []
+        patches, backend, move = self._patches(manifest, status="stopped")
+        with patches["docker_status"], patches["read_manifest"], patches["session_state"], \
+             patches["get_backend"], patches["find_anchor"], patches["resolver"], \
+             patches["move"], patches["revert"], \
+             patch("cld.ticket.subprocess.run", side_effect=lambda *a, **k: (calls.append(a[0]), _res())[1]), \
+             patches["launch"], patches["warm_start"] as warm:
+            restart_ticket(Config(), "lide-2600", ["lide-api@feature-x"])
+        assert ["docker", "stop", "cld_ticket_lide-2600"] not in calls
+        assert calls == [["docker", "rm", "cld_ticket_lide-2600"]]
+        warm.assert_not_called()
+
+    def test_live_session_is_refused(self):
+        manifest = self._manifest()
+        patches, backend, move = self._patches(manifest, session="live")
+        with patches["docker_status"], patches["read_manifest"], patches["session_state"], \
+             patches["get_backend"], patches["find_anchor"], patches["resolver"], \
+             patches["move"] as move_mock, patches["subprocess_run"] as run, \
+             patches["launch"] as launch, \
+             pytest.raises(RuntimeError, match="live claude session"):
+            restart_ticket(Config(), "lide-2600", ["lide-api@feature-x"])
+        move_mock.assert_not_called()
+        run.assert_not_called()
+        launch.assert_not_called()
+
+    def test_git_repo_is_refused(self):
+        manifest = self._manifest()
+        patches, backend, move = self._patches(manifest, backend=self._jj_backend("git"))
+        with patches["docker_status"], patches["read_manifest"], patches["session_state"], \
+             patches["get_backend"], patches["find_anchor"], patches["resolver"], \
+             patches["move"] as move_mock, patches["subprocess_run"] as run, \
+             pytest.raises(RuntimeError, match="needs jj"):
+            restart_ticket(Config(), "lide-2600", ["lide-api@feature-x"])
+        move_mock.assert_not_called()
+        run.assert_not_called()
+
+    def test_unknown_repo_is_a_parse_error(self):
+        manifest = self._manifest()
+        with patch("cld.ticket._docker_status", return_value="running"), \
+             patch("cld.ticket.read_manifest", return_value=manifest), \
+             pytest.raises(RuntimeError, match="not REPO@REV"):
+            restart_ticket(Config(), "lide-2600", ["nope@feature-x"])
+
+    def test_bare_revision_on_two_repo_ticket_is_a_parse_error(self):
+        manifest = self._manifest()
+        with patch("cld.ticket._docker_status", return_value="running"), \
+             patch("cld.ticket.read_manifest", return_value=manifest), \
+             pytest.raises(RuntimeError, match="not REPO@REV"):
+            restart_ticket(Config(), "lide-2600", ["feature-x"])
+
+    def test_repo_named_twice_is_a_parse_error(self):
+        manifest = self._manifest()
+        with patch("cld.ticket._docker_status", return_value="running"), \
+             patch("cld.ticket.read_manifest", return_value=manifest), \
+             pytest.raises(RuntimeError, match="named twice"):
+            restart_ticket(Config(), "lide-2600", ["lide-api@x", "lide-api@y"])
+
+    def test_bare_revision_on_one_repo_ticket_is_accepted(self):
+        manifest = TicketManifest(ticket="lide-2600", repos=(
+            RepoManifestEntry(name="lide-api", path="/home/u/lide-api", anchor_base="a" * 40),
+        ))
+        patches, backend, move = self._patches(manifest, resolver_calls=(rc := []))
+        with patches["docker_status"], patches["read_manifest"], patches["session_state"], \
+             patches["get_backend"], patches["find_anchor"], patches["resolver"], \
+             patches["move"], patches["revert"], patches["subprocess_run"], \
+             patches["launch"], patches["warm_start"]:
+            restart_ticket(Config(), "lide-2600", ["feature-x"])
+        assert rc == [("/home/u/lide-api", "feature-x", "isolated", "cld_ticket_lide-2600")]
+
+    def test_second_repo_failing_reverts_the_first_and_warm_starts(self):
+        manifest = self._manifest()
+
+        def move_side_effect(backend, s_hash, target, mode, session):
+            if target == "d" * 40:
+                return ["op2", "op1"]
+            raise RuntimeError("reanchor introduced new conflicts: abc")
+
+        def fake_resolver(cfg, exclude_session=""):
+            def resolve(path, revision, mode):
+                return "d" * 40 if "lide-api" in path else "e" * 40
+            return resolve
+
+        with patch("cld.ticket._docker_status", return_value="running"), \
+             patch("cld.ticket.read_manifest", return_value=manifest), \
+             patch("cld.ticket._session_state", return_value="none"), \
+             patch("cld.ticket.get_backend", return_value=self._jj_backend()), \
+             patch("cld.ticket.find_anchor_commit", return_value="s" * 40), \
+             patch("cld.ticket.ticket_anchor_resolver", fake_resolver), \
+             patch("cld.ticket.move_anchor_commit", side_effect=move_side_effect), \
+             patch("cld.ticket.revert_ops") as revert, \
+             patch("cld.ticket.subprocess.run", return_value=_res()) as run, \
+             patch("cld.ticket._launch") as launch, \
+             patch("cld.ticket._warm_start") as warm, \
+             pytest.raises(RuntimeError, match="reanchor failed"):
+            restart_ticket(Config(), "lide-2600", ["lide-api@feature-x", "diskuze-api@feature-y"])
+        # Only the successfully-moved repo's ops get reverted.
+        revert.assert_called_once_with(revert.call_args.args[0], ["op2", "op1"])
+        warm.assert_called_once()
+        launch.assert_not_called()
+        assert ["docker", "rm", "cld_ticket_lide-2600"] not in [c.args[0] for c in run.call_args_list]
+
+    def test_second_repo_failing_on_a_stopped_ticket_does_not_warm_start(self):
+        manifest = self._manifest()
+
+        def move_side_effect(backend, s_hash, target, mode, session):
+            if target == "d" * 40:
+                return ["op2", "op1"]
+            raise RuntimeError("reanchor introduced new conflicts: abc")
+
+        def fake_resolver(cfg, exclude_session=""):
+            def resolve(path, revision, mode):
+                return "d" * 40 if "lide-api" in path else "e" * 40
+            return resolve
+
+        with patch("cld.ticket._docker_status", return_value="stopped"), \
+             patch("cld.ticket.read_manifest", return_value=manifest), \
+             patch("cld.ticket._session_state", return_value="none"), \
+             patch("cld.ticket.get_backend", return_value=self._jj_backend()), \
+             patch("cld.ticket.find_anchor_commit", return_value="s" * 40), \
+             patch("cld.ticket.ticket_anchor_resolver", fake_resolver), \
+             patch("cld.ticket.move_anchor_commit", side_effect=move_side_effect), \
+             patch("cld.ticket.revert_ops"), \
+             patch("cld.ticket.subprocess.run", return_value=_res()) as run, \
+             patch("cld.ticket._launch") as launch, \
+             patch("cld.ticket._warm_start") as warm, \
+             pytest.raises(RuntimeError, match="reanchor failed"):
+            restart_ticket(Config(), "lide-2600", ["lide-api@feature-x", "diskuze-api@feature-y"])
+        warm.assert_not_called()
+        launch.assert_not_called()
+        assert ["docker", "stop", "cld_ticket_lide-2600"] not in [c.args[0] for c in run.call_args_list]
+
+    def test_exclude_session_reaches_the_resolver(self):
+        manifest = self._manifest()
+        patches, backend, move = self._patches(manifest, resolver_calls=(rc := []))
+        with patches["docker_status"], patches["read_manifest"], patches["session_state"], \
+             patches["get_backend"], patches["find_anchor"], patches["resolver"], \
+             patches["move"], patches["revert"], patches["subprocess_run"], \
+             patches["launch"], patches["warm_start"]:
+            restart_ticket(Config(), "lide-2600", ["lide-api@feature-x"])
+        assert rc[0][3] == "cld_ticket_lide-2600"
 
 
 class TestStopTicket:
@@ -466,8 +691,13 @@ class TestExecVerbs:
         with patch("cld.ticket._docker_status", return_value="running"), \
              patch("cld.ticket.os.execvp") as execvp:
             exec_shell("lide-2600")
-        assert execvp.call_args.args[1][-2:] == ["/bin/bash", "-l"]
-        assert "-it" in execvp.call_args.args[1]
+        args = execvp.call_args.args[1]
+        assert args[-3] == "/bin/bash"
+        assert "-it" in args
+        # Sources the per-repo *_ANCHOR env file before handing off to the
+        # login shell (docker exec doesn't inherit runtime-exported env).
+        assert "cld-ticket-anchors.sh" in args[-1]
+        assert args[-1].endswith("exec /bin/bash -l")
 
 
 class TestSessionState:
