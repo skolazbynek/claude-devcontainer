@@ -132,7 +132,10 @@ cld_boot_workspace() {
         echo "Error: jj workspace add failed (first launch)" >&2
         return 1
     fi
-    local scratch_cmd=(python3 -m cld.vcs.scratch)
+    # -P: don't let `-m` put this freshly checked-out workspace's own `cld/`
+    # package ahead of the installed one on sys.path (matters when booting cld
+    # itself -- otherwise a stale in-repo cld.vcs.scratch runs unnoticed).
+    local scratch_cmd=(python3 -P -m cld.vcs.scratch)
     [ "$scratch_source" = "default" ] && scratch_cmd+=(--default-payload)
     if ! b_hash=$(cd "$workspace" && \
             WORKSPACE_CURRENT="$workspace" AGENT_ANCHOR_MODE="$mode" "${scratch_cmd[@]}"); then
