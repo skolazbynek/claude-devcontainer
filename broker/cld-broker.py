@@ -11,8 +11,14 @@
 # not caller input): the single `org.cld.repo-root` for v1 kinds, or -- for a
 # multi-repo ticket container -- the flat `org.cld.repo.<name>` labels, picked
 # by a leading `--repo <name>` in the run-tests/graphql argv
-# (resolve_repo_target). The caller controls only: the action, a validated
+# (LabelCaller.repo). The caller controls only: the action, a validated
 # session id, and the decoded argv. Nothing is ever eval'd.
+#
+# Two domains, joined only by the Caller protocol: a caller source answers
+# who called and what they may reach, and the actions consume those answers as
+# plain values. Two sources exist: LabelCaller (docker labels) for the sshd
+# route, and CliCaller (command-line flags, via `cld-brokerctl run`) for
+# running an action from the host without any container.
 #
 # v1 sessions are all named `cld_agent_*` (task-agents -- the prefix is a
 # leftover of the removed standing repo agent; kind is a label, not a name, see
@@ -30,13 +36,13 @@
 #
 # ADD AN ACTION: define a function named `action_<name>` (hyphens in <name>
 # become underscores, so `run-tests` -> `action_run_tests`). It receives the
-# shared context prepared by the dispatcher -- a Session with the validated
-# session id and its host repo path -- and the decoded argv as a list.
-# Revision/secrets are per-action -- run-tests resolves them via
-# `resolve_test_context`; add your own helper if your action needs more.
+# Caller the dispatcher built and the decoded argv as a list, and asks the
+# Caller only for what it needs (repo, revision, targets) -- run-tests does it
+# via `resolve_test_context`.
 #
 # Standard library only: the host's python3 runs this file directly, with no
 # venv and no `cld` import.
+import argparse
 import base64
 import http.client
 import json
@@ -50,10 +56,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, NamedTuple, NoReturn, TextIO
+from typing import IO, NamedTuple, NoReturn, Protocol, Self, TextIO
 
 # Broker settings: the process environment overlaid with broker.conf (load_conf).
 CONF: dict[str, str] = {}
@@ -75,13 +81,29 @@ _DEFAULTS = {
 _ASSIGNMENT_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", re.DOTALL)
 
 
-@dataclass
-class Session:
-    """The validated caller: session id (== container name), its org.cld.kind
-    label, and its host repo -- empty for a ticket until resolve_repo_target."""
+class Caller(Protocol):
+    """The caller-derived inputs of every action. Methods are lazy, so an action
+    never pays for -- or fails on -- an input it does not use."""
 
-    name: str
-    kind: str
+    name: str  # session id: names the caller's own resources (graphql server, task-agent parent)
+
+    def repo(self, selector: str) -> str:
+        """The host repo to act on; *selector* is the `--repo` name, "" if absent."""
+        ...
+
+    def revision(self, repo: str) -> str | None:
+        """The caller's current commit in *repo*; None if it cannot be resolved."""
+        ...
+
+    def targets(self) -> list[str]:
+        """Host repos the caller may launch task-agents for."""
+        ...
+
+
+class Scope(NamedTuple):
+    """A resolved (session, repo) pair: what the graphql ops act on."""
+
+    session: str
     repo: str
 
 
@@ -203,12 +225,6 @@ def _forget_workspace(repo: str, workspace: str) -> None:
     _capture(["jj", "-R", repo, "--ignore-working-copy", "workspace", "forget", workspace])
 
 
-def _tip_argv(ctx: Session) -> list[str]:
-    # See resolve_test_context for why `<session>@` and --ignore-working-copy.
-    return ["jj", "-R", ctx.repo, "--ignore-working-copy", "log", "--no-graph", "-n1",
-            "-r", f"{ctx.name}@", "-T", "commit_id"]
-
-
 # Read a single quoted-string key from a flat cld TOML config (e.g. .cld/config.toml).
 # Empty if the file or key is absent. Avoids a TOML parser in the broker.
 def cld_conf_get(file: str, key: str) -> str:
@@ -218,6 +234,118 @@ def cld_conf_get(file: str, key: str) -> str:
         return ""
     pattern = re.compile(rf'\s*{re.escape(key)}\s*=\s*"([^"]*)"')
     return next((match[1] for line in lines if (match := pattern.match(line))), "")
+
+
+# ---- caller sources -------------------------------------------------------
+
+@dataclass
+class LabelCaller:
+    """The sshd route's Caller: the session container's host-set docker labels
+    (org.cld.kind, org.cld.repo-root or org.cld.repo.<name>, org.cld.targets)
+    and its jj workspace. Labels are set at launch, never by the caller, which
+    is what makes them an authorization source."""
+
+    name: str
+    kind: str
+    repo_root: str  # empty for a ticket, which carries org.cld.repo.<name> labels instead
+
+    # The session doubles as the container name. A ticket's repo stays unresolved
+    # here: it depends on the action's --repo, see repo().
+    @classmethod
+    def from_session(cls, session: str) -> Self:
+        if (kind := _label(session, "org.cld.kind")) is None:
+            _die(f"no cld container for session {session}", 3)
+        repo_root = ""
+        if kind != "ticket":
+            repo_root = _label(session, "org.cld.repo-root") or ""
+            if not (repo_root and _is_repo(repo_root)):
+                _die(f"no task-agent container for session {session}", 3)
+        return cls(session, kind, repo_root)
+
+    # Repo selection (docs/design-ticket-containers.md section 6.1): a ticket
+    # container mounts several repos, resolved against its flat
+    # `org.cld.repo.<name>` labels -- the flat encoding keeps this to plain line
+    # parsing. No selector with exactly one labeled repo uses it (the single-repo
+    # convenience); several without one is an error. A v1 kind keeps its
+    # repo-root and refuses a selector. Names are matched against enumerated
+    # labels, never spliced into an inspect format string, so a hostile name
+    # cannot template-inject.
+    def repo(self, selector: str) -> str:
+        if self.kind != "ticket":
+            if selector:
+                _die(f"denied: --repo is only for ticket containers ({self.name} is '{self.kind or 'unlabeled'}')", 2)
+            return self.repo_root
+        labels = _capture(["docker", "inspect", self.name, "--format",
+                           "{{range $k, $v := .Config.Labels}}{{$k}}={{$v}}{{println}}{{end}}"])
+        mounts = [line.partition("=") for line in os.fsdecode(labels.stdout).splitlines()
+                  if line.startswith("org.cld.repo.")]
+        names = [key.removeprefix("org.cld.repo.") for key, _, _ in mounts]
+        mounted = " ".join(names) or "none"
+        if not selector:
+            if len(mounts) != 1:
+                _die(f"denied: {self.name} mounts {len(mounts)} repos -- pass --repo <name> (mounted: {mounted})", 3)
+            repo = mounts[0][2]
+        else:
+            repo = next((path for key, _, path in reversed(mounts) if key == f"org.cld.repo.{selector}"), "")
+        if not repo:
+            _die(f"denied: repo '{selector}' is not mounted in {self.name} (mounted: {mounted})", 3)
+        if not _is_repo(repo):
+            _die(f"denied: repo path '{repo}' for {self.name} is not a repo", 3)
+        return repo
+
+    # "<session>@" is the *workspace* tip, not the session bookmark. The bookmark
+    # is set once at first container launch
+    # (imgs/claude-devcontainer/entrypoint-claude-devcontainer.sh) and never moved
+    # again, so it freezes at the container's first `jj commit` -- the normal state
+    # once an agent starts working, which left this resolving one change behind
+    # the code the caller just wrote. Workspace name == bookmark name == container
+    # name == session (verified via `jj workspace list`), and `<session>@` is
+    # the same workspace-scoped-`@` idiom `cld/vcs/detect.py` already uses.
+    # --ignore-working-copy matters here too: without it, `jj -R <repo> log`
+    # snapshots the *host's* default workspace as a side effect, which would
+    # violate the broker's store-reading-only posture (docs/design-cld-broker.md
+    # §9) for no freshness gain -- watchman already wrote the container's own
+    # snapshot independently.
+    def revision(self, repo: str) -> str | None:
+        return _out("jj", "-R", repo, "--ignore-working-copy", "log", "--no-graph", "-n1",
+                    "-r", f"{self.name}@", "-T", "commit_id")
+
+    # The caller's own repo-root plus its org.cld.targets allowlist. Nothing sets
+    # org.cld.targets since the master role was removed (it was the only kind
+    # that carried one), so today this is the repo-root alone; the read stays
+    # for the ticket-scoped rework of the task-agent route.
+    def targets(self) -> list[str]:
+        return [target for target in (self.repo_root, *(_label(self.name, "org.cld.targets") or "").split(":"))
+                if target]
+
+
+@dataclass
+class CliCaller:
+    """The host route's Caller: every input given on the command line by the
+    operator (`cld-brokerctl run`), no container involved. The operator already
+    holds everything the broker guards, so nothing here is an authorization
+    boundary."""
+
+    name: str
+    repo_path: str
+    revset: str
+    extra_targets: list[str]
+
+    # One repo, given by -C: a ticket's --repo selector has nothing to select here.
+    def repo(self, selector: str) -> str:
+        if selector:
+            _die(f"denied: --repo selects a ticket container's mounted repo -- on the host pass -C <path> "
+                 f"(using {self.repo_path})", 2)
+        return self.repo_path
+
+    # No --ignore-working-copy, unlike LabelCaller: the default revset `@` is the
+    # operator's own working copy, and snapshotting it first is what makes
+    # uncommitted edits part of the run.
+    def revision(self, repo: str) -> str | None:
+        return _out("jj", "-R", repo, "log", "--no-graph", "-n1", "-r", self.revset, "-T", "commit_id")
+
+    def targets(self) -> list[str]:
+        return [self.repo_path, *self.extra_targets]
 
 
 # ---- actions --------------------------------------------------------------
@@ -240,55 +368,43 @@ def resolve_secrets_env_file(repo: str) -> SecretsEnv:
     return SecretsEnv(subdir, f"{repo}/{subdir}/.env")
 
 
-def resolve_revision(ctx: Session) -> str:
-    result = _capture(_tip_argv(ctx), stderr=None)
-    if result.returncode:
-        _die(f"cannot resolve revision for workspace {ctx.name}", 3)
-    return _text(result)
+def resolve_revision(caller: Caller, repo: str) -> str:
+    if (rev := caller.revision(repo)) is None:
+        _die(f"cannot resolve revision for workspace {caller.name} in {repo}", 3)
+    return rev
 
 
 # run-tests needs the session's current revision + the project's .env; resolve
 # those lazily here (not in the shared dispatcher) so read-only actions like
-# list-containers don't depend on the session bookmark being resolvable.
-#
-# The revision comes from "<session>@" -- the *workspace* tip, not the session
-# bookmark. The bookmark is set once at first container launch
-# (imgs/claude-devcontainer/entrypoint-claude-devcontainer.sh) and never moved
-# again, so it freezes at the container's first `jj commit` -- the normal state
-# once an agent starts working, which left this resolving one change behind
-# the code the caller just wrote. Workspace name == bookmark name == container
-# name == session (verified via `jj workspace list`), and `<session>@` is
-# the same workspace-scoped-`@` idiom `cld/vcs/detect.py` already uses.
-# --ignore-working-copy matters here too: without it, `jj -R <repo> log`
-# snapshots the *host's* default workspace as a side effect, which would
-# violate the broker's store-reading-only posture (docs/design-cld-broker.md
-# §9) for no freshness gain -- watchman already wrote the container's own
-# snapshot independently.
-def resolve_test_context(ctx: Session) -> tuple[str, SecretsEnv]:
-    return resolve_revision(ctx), resolve_secrets_env_file(ctx.repo)
+# list-containers don't depend on the session's revision being resolvable.
+def resolve_test_context(caller: Caller, repo: str) -> tuple[str, SecretsEnv]:
+    return resolve_revision(caller, repo), resolve_secrets_env_file(repo)
 
 
 def _secret_mount(secrets: SecretsEnv) -> list[str]:
     return ["-v", f"{secrets.env_file}:/secrets/.env:ro"] if os.path.isfile(secrets.env_file) else []
 
 
-def action_run_tests(ctx: Session, argv: list[str]) -> None:
-    name, argv = parse_repo_arg(argv)
-    ctx.repo = resolve_repo_target(ctx, name)
-    rev, secrets = resolve_test_context(ctx)
+def run_tests(repo: str, rev: str, secrets: SecretsEnv, argv: list[str]) -> NoReturn:
     _exec([
         "docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/tmp",
-        "-v", f"{ctx.repo}:/repo", *_secret_mount(secrets),
+        "-v", f"{repo}:/repo", *_secret_mount(secrets),
         "-e", f"REVISION={rev}", "-e", f"PROJECT_SUBDIR={secrets.project_subdir}",
         _setting("RUNTESTS_IMAGE"), *argv,
     ])
+
+
+def action_run_tests(caller: Caller, argv: list[str]) -> None:
+    name, argv = parse_repo_arg(argv)
+    repo = caller.repo(name)
+    run_tests(repo, *resolve_test_context(caller, repo), argv)
 
 
 # Enumerate cld containers for the messenger / `cld task-agent status`.
 # Read-only: the sole argv is an optional kind filter
 # (task-agent|ticket, or the legacy agent). Emits one
 # tab-separated `name<TAB>kind<TAB>repo<TAB>raw-status` line per container.
-def action_list_containers(ctx: Session, argv: list[str]) -> None:
+def action_list_containers(caller: Caller, argv: list[str]) -> None:
     kind = argv[0] if argv else ""
     label = f"label=org.cld.kind={kind}" if kind else "label=org.cld.kind"
     result = _capture(["docker", "ps", "-a", "--filter", label, "--format", "{{.Names}}\t{{.Status}}"],
@@ -329,43 +445,9 @@ def stage_agent_socket() -> None:
         os.environ.pop("SSH_AUTH_SOCK", None)
 
 
-# Repo selection for run-tests / graphql (docs/design-ticket-containers.md
-# section 6.1): a ticket container mounts several repos, so those actions take
-# an optional leading `--repo <name>`, resolved here against the caller's
-# host-set flat `org.cld.repo.<name>` labels -- labels, not caller input, gate
-# repo access, and the flat encoding keeps this to plain line parsing. No
-# --repo with exactly one labeled repo uses it (the single-repo convenience);
-# several without --repo is an error. A v1 kind keeps the dispatcher-set repo
-# and refuses --repo. Names are matched against enumerated labels, never
-# spliced into an inspect format string, so a hostile name cannot template-
-# inject.
-def resolve_repo_target(ctx: Session, name: str) -> str:
-    if ctx.kind != "ticket":
-        if name:
-            _die(f"denied: --repo is only for ticket containers ({ctx.name} is '{ctx.kind or 'unlabeled'}')", 2)
-        return ctx.repo
-    labels = _capture(["docker", "inspect", ctx.name, "--format",
-                       "{{range $k, $v := .Config.Labels}}{{$k}}={{$v}}{{println}}{{end}}"])
-    mounts = [line.partition("=") for line in os.fsdecode(labels.stdout).splitlines()
-              if line.startswith("org.cld.repo.")]
-    names = [key.removeprefix("org.cld.repo.") for key, _, _ in mounts]
-    mounted = " ".join(names) or "none"
-    if not name:
-        if len(mounts) != 1:
-            _die(f"denied: {ctx.name} mounts {len(mounts)} repos -- pass --repo <name> (mounted: {mounted})", 3)
-        repo = mounts[0][2]
-    else:
-        repo = next((path for key, _, path in reversed(mounts) if key == f"org.cld.repo.{name}"), "")
-    if not repo:
-        _die(f"denied: repo '{name}' is not mounted in {ctx.name} (mounted: {mounted})", 3)
-    if not _is_repo(repo):
-        _die(f"denied: repo path '{repo}' for {ctx.name} is not a repo", 3)
-    return repo
-
-
-# Consume a leading `--repo <name>` / `--repo=<name>` off an action's argv,
-# returning the name ("" if absent) and the rest. Split from
-# resolve_repo_target so the parse stays testable without docker.
+# run-tests / graphql take an optional leading `--repo <name>`, the selector a
+# multi-repo ticket caller passes to Caller.repo. Consume it off an action's
+# argv, returning the name ("" if absent) and the rest.
 def parse_repo_arg(argv: list[str]) -> tuple[str, list[str]]:
     match argv:
         case ["--repo", *rest]:
@@ -379,18 +461,11 @@ def parse_repo_arg(argv: list[str]) -> tuple[str, list[str]]:
     return name, rest
 
 
-# <target> is validated against the caller's host-set labels
-# (org.cld.repo-root + org.cld.targets), never trusted from the caller alone --
-# so an action can only ever run for a repo the host sanctioned. Nothing sets
-# org.cld.targets since the master role was removed (it was the only kind that
-# carried one), so today this accepts the caller's own repo-root and nothing
-# else; the read stays for the ticket-scoped rework of this route.
-def validate_target(ctx: Session, target: str) -> None:
-    targets = (_label(ctx.name, "org.cld.targets") or "").split(":")
-    if targets[-1] == "":  # a trailing (or lone empty) field is no target
-        targets.pop()
-    if target != ctx.repo and target not in targets:
-        _die(f"denied: target '{target}' not registered for {ctx.name}", 3)
+# <target> is validated against Caller.targets, never trusted from the argv
+# alone -- so an action can only ever run for a repo the caller source sanctioned.
+def validate_target(caller: Caller, target: str) -> None:
+    if target not in caller.targets():
+        _die(f"denied: target '{target}' not registered for {caller.name}", 3)
     if not _is_repo(target):
         _die(f"denied: target '{target}' is not a repo", 3)
 
@@ -409,7 +484,7 @@ def validate_target(ctx: Session, target: str) -> None:
 #             container read any host file the user can. The container-side client folds
 #             its own local files into `-p` instead (docs/design-prompt-chaining.md §4);
 #             cld.prompts contains the escape check for the refs themselves.
-def action_task_agent(ctx: Session, argv: list[str]) -> None:
+def action_task_agent(caller: Caller, argv: list[str]) -> None:
     if len(argv) < 2:
         _die("denied: task-agent needs <target> <op>", 2)
     target, op, *args = argv
@@ -417,7 +492,7 @@ def action_task_agent(ctx: Session, argv: list[str]) -> None:
     # purpose: the mailbox is bind-mounted into the caller, never needing the host.
     if op not in ("start", "status", "logs", "shutdown"):
         _die(f"denied: bad task-agent op '{op}'", 2)
-    validate_target(ctx, target)
+    validate_target(caller, target)
     stage_agent_socket()
 
     # Both spellings of each denial: click accepts `--opt=value`, so matching the bare
@@ -454,7 +529,7 @@ def action_task_agent(ctx: Session, argv: list[str]) -> None:
     # --parent is what makes ownership host-set: it stamps the spawn, scopes the roster
     # and gates the reap. `logs` has no such option (a read needs no authority), so
     # appending it there would just make cld reject the argv.
-    parent = [] if op == "logs" else ["--parent", ctx.name]
+    parent = [] if op == "logs" else ["--parent", caller.name]
     _exec(["cld", "task-agent", op, *args, *parent])
 
 
@@ -483,16 +558,15 @@ def resolve_graphql_config(repo: str) -> GraphqlConfig:
 
 # start's context: config (hard-required -- no guessed default, the old MCP's
 # `poetry run python manage.py` default was a lide-api-shaped guess and is not
-# being carried over) + the revision + the secrets path.
-def resolve_graphql_context(ctx: Session) -> tuple[str, SecretsEnv, GraphqlConfig]:
-    rev = resolve_revision(ctx)
-    secrets = resolve_secrets_env_file(ctx.repo)
-    config = resolve_graphql_config(ctx.repo)
+# being carried over) + the secrets path.
+def resolve_graphql_context(repo: str) -> tuple[SecretsEnv, GraphqlConfig]:
+    secrets = resolve_secrets_env_file(repo)
+    config = resolve_graphql_config(repo)
     if not config.command:
-        _die(f"denied: graphql_command is not set in {ctx.repo}/.cld/config.toml -- add "
+        _die(f"denied: graphql_command is not set in {repo}/.cld/config.toml -- add "
              'graphql_command = "..." (quotes required; cld_conf_get silently '
              "ignores an unquoted value)", 3)
-    return rev, secrets, config
+    return secrets, config
 
 
 # GRAPHQL_BIND resolved lazily (only `start` publishes a port) and only if the
@@ -651,19 +725,19 @@ def check_url_allowlisted(target: str) -> None:
 #   [A-Za-z0-9_-]+     an alias, looked up in the repo's .env -- auth attached
 #   http(s)://…        the URL verbatim, gated on the allowlist -- never any auth
 #   anything else      denied
-def resolve_target(ctx: Session, target: str) -> tuple[str, str, str]:
+def resolve_target(scope: Scope, target: str) -> tuple[str, str, str]:
     if target == "local":
-        config = resolve_graphql_config(ctx.repo)
-        host_port = _first_line(_out("docker", "port", f"cld_gql_{ctx.name}", f"{config.port}/tcp") or "")
+        config = resolve_graphql_config(scope.repo)
+        host_port = _first_line(_out("docker", "port", f"cld_gql_{scope.session}", f"{config.port}/tcp") or "")
         if not host_port:
-            _die(f"denied: no local graphql server running for {ctx.name} -- start one first", 3)
+            _die(f"denied: no local graphql server running for {scope.session} -- start one first", 3)
         return f"http://{host_port}{config.health_path}", "", ""
     if target.startswith(("http://", "https://")):
         check_url_allowlisted(target)
         return target, "", ""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", target):
         _die(f"denied: bad target '{target}'", 2)
-    secrets_env_file = resolve_secrets_env_file(ctx.repo).env_file
+    secrets_env_file = resolve_secrets_env_file(scope.repo).env_file
     url, auth, cookie = lookup_alias(target, secrets_env_file)
     if not url:
         _die(f"denied: unknown graphql alias '{target}' -- set CLD_GRAPHQL_URL_{_alias_key(target)} in "
@@ -675,8 +749,8 @@ def resolve_target(ctx: Session, target: str) -> tuple[str, str, str]:
 # json.dumps (never string concatenation, so a query containing quotes can't
 # corrupt it) and never appears in any child process's argv, where it would be
 # visible in the host's process table.
-def do_graphql_query(ctx: Session, target: str, query: str, variables: str = "") -> None:
-    url, auth, cookie = resolve_target(ctx, target)
+def do_graphql_query(scope: Scope, target: str, query: str, variables: str = "") -> None:
+    url, auth, cookie = resolve_target(scope, target)
 
     try:
         body = json.dumps({"query": query, "variables": json.loads(variables) if variables else {}})
@@ -712,8 +786,8 @@ _GRAPHQL_INTROSPECTION_QUERY = "{__schema{queryType{name} mutationType{name} typ
 # fold to `_` -- so this is *a* valid spelling that round-trips through
 # lookup_alias, not necessarily byte-identical to however the operator
 # originally wrote it in .env).
-def do_graphql_endpoints(ctx: Session) -> None:
-    secrets_env_file = resolve_secrets_env_file(ctx.repo).env_file
+def do_graphql_endpoints(scope: Scope) -> None:
+    secrets_env_file = resolve_secrets_env_file(scope.repo).env_file
     try:
         text = Path(secrets_env_file).read_text(errors="surrogateescape")
     except OSError:
@@ -741,10 +815,10 @@ def _probe(url: str, timeout: float) -> bool:
     return response is not None and response[0] == 200 and b'"errors"' not in response[1]
 
 
-def do_graphql_status(ctx: Session) -> None:
+def do_graphql_status(scope: Scope, tip: str | None) -> None:
     sweep_gql_orphans()
-    config = resolve_graphql_config(ctx.repo)
-    cname = f"cld_gql_{ctx.name}"
+    config = resolve_graphql_config(scope.repo)
+    cname = f"cld_gql_{scope.session}"
     if _capture(["docker", "inspect", cname]).returncode:
         print_gql_status_line("not_started", "", "", "", "", "")
         return
@@ -758,12 +832,10 @@ def do_graphql_status(ctx: Session) -> None:
     rev = "\n".join(line.removeprefix("REVISION=") for line in env.splitlines()
                     if line.startswith("REVISION="))
     # Compare against the current tip so the caller can tell a running server
-    # is serving stale code without a second call. resolve_revision's
-    # hard exit-3-on-failure isn't safe here -- status has to keep answering
-    # on a git-backed repo, or after graphql_command was removed, same as
-    # stop does today -- so resolve the tip inline and leave stale empty
-    # rather than aborting the op if it can't be resolved.
-    tip = _out(*_tip_argv(ctx))
+    # is serving stale code without a second call. The tip is optional --
+    # status has to keep answering on a git-backed repo, or after
+    # graphql_command was removed, same as stop does -- so an unresolvable tip
+    # (None) leaves stale empty rather than aborting the op.
     stale = str(rev != tip).lower() if tip and rev else ""
     host_port = _first_line(_out_strict("docker", "port", cname, f"{config.port}/tcp"))
     # docker port publishing early (or `poetry install` still running behind
@@ -784,16 +856,16 @@ def do_graphql_status(ctx: Session) -> None:
 # (docs/impl-graphql-broker-plan.md §4.4). Deliberately does NOT call
 # resolve_graphql_context / resolve_graphql_config -- teardown must work even
 # for a repo whose graphql_command was since unset or removed.
-def do_graphql_stop(ctx: Session) -> None:
-    cname = f"cld_gql_{ctx.name}"
+def do_graphql_stop(scope: Scope) -> None:
+    cname = f"cld_gql_{scope.session}"
     # Forget the workspace in the repo the server was STARTED for (its own
-    # org.cld.gql-repo label), not ctx.repo: a multi-repo ticket can pass a
-    # different --repo to stop than it did to start. Falls back to ctx.repo for
+    # org.cld.gql-repo label), not scope.repo: a multi-repo ticket can pass a
+    # different --repo to stop than it did to start. Falls back to scope.repo for
     # a container without the label (or already gone).
     gql_repo = _label(cname, "org.cld.gql-repo")
     _capture(["docker", "stop", "-t", "10", cname])
     _rm_container(cname)
-    _forget_workspace(gql_repo or ctx.repo, f"gql-{ctx.name}")
+    _forget_workspace(gql_repo or scope.repo, f"gql-{scope.session}")
 
 
 def _dump_logs(cname: str) -> None:
@@ -804,10 +876,10 @@ def _dump_logs(cname: str) -> None:
 # Port allocation: let Docker do it. No probing for a free port, no deriving
 # one from a hash -- publish with an empty host port and read it back via
 # `docker port`. Race-free, and no port range to own.
-def do_graphql_start(ctx: Session) -> None:
+def do_graphql_start(scope: Scope, rev: str) -> None:
     sweep_gql_orphans()
-    rev, secrets, config = resolve_graphql_context(ctx)
-    cname, wsname = f"cld_gql_{ctx.name}", f"gql-{ctx.name}"
+    secrets, config = resolve_graphql_context(scope.repo)
+    cname, wsname = f"cld_gql_{scope.session}", f"gql-{scope.session}"
 
     # start is idempotent: a running server already answers, so return its
     # existing endpoint rather than erroring -- it's what makes the MCP's
@@ -818,15 +890,15 @@ def do_graphql_start(ctx: Session) -> None:
     # image) keeps the old always-idempotent behavior.
     if not _capture(["docker", "inspect", cname]).returncode:
         if _out_strict("docker", "inspect", cname, "--format", "{{.State.Running}}") == "true":
-            if (gql_repo := _label(cname, "org.cld.gql-repo")) and gql_repo != ctx.repo:
-                _die(f"denied: graphql server for {ctx.name} is already running for repo "
-                     f"{gql_repo}, not {ctx.repo} -- `graphql stop` it first", 3)
-            do_graphql_status(ctx)
+            if (gql_repo := _label(cname, "org.cld.gql-repo")) and gql_repo != scope.repo:
+                _die(f"denied: graphql server for {scope.session} is already running for repo "
+                     f"{gql_repo}, not {scope.repo} -- `graphql stop` it first", 3)
+            do_graphql_status(scope, rev)
             return
         # Stopped/crashed leftover from a previous start -- clear it before
         # relaunching so `docker run --name` below doesn't collide.
         _rm_container(cname)
-        _forget_workspace(ctx.repo, wsname)
+        _forget_workspace(scope.repo, wsname)
 
     bind = resolve_graphql_bind()
 
@@ -835,10 +907,10 @@ def do_graphql_start(ctx: Session) -> None:
     # workspace and never touches the caller's @ or bookmarks.
     _out_strict(
         "docker", "run", "-d", "--name", cname,
-        "--label", f"org.cld.gql-session={ctx.name}",
-        "--label", f"org.cld.gql-repo={ctx.repo}",
+        "--label", f"org.cld.gql-session={scope.session}",
+        "--label", f"org.cld.gql-repo={scope.repo}",
         "--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/tmp",
-        "-v", f"{ctx.repo}:/repo", *_secret_mount(secrets),
+        "-v", f"{scope.repo}:/repo", *_secret_mount(secrets),
         "-e", f"REVISION={rev}", "-e", f"PROJECT_SUBDIR={secrets.project_subdir}",
         "-e", f"GQL_WORKSPACE={wsname}", "-e", f"GQL_COMMAND={config.command}",
         "-e", f"GQL_PORT={config.port}",
@@ -869,65 +941,68 @@ def do_graphql_start(ctx: Session) -> None:
         time.sleep(2)
 
     if died:
-        print(f"[cld-broker] graphql server for {ctx.name} exited before becoming healthy "
+        print(f"[cld-broker] graphql server for {scope.session} exited before becoming healthy "
               "-- last logs:", file=sys.stderr)
         _dump_logs(cname)
         _rm_container(cname)
-        _forget_workspace(ctx.repo, wsname)
+        _forget_workspace(scope.repo, wsname)
         sys.exit(3)
 
     if not ready:
-        print(f"[cld-broker] graphql server for {ctx.name} did not become healthy within "
+        print(f"[cld-broker] graphql server for {scope.session} did not become healthy within "
               f"{timeout}s -- last logs:", file=sys.stderr)
         _dump_logs(cname)
-        do_graphql_stop(ctx)
+        do_graphql_stop(scope)
         sys.exit(3)
 
-    do_graphql_status(ctx)
+    do_graphql_status(scope, rev)
 
 
-def action_graphql(ctx: Session, argv: list[str]) -> None:
+# Only start (and restart) needs the caller's revision -- a hard requirement
+# there; status takes it softly for the stale field; the other ops never ask.
+def action_graphql(caller: Caller, argv: list[str]) -> None:
     name, argv = parse_repo_arg(argv)
-    ctx.repo = resolve_repo_target(ctx, name)
+    scope = Scope(caller.name, caller.repo(name))
     op, args = (argv[0], argv[1:]) if argv else ("", [])
     match op:
         case "start":
-            do_graphql_start(ctx)
+            do_graphql_start(scope, resolve_revision(caller, scope.repo))
         case "stop":
-            do_graphql_stop(ctx)
+            do_graphql_stop(scope)
             print("stopped")
         case "restart":
-            do_graphql_stop(ctx)
-            do_graphql_start(ctx)
+            do_graphql_stop(scope)
+            do_graphql_start(scope, resolve_revision(caller, scope.repo))
         case "status":
-            do_graphql_status(ctx)
+            do_graphql_status(scope, caller.revision(scope.repo))
         case "logs":
             tail = args[0] if args and args[0] else "50"
             if not re.fullmatch(r"[0-9]+", tail):
                 _die(f"denied: bad tail count '{tail}'", 2)
             if int(tail) > 2000:  # a debugging aid, not a log export
                 tail = "2000"
-            logs = _capture(["docker", "logs", "--tail", tail, f"cld_gql_{ctx.name}"], stderr=subprocess.STDOUT)
+            logs = _capture(["docker", "logs", "--tail", tail, f"cld_gql_{scope.session}"], stderr=subprocess.STDOUT)
             cap_output(mask_output(logs.stdout), int(_setting("GRAPHQL_OUTPUT_MAX_BYTES")), "tail")
             sys.exit(logs.returncode)
         case "query":
             if len(args) < 2:
                 _die("denied: query needs <target> <query-string> [variables-json]", 2)
-            do_graphql_query(ctx, *args[:3])
+            do_graphql_query(scope, *args[:3])
         case "introspect":
-            do_graphql_query(ctx, args[0] if args and args[0] else "local", _GRAPHQL_INTROSPECTION_QUERY)
+            do_graphql_query(scope, args[0] if args and args[0] else "local", _GRAPHQL_INTROSPECTION_QUERY)
         case "endpoints":
-            do_graphql_endpoints(ctx)
+            do_graphql_endpoints(scope)
         case _:
             _die(f"denied: bad graphql op '{op}'", 2)
 
 
 # Template for a second action -- copy, rename, point at its image, enable by
 # uncommenting. Callable from the container as `cld broker lint …`.
-# def action_lint(ctx: Session, argv: list[str]) -> None:
-#     rev, secrets = resolve_test_context(ctx)
+# def action_lint(caller: Caller, argv: list[str]) -> None:
+#     repo = caller.repo("")
+#     rev, secrets = resolve_test_context(caller, repo)
 #     _exec(["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/tmp",
-#            "-v", f"{ctx.repo}:/repo", "-e", f"REVISION={rev}",
+#            "-v", f"{repo}:/repo", "-e", f"REVISION={rev}",
 #            "-e", f"PROJECT_SUBDIR={secrets.project_subdir}",
 #            _setting("LINT_IMAGE") or "runlint:latest", *argv])
 
@@ -947,40 +1022,75 @@ def decode_argv(payload: str) -> list[str]:
     return [os.fsdecode(arg) for arg in args]
 
 
-def main() -> None:
-    load_conf()
-    command = _first_line(os.environ.get("SSH_ORIGINAL_COMMAND", "")).strip(" \t")
-    action, session, payload = (re.split(r"[ \t]+", command, maxsplit=2) + ["", ""])[:3]
+_SESSION_RE = re.compile(r"cld_[A-Za-z0-9_-]+")
 
-    # Resolve the action to an action_* function. The charset check keeps the
-    # constructed name to [a-z0-9_], and the function must actually exist.
+
+# Resolve the action to an action_* function. The charset check keeps the
+# constructed name to [a-z0-9_], and the function must actually exist.
+def resolve_action(action: str) -> Callable[[Caller, list[str]], None]:
     if not re.fullmatch(r"[a-z][a-z0-9-]*", action):
         _die("denied: bad action", 2)
     if not callable(fn := globals().get(f"action_{action.replace('-', '_')}")):
         _die(f"denied: unknown action '{action}'", 2)
+    return fn
 
-    if not re.fullmatch(r"cld_[A-Za-z0-9_-]+", session):
+
+def main_ssh() -> None:
+    command = _first_line(os.environ.get("SSH_ORIGINAL_COMMAND", "")).strip(" \t")
+    action, session, payload = (re.split(r"[ \t]+", command, maxsplit=2) + ["", ""])[:3]
+    fn = resolve_action(action)
+    if not _SESSION_RE.fullmatch(session):
         _die("denied: bad session id", 2)
 
-    # Resolve the target repo from the calling container's host-set labels. The
-    # container name == session, and the labels are set at launch (trusted), so the
-    # caller cannot point at an arbitrary host path -- only a repo the host mounted
-    # for it. A v1 kind carries a single org.cld.repo-root; a ticket container
-    # carries one org.cld.repo.<name> label per mounted repo instead, so the repo
-    # stays empty here and run-tests/graphql resolve it per call via
-    # resolve_repo_target (--repo <name>, or the single mounted repo).
-    if (kind := _label(session, "org.cld.kind")) is None:
-        _die(f"no cld container for session {session}", 3)
-    repo = ""
-    if kind != "ticket":
-        repo = _label(session, "org.cld.repo-root") or ""
-        if not (repo and _is_repo(repo)):
-            _die(f"no task-agent container for session {session}", 3)
+    # The sshd route's caller source: the calling container's host-set labels.
+    # The container name == session, and the labels are set at launch (trusted),
+    # so the caller cannot point at an arbitrary host path -- only a repo the host
+    # mounted for it. Everything past the labels (repo selection, revision,
+    # targets) is resolved lazily inside each action_* function, so read-only
+    # actions don't pay for -- or fail on -- resolution they don't need.
+    fn(LabelCaller.from_session(session), decode_argv(payload))
 
-    # Per-action context (revision, secrets, target validation) is resolved inside
-    # each action_* function, so read-only actions don't pay for -- or fail on --
-    # resolution they don't need.
-    fn(Session(session, kind, repo), decode_argv(payload))
+
+def _repo_root(path: str) -> str:
+    start = Path(path).resolve()
+    if not (root := next((str(p) for p in (start, *start.parents) if _is_repo(str(p))), "")):
+        _die(f"no repo at or above {start} -- pass -C <repo>", 3)
+    return root
+
+
+def main_cli(argv: list[str]) -> None:
+    """The host route (`cld-brokerctl run`): the Caller comes from the command
+    line instead of docker labels. Every token after the action goes to it as
+    given, so its own flags (pytest's -k, -r, ...) never clash with these."""
+    parser = argparse.ArgumentParser(prog="cld-brokerctl run",
+                                     description="Run one broker action as the host operator.")
+    parser.add_argument("-C", dest="repo", default=".", help="repo to act on (default: the one containing cwd)")
+    parser.add_argument("-r", dest="revset", default="@", help="jj revset to act on (default: @, your working copy)")
+    parser.add_argument("-s", dest="session", help="session name for the caller's own resources "
+                                                   "(default: cld_host_<repo dir>)")
+    parser.add_argument("-t", dest="targets", action="append", default=[],
+                        help="extra repo the task-agent action may target (repeatable)")
+    parser.add_argument("action")
+    parser.add_argument("argv", nargs=argparse.REMAINDER)
+    args = parser.parse_args(argv)
+
+    fn = resolve_action(args.action)
+    repo = _repo_root(args.repo)
+    session = args.session or "cld_host_" + re.sub(r"[^A-Za-z0-9_-]", "-", Path(repo).name)
+    if not _SESSION_RE.fullmatch(session):
+        _die(f"denied: bad session id '{session}'", 2)
+    fn(CliCaller(session, repo, args.revset, [str(Path(t).resolve()) for t in args.targets]), args.argv)
+
+
+# sshd's ForceCommand runs this file with no arguments and delivers the client's
+# request in $SSH_ORIGINAL_COMMAND; a client cannot add arguments. So arguments
+# can only come from a host shell, which makes them a safe route selector.
+def main() -> None:
+    load_conf()
+    if len(sys.argv) > 1:
+        main_cli(sys.argv[1:])
+    else:
+        main_ssh()
 
 
 if __name__ == "__main__":

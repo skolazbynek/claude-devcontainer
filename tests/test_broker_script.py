@@ -71,11 +71,11 @@ class TestParseRepoArg:
         assert "denied" in capsys.readouterr().err
 
 
-class TestResolveRepoTarget:
-    """resolve_repo_target maps a --repo name to a repo via the caller's
+class TestLabelCallerRepo:
+    """LabelCaller.repo maps a --repo name to a repo via the caller's
     host-set flat org.cld.repo.<name> labels: ticket callers get per-name
-    validation plus the single-repo default; v1 callers keep the
-    dispatcher-set repo and refuse --repo (design section 6.1)."""
+    validation plus the single-repo default; v1 callers keep their
+    repo-root and refuse --repo (design section 6.1)."""
 
     @pytest.fixture(autouse=True)
     def fakebin(self, tmp_path, monkeypatch):
@@ -93,7 +93,7 @@ printf '%s' "${FAKE_LABELS:-}"
 
     def _resolve(self, monkeypatch, labels: str, kind: str, name: str, repo_preset: str = "/preset") -> str:
         monkeypatch.setenv("FAKE_LABELS", labels)
-        return broker.resolve_repo_target(broker.Session("cld_ticket_x", kind, repo_preset), name)
+        return broker.LabelCaller("cld_ticket_x", kind, repo_preset).repo(name)
 
     def _labels(self, repos) -> str:
         return (
@@ -140,9 +140,28 @@ printf '%s' "${FAKE_LABELS:-}"
         assert self._resolve(monkeypatch, "", "task-agent", "", repo_preset="/v1/repo") == "/v1/repo"
 
 
+class TestLabelCallerTargets:
+    """LabelCaller.targets is the caller's repo-root plus its org.cld.targets
+    allowlist, with empty fields dropped -- a ticket has no repo-root."""
+
+    @pytest.mark.parametrize(
+        "repo_root,label,expected",
+        [
+            ("/root", "", ["/root"]),
+            ("/root", "/a:/b:", ["/root", "/a", "/b"]),
+            ("", "", []),
+        ],
+        ids=["root-only", "root-plus-allowlist", "ticket-none"],
+    )
+    def test_targets(self, tmp_path, monkeypatch, repo_root, label, expected):
+        monkeypatch.setenv("FAKE_TARGETS", label)
+        _fakebin(tmp_path, monkeypatch, docker='printf "%s\\n" "$FAKE_TARGETS"\n')
+        assert broker.LabelCaller("cld_x", "task-agent", repo_root).targets() == expected
+
+
 class TestDispatchRunTests:
     """Full-script dispatch: SSH_ORIGINAL_COMMAND in, `docker run` argv out --
-    proves the dispatcher's kind branch, resolve_repo_target and the --repo
+    proves the dispatcher's kind branch, LabelCaller.repo and the --repo
     argv consumption compose for both ticket and v1 callers."""
 
     @pytest.fixture(autouse=True)
@@ -236,6 +255,83 @@ esac
         result = self._dispatch("", [], {"SSH_ORIGINAL_COMMAND": command})
         assert result.returncode == 2
         assert message in result.stderr
+
+
+class TestDispatchCli:
+    """Full-script host route (`cld-brokerctl run`): arguments on the script's own
+    command line select CliCaller, so the caller's repo, revision, session and
+    targets come from flags and cwd, with no container or docker label read."""
+
+    @pytest.fixture(autouse=True)
+    def fakebin(self, tmp_path, monkeypatch):
+        return _fakebin(tmp_path, monkeypatch, docker="""
+[ "$1" = run ] && printf 'DOCKER_RUN\\n' && printf '%s\\n' "$@"
+""", jj="""
+printf '%s\\n' "$*" >> "$FAKE_JJ_LOG"
+echo rev123
+""", cld="""
+printf '%s\\n' "$@"
+""")
+
+    @pytest.fixture
+    def repo(self, tmp_path):
+        (tmp_path / "my.repo" / ".jj").mkdir(parents=True)
+        (tmp_path / "my.repo" / "sub").mkdir()
+        return tmp_path / "my.repo"
+
+    def _run(self, tmp_path, cwd: Path, *args: str) -> subprocess.CompletedProcess:
+        env = dict(os.environ, CLD_BROKER_CONF="/nonexistent", FAKE_JJ_LOG=str(tmp_path / "jj.log"))
+        env.pop("SSH_ORIGINAL_COMMAND", None)
+        return subprocess.run([sys.executable, str(BROKER_PY), *args], cwd=cwd,
+                              capture_output=True, text=True, env=env)
+
+    def test_run_tests_defaults_from_cwd(self, tmp_path, repo):
+        result = self._run(tmp_path, repo / "sub", "run-tests", "-k", "two words", "-r", "x")
+        assert result.returncode == 0, result.stderr
+        lines = result.stdout.splitlines()
+        assert f"{repo}:/repo" in lines
+        assert "REVISION=rev123" in lines
+        assert lines[-5:] == ["runtests:latest", "-k", "two words", "-r", "x"]
+        assert (tmp_path / "jj.log").read_text().splitlines() == [
+            f"-R {repo} log --no-graph -n1 -r @ -T commit_id"]
+
+    def test_revset_and_repo_flags(self, tmp_path, repo):
+        result = self._run(tmp_path, tmp_path, "-C", str(repo), "-r", "main", "run-tests")
+        assert result.returncode == 0, result.stderr
+        assert "-r main" in (tmp_path / "jj.log").read_text()
+
+    def test_ticket_repo_selector_denied(self, tmp_path, repo):
+        result = self._run(tmp_path, repo, "run-tests", "--repo", "lide-api")
+        assert result.returncode == 2
+        assert "pass -C <path>" in result.stderr
+
+    def test_no_repo_above_cwd(self, tmp_path):
+        result = self._run(tmp_path, tmp_path, "list-containers")
+        assert result.returncode == 3
+        assert "no repo at or above" in result.stderr
+
+    @pytest.mark.parametrize(
+        "flags,parent",
+        [([], "cld_host_my-repo"), (["-s", "cld_mine"], "cld_mine")],
+        ids=["default-session-sanitized", "explicit-session"],
+    )
+    def test_session_becomes_task_agent_parent(self, tmp_path, repo, flags, parent):
+        result = self._run(tmp_path, repo, *flags, "task-agent", str(repo), "status")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == ["task-agent", "status", "--parent", parent]
+
+    def test_extra_target_allowed(self, tmp_path, repo):
+        (tmp_path / "other" / ".jj").mkdir(parents=True)
+        other = tmp_path / "other"
+        denied = self._run(tmp_path, repo, "task-agent", str(other), "status")
+        allowed = self._run(tmp_path, repo, "-t", str(other), "task-agent", str(other), "status")
+        assert denied.returncode == 3
+        assert allowed.returncode == 0, allowed.stderr
+
+    def test_bad_session_denied(self, tmp_path, repo):
+        result = self._run(tmp_path, repo, "-s", "../x", "list-containers")
+        assert result.returncode == 2
+        assert "bad session id" in result.stderr
 
 
 class TestParseEnvFile:
@@ -357,7 +453,7 @@ class TestGraphqlEndpoints:
 
     def _endpoints(self, monkeypatch, secrets: Path, capsys) -> str:
         monkeypatch.setattr(broker, "resolve_secrets_env_file", lambda repo: broker.SecretsEnv(".", str(secrets)))
-        broker.do_graphql_endpoints(broker.Session("cld_agent_test", "task-agent", "/repo"))
+        broker.do_graphql_endpoints(broker.Scope("cld_agent_test", "/repo"))
         return capsys.readouterr().out
 
     def test_empty_aliases_returns_cleanly(self, tmp_path, monkeypatch, capsys):
@@ -386,21 +482,22 @@ class TestResolveTargetAlias:
             'CLD_GRAPHQL_COOKIE_STAGING_EU="session=1; x=2"\n'
         )
         monkeypatch.setattr(broker, "resolve_secrets_env_file", lambda repo: broker.SecretsEnv(".", str(secrets)))
-        ctx = broker.Session("cld_agent_test", "task-agent", "/repo")
+        ctx = broker.Scope("cld_agent_test", "/repo")
         assert broker.resolve_target(ctx, "staging-eu") == ("https://staging/graphql", "Bearer abc", "session=1; x=2")
 
     def test_unknown_alias_denied(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setattr(broker, "resolve_secrets_env_file",
                             lambda repo: broker.SecretsEnv(".", str(tmp_path / ".env")))
         with pytest.raises(SystemExit) as excinfo:
-            broker.resolve_target(broker.Session("cld_agent_test", "task-agent", "/repo"), "nope")
+            broker.resolve_target(broker.Scope("cld_agent_test", "/repo"), "nope")
         assert _exit_code(excinfo) == 3
         assert "CLD_GRAPHQL_URL_NOPE" in capsys.readouterr().err
 
 
 class TestGraphqlStatusStale:
     """M5: do_graphql_status's 6th field (stale) compares the container's own
-    served revision (REVISION env) against the session's current jj tip.
+    served revision (REVISION env) against the session's current jj tip, as
+    LabelCaller.revision resolves it.
     The stubbed `docker port` returns nothing, keeping the server in the
     'starting' state -- still enough to exercise the stale computation, which
     happens before the port/probe branching."""
@@ -434,7 +531,8 @@ echo "${FAKE_TIP:-}"
     def _status(self, monkeypatch, tmp_path, capsys, **env) -> list:
         for key, value in env.items():
             monkeypatch.setenv(key, value)
-        broker.do_graphql_status(broker.Session("cld_agent_test", "task-agent", str(tmp_path)))
+        tip = broker.LabelCaller("cld_agent_test", "task-agent", str(tmp_path)).revision(str(tmp_path))
+        broker.do_graphql_status(broker.Scope("cld_agent_test", str(tmp_path)), tip)
         return capsys.readouterr().out.rstrip("\n").split("\t")
 
     def test_matching_revision_is_not_stale(self, monkeypatch, tmp_path, capsys):
@@ -471,9 +569,9 @@ class TestGraphqlStartRepoMismatch:
     @pytest.fixture(autouse=True)
     def fakebin(self, tmp_path, monkeypatch):
         monkeypatch.setattr(broker, "sweep_gql_orphans", lambda: None)
-        monkeypatch.setattr(broker, "resolve_graphql_context", lambda ctx: (
-            "rev", broker.SecretsEnv(".", "/none/.env"), broker.GraphqlConfig("serve", "8000", "/graphql")))
-        monkeypatch.setattr(broker, "do_graphql_status", lambda ctx: print("STATUS_CALLED"))
+        monkeypatch.setattr(broker, "resolve_graphql_context", lambda repo: (
+            broker.SecretsEnv(".", "/none/.env"), broker.GraphqlConfig("serve", "8000", "/graphql")))
+        monkeypatch.setattr(broker, "do_graphql_status", lambda scope, tip: print("STATUS_CALLED"))
         return _fakebin(tmp_path, monkeypatch, docker="""
 [ "$1" = inspect ] || exit 1
 shift
@@ -490,7 +588,7 @@ esac
 
     def _start(self, monkeypatch, repo: str, gql_repo: str) -> None:
         monkeypatch.setenv("FAKE_GQL_REPO", gql_repo)
-        broker.do_graphql_start(broker.Session("cld_ticket_x", "ticket", repo))
+        broker.do_graphql_start(broker.Scope("cld_ticket_x", repo), "rev")
 
     def test_cross_repo_reuse_refused_naming_the_running_repo(self, monkeypatch, capsys):
         with pytest.raises(SystemExit) as excinfo:
@@ -524,12 +622,12 @@ class TestGraphqlQuery:
             sent.update(url=url, body=body, headers=headers)
             return sent.get("status", 200), body
 
-        monkeypatch.setattr(broker, "resolve_target", lambda ctx, target: ("http://stub/graphql", "Bearer t", ""))
+        monkeypatch.setattr(broker, "resolve_target", lambda scope, target: ("http://stub/graphql", "Bearer t", ""))
         monkeypatch.setattr(broker, "http_post", fake_post)
         return sent
 
     def _query(self, query="{ __typename }", variables=""):
-        broker.do_graphql_query(broker.Session("cld_agent_test", "task-agent", "/repo"), "local", query, variables)
+        broker.do_graphql_query(broker.Scope("cld_agent_test", "/repo"), "local", query, variables)
 
     def test_body_reaches_the_request_and_response_is_returned(self, sent, capsys):
         self._query()

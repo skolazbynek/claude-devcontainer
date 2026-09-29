@@ -3,6 +3,7 @@
 # (see ../broker-setup-home.md); day-to-day this is all you need:
 #
 #     cld-brokerctl start | restart | shutdown | status | logs [N] | graphql-sweep
+#     cld-brokerctl run [-C repo] [-r revset] [-s session] [-t target]... <action> [args...]
 #
 # Everything lives under $CLD_BROKER_DIR (default ~/.cld/broker): the sshd config,
 # its PID file, and its log. No sshd flags to remember.
@@ -63,6 +64,26 @@ graphql-sweep() {
     done
 }
 
+# Run one broker action from the host, for debugging -- no sshd, no container.
+# Runs the same ForceCommand with the sshd config's SetEnv lines and an
+# otherwise cleared environment, close to what sshd gives it (sshd's
+# compiled-in PATH varies by build; broker.conf's PATH wins either way). The
+# arguments select the broker's CLI route; see cld-broker.py:main_cli.
+# SetEnv values are split on whitespace, so quoted values with spaces are not
+# supported.
+run() {
+    local cmd
+    local -a setenv
+    [ -r "$CONF" ] || { echo "no broker config at $CONF -- run first-time setup" >&2; exit 1; }
+    cmd=$(awk 'tolower($1) == "forcecommand" { $1 = ""; sub(/^[ \t]+/, ""); print; exit }' "$CONF")
+    [ -n "$cmd" ] || { echo "no ForceCommand in $CONF" >&2; exit 1; }
+    mapfile -t setenv < <(awk 'tolower($1) == "setenv" { for (i = 2; i <= NF; i++) print $i }' "$CONF")
+    # sshd runs the ForceCommand through a shell too; "$@" passes the args intact.
+    exec env -i HOME="$HOME" USER="${USER:-$(id -un)}" LOGNAME="${LOGNAME:-${USER:-$(id -un)}}" \
+        SHELL=/bin/sh PATH=/usr/bin:/bin:/usr/sbin:/sbin "${setenv[@]}" \
+        /bin/sh -c "$cmd \"\$@\"" cld-broker "$@"
+}
+
 status() {
     local pid
     if pid=$(running); then
@@ -80,5 +101,6 @@ case "${1:-}" in
     status)           status ;;
     logs)             tail -n "${2:-40}" "$LOG" 2>/dev/null || echo "no log at $LOG" ;;
     graphql-sweep)    graphql-sweep ;;
-    *) echo "usage: cld-brokerctl {start|restart|shutdown|status|logs [N]|graphql-sweep}" >&2; exit 2 ;;
+    run)              shift; run "$@" ;;
+    *) echo "usage: cld-brokerctl {start|restart|shutdown|status|logs [N]|graphql-sweep|run [-h] <action> [args...]}" >&2; exit 2 ;;
 esac

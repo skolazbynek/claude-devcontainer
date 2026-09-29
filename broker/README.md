@@ -43,7 +43,7 @@ container: cld broker run-tests -k login -x tests/
 | `broker.conf.sample` | broker-wide config (image, PATH, ssh-agent socket); copy to `/etc/cld/broker.conf`. Read as plain `KEY=VALUE` lines, never sourced: shell quoting works, `$VAR` expansion does not |
 | `sshd_cld_broker.conf` | sample config for the dedicated `sshd` instance |
 | `keygen.sh` | generate the broker keypair, host key, and `authorized_keys` |
-| `cld-cld-brokerctl.sh` | operate the sshd: `start` / `restart` / `shutdown` / `status` / `logs` |
+| `cld-cld-brokerctl.sh` | operate the sshd: `start` / `restart` / `shutdown` / `status` / `logs`; `run` an action from the host |
 
 ## Operating
 
@@ -52,11 +52,39 @@ daemon with it — it starts sshd detached, tracks it by PID file, and logs to a
 file, so there are no sshd flags to remember:
 
 ```
-cld-brokerctl start | restart | shutdown | status | logs [N]
+cld-brokerctl start | restart | shutdown | status | logs [N] | graphql-sweep | run ...
 ```
 
 It reads `$CLD_BROKER_DIR` (default `~/.cld/broker`). `restart` is the one to run
 after editing the broker config or rebuilding the `runtests` image.
+
+### Running an action from the host
+
+For debugging, run any action directly, without sshd and without a container:
+
+```
+cld-brokerctl run [-C <repo>] [-r <revset>] [-s <session>] [-t <target>]... <action> [args...]
+cld-brokerctl run run-tests -k login -x tests/
+cld-brokerctl run -r main graphql start
+```
+
+It runs the installed `ForceCommand` from the sshd config, with that config's
+`SetEnv` lines and an otherwise cleared environment, so `broker.conf` and its
+`PATH` apply as they do for a container. The flags supply the `Caller` (see
+"Adding an action") that labels supply on the ssh route:
+
+| Flag | Caller member | Default |
+|---|---|---|
+| `-C` | `repo` | the repo containing the current directory |
+| `-r` | `revision` | `@`, your working copy (jj snapshots it first, so uncommitted edits count) |
+| `-s` | `name` | `cld_host_<repo dir name>` |
+| `-t` (repeatable) | `targets` | the repo alone |
+
+Everything after the action goes to it as given. An action's `--repo` selector
+is refused: it picks a ticket container's mounted repo, so on the host use `-C`.
+A graphql server started this way has no container named after its session,
+so the orphan cleanup reaps it on the next `graphql start` or `status` from any
+caller.
 
 ## Setup (once, host-side)
 
@@ -114,20 +142,30 @@ to a Python function named `action_<name>` (hyphens → underscores). To add one
 define a function in `cld-broker.py` — that's the whole change:
 
 ```python
-def action_lint(ctx: Session, argv: list[str]) -> None:
-    rev, secrets = resolve_test_context(ctx)
+def action_lint(caller: Caller, argv: list[str]) -> None:
+    repo = caller.repo("")
+    rev, secrets = resolve_test_context(caller, repo)
     _exec(["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/tmp",
-           "-v", f"{ctx.repo}:/repo", "-e", f"REVISION={rev}",
+           "-v", f"{repo}:/repo", "-e", f"REVISION={rev}",
            _setting("LINT_IMAGE") or "runlint:latest", *argv])
 ```
 
-It receives the shared context the dispatcher prepared -- `ctx.name` (validated
-session id -- agent, task-agent or ticket) and `ctx.repo` (resolved from the
-session label) -- and the decoded argv as a list. Per-action context is resolved
-lazily inside the action --
+It receives the `Caller` the dispatcher built and the decoded argv as a list.
+`Caller` is the seam between the two domains of the script: the caller source
+answers who called and what they may reach, the actions consume the answers as
+plain values. It has four members, all resolved lazily, so read-only actions
+don't depend on inputs they don't use:
+
+| Member | Meaning | `LabelCaller` (the sshd route) |
+|---|---|---|
+| `name` | session id; names the caller's own resources | the container name |
+| `repo(selector)` | host repo to act on; `selector` is the `--repo` name | `org.cld.repo-root`, or `org.cld.repo.<name>` for a ticket |
+| `revision(repo)` | caller's current commit, `None` if unresolvable | jj `<session>@` in that repo |
+| `targets()` | repos the caller may launch task-agents for | `org.cld.repo-root` + `org.cld.targets` |
+
 `run-tests` calls `resolve_test_context` for the revision and the secrets
-`.env` / `PROJECT_SUBDIR` -- so read-only actions don't depend on the session
-bookmark being resolvable. The script uses the Python standard library only
+`.env` / `PROJECT_SUBDIR`. Feeding actions from another source (e.g. inputs
+given on a host CLI) means implementing `Caller` once; no action changes. The script uses the Python standard library only
 (3.12+), so the host needs no venv. Call it from a container with `cld broker lint <args>`
 (action name is the first argument; `run-tests` needs no special-casing). An
 action name that has no matching function is denied, so enabling/disabling is
