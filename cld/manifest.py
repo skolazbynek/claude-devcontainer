@@ -32,8 +32,8 @@ TICKET_LABEL = "org.cld.ticket"
 SESSION_LABEL = "org.cld.session"
 # Authoritative JSON manifest, read back via `docker inspect`.
 MANIFEST_LABEL = "org.cld.manifest"
-# Redundant flat per-repo labels for shell readers (cld-broker.sh greps
-# labels); must stay parseable by cld.registry's ticket_repo_mounts.
+# Redundant flat per-repo labels for line-based readers (cld-broker.py reads
+# labels without parsing JSON); must stay parseable by cld.registry's ticket_repo_mounts.
 REPO_LABEL_PREFIX = "org.cld.repo."
 
 

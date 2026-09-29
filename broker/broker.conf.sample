@@ -1,5 +1,6 @@
-# Broker config -- sourced by cld-broker.sh. Copy to /etc/cld/broker.conf
-# (or point CLD_BROKER_CONF at it).
+# Broker config -- read by cld-broker.py. Copy to /etc/cld/broker.conf
+# (or point CLD_BROKER_CONF at it). Only `[export] KEY=VALUE` lines count,
+# with shell quoting; nothing is expanded or executed, so write `$HOME` out.
 #
 # The broker serves ANY repo that has a running master: it resolves the target
 # repo from the calling master container's org.cld.repo-root label, and the
@@ -21,8 +22,7 @@ RUNTESTS_IMAGE=runtests:latest
 # GRAPHQL_START_TIMEOUT=300
 
 # The forced command runs with a minimal PATH; make jj, docker, cld (the
-# `task-agent` action runs host-side `cld task-agent`), curl (the `graphql` action's
-# readiness probe and queries), and jq/python3 if your `graphql_command`
+# `task-agent` action runs host-side `cld task-agent`), and jq/python3 if your `graphql_command`
 # needs them -- plus any other tools your actions call -- reachable:
 # PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
 

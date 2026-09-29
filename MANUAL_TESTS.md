@@ -291,7 +291,7 @@ Prerequisites: the target repo has `graphql_command` set in `.cld/config.toml`
 - A session container that merely **stopped** (not removed) does *not* get
   its graphql server reaped — `sweep_gql_orphans` keys off container
   existence, not running state (see the comment at
-  `broker/cld-broker.sh:sweep_gql_orphans`).
+  `broker/cld-broker.py:sweep_gql_orphans`).
 
 ### 7.3 Unknown alias / denied raw URL
 
@@ -302,8 +302,8 @@ Prerequisites: the target repo has `graphql_command` set in `.cld/config.toml`
 2. `list_endpoints` — confirm it lists only the aliases actually configured
    (`CLD_GRAPHQL_URL_<ALIAS>` in the repo's secrets env file), and returns
    cleanly (empty list, not an error) for a repo with **zero** aliases
-   configured — this is M2: `do_graphql_endpoints`'s `grep` must not abort
-   the pipeline under `set -euo pipefail` when nothing matches.
+   configured — this is M2: `do_graphql_endpoints` must not fail
+   the request when nothing matches.
 3. `query` with `target="http://some-unlisted-host.example/graphql"` (no
    `GRAPHQL_URL_ALLOWLIST` entry) — expect `denied: host '...' is not in
    GRAPHQL_URL_ALLOWLIST ...`.
@@ -325,7 +325,7 @@ Prerequisites: the target repo has `graphql_command` set in `.cld/config.toml`
 A userinfo component (`user:pass@host`) ahead of the port-strip let a URL
 like `http://allowed.example:80@evil.com/` bypass the allowlist entirely —
 `allowed.example` matched, but curl actually connected to `evil.com`. Fixed
-by stripping userinfo *before* the port (`broker/cld-broker.sh:
+by stripping userinfo *before* the port (`broker/cld-broker.py:
 check_url_allowlisted`). With `GRAPHQL_URL_ALLOWLIST="allowed.example"`:
 
 | URL | Expected |
@@ -339,11 +339,13 @@ check_url_allowlisted`). With `GRAPHQL_URL_ALLOWLIST="allowed.example"`:
 Verify directly against the function in isolation (no container needed):
 
 ```bash
-awk '/^check_url_allowlisted\(\) \{/,/^}/' broker/cld-broker.sh > /tmp/fn.sh
-GRAPHQL_URL_ALLOWLIST="allowed.example" bash -c '
-  source /tmp/fn.sh
-  check_url_allowlisted "http://allowed.example:80@evil.com/"
-  echo "rc=$?"'
+python3 -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("b", "broker/cld-broker.py")
+b = importlib.util.module_from_spec(spec); spec.loader.exec_module(b)
+b.CONF["GRAPHQL_URL_ALLOWLIST"] = "allowed.example"
+b.check_url_allowlisted(sys.argv[1])' "http://allowed.example:80@evil.com/"
+echo "rc=$?"
 # expect: denied: host 'evil.com' is not in GRAPHQL_URL_ALLOWLIST ...  /  rc=3
 ```
 

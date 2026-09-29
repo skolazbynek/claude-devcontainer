@@ -30,7 +30,7 @@ printf '[host.docker.internal]:2222 %s\n' \
 ## 3. Broker script + config + control script
 
 ```bash
-cp broker/cld-broker.sh "$BROKER/cld-broker.sh" && chmod +x "$BROKER/cld-broker.sh"
+cp broker/cld-broker.py "$BROKER/cld-broker.py" && chmod +x "$BROKER/cld-broker.py"
 cp broker/broker.conf.sample "$BROKER/broker.conf"
 ${EDITOR:-nano} "$BROKER/broker.conf"
 
@@ -44,8 +44,9 @@ resolved per request from the calling master, so nothing per-repo goes here):
 
 ```sh
 RUNTESTS_IMAGE=runtests:latest
-# The forced command runs with a minimal PATH; make jj + docker reachable:
-PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+# The forced command runs with a minimal PATH; make jj + docker reachable.
+# Write your home out: the broker reads this file, it does not expand $HOME.
+PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
 ```
 
 ## 4. sshd config (home paths)
@@ -61,7 +62,7 @@ AuthorizedKeysFile $BROKER/broker_authorized_keys
 PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
-ForceCommand $BROKER/cld-broker.sh
+ForceCommand $BROKER/cld-broker.py
 SetEnv CLD_BROKER_CONF=$BROKER/broker.conf
 PermitTTY no
 AllowTcpForwarding no

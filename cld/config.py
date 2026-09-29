@@ -93,11 +93,11 @@ _TOML_KEYS = {
     "otel_endpoint",
     # Not a Config field -- no Python code reads this. Recognized here only so
     # _load_toml() doesn't warn "unknown key" on repos that set it; the value
-    # is read directly out of .cld/config.toml by cld-broker.sh's own parser
+    # is read directly out of .cld/config.toml by cld-broker.py's own parser
     # (PROJECT_SUBDIR for the cld broker / runtests container).
     "pyproject_dir",
     # Same story as pyproject_dir above, but for the `graphql` broker action's
-    # server lifecycle (cld-broker.sh's resolve_graphql_config): the shell
+    # server lifecycle (cld-broker.py's resolve_graphql_config): the shell
     # command that starts the server, the port it binds inside its container,
     # and the HTTP path the readiness probe/queries hit.
     "graphql_command",

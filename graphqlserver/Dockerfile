@@ -14,7 +14,7 @@ ARG POETRY_VERSION=2.4.1
 # System + build deps. build-essential / pkg-config / default-libmysqlclient-dev
 # cover the C-extension deps (mysqlclient etc.) that target repos commonly pull.
 # curl also installs jj/poetry below; the readiness probe itself runs
-# host-side (broker/cld-broker.sh) -- curl inside the image is for
+# host-side (broker/cld-broker.py) -- curl inside the image is for
 # interactive debugging only (`docker exec ... curl localhost:$GQL_PORT`).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \

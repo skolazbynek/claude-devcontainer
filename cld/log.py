@@ -180,13 +180,13 @@ _SECRET_KV_RE = re.compile(
 )
 _SECRET_PATH_RE = re.compile(r"/run/secrets/[\w./-]+")
 # scheme://user:password@host -- e.g. a DSN a graphql server's error body
-# echoes back. Deliberately duplicated in broker/cld-broker.sh's own
+# echoes back. Deliberately duplicated in broker/cld-broker.py's own
 # mask_output(): the broker cannot depend on `cld` being importable by the
 # host's python3, so the same pattern is kept in both places on purpose.
 _SECRET_URL_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]*@")
 # "password": "x" / "token": "x" -- a graphql error body is JSON, not
 # shell KV, so _SECRET_KV_RE's bare `TOKEN=...` shape never matches it.
-# Deliberately duplicated in broker/cld-broker.sh's mask_output() too, same
+# Deliberately duplicated in broker/cld-broker.py's mask_output() too, same
 # reasoning as _SECRET_URL_RE above.
 _SECRET_JSON_RE = re.compile(
     r'(?i)"(token|key|secret|password)"\s*:\s*"[^"]*"'

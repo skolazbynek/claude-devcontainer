@@ -4,7 +4,7 @@ available (task-agent containers generally have no daemon socket), so these
 tests only exercise logic that doesn't require a real collector container:
 
 - doctor_check_env: the shell-env verdict table (TestDoctorCheckEnv), run
-  directly via bash following the tests/test_broker_sh.py precedent.
+  directly via bash.
 - doctor_summary: the ok/warn/fail/skip -> summary line + verdict mapping
   (TestDoctorSummary), same technique.
 - The synthetic round-trip and its isolated temp-dir replay fallback
@@ -441,7 +441,7 @@ class TestDoctorCfgResolver:
 class TestDoctorCheckCollectorMountsDrift:
     """doctor_check_collector's config-edited-since-start sub-check
     (otel/otelctl.sh doctor_check_collector, the mounts branch). Docker
-    itself is stubbed on PATH (tests/test_broker_sh.py precedent), so this
+    itself is stubbed on PATH, so this
     exercises real bash + real `date`/`stat` -- only the docker daemon is
     faked, not the platform-portability logic under test.
 

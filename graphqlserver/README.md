@@ -88,7 +88,7 @@ same reason the entrypoint defaults `USER`/`LOGNAME` to `graphqlserver` if unset
   databases and PyPI works without a host mount.
 - Non-root `pyproject.toml`? Set `PROJECT_SUBDIR`.
 - This image is normally driven by the `graphql` broker action
-  (`../broker/cld-broker.sh`), not run by hand -- see `../docs/graphql-mcp.md`.
+  (`../broker/cld-broker.py`), not run by hand -- see `../docs/graphql-mcp.md`.
 - Reading the revision while another process (e.g. an interactive session)
   writes the same store concurrently is supported by jj's op-log; a
   store-reading caller may lag the latest edit by a snapshot interval.

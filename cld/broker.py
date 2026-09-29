@@ -2,7 +2,7 @@
 
 On the host, cld talks to the Docker daemon directly. Inside a container there is no
 docker socket (removed by design -- see docs/design-cld-broker.md); the only host
-channel is the broker: an sshd whose ForceCommand is `broker/cld-broker.sh`, reached
+channel is the broker: an sshd whose ForceCommand is `broker/cld-broker.py`, reached
 here by building the ssh argv ourselves. This module centralizes that host-vs-broker
 decision so call sites stay backend-agnostic.
 
@@ -192,7 +192,7 @@ def broker_task_agent_op(target: str, op: str, extra_args: list[str] | None = No
     The broker's task-agent action enforces the argv rules a container must not
     be able to bypass -- it denies ``--force`` and a caller-supplied
     ``--parent``, and stamps the calling session as the parent itself (see
-    broker/cld-broker.sh). *target* is authorized against the caller's host-set
+    broker/cld-broker.py). *target* is authorized against the caller's host-set
     labels, which since the master role's removal means only the caller's own
     ``org.cld.repo-root``; the ticket-scoped rework of this route is pending.
     """

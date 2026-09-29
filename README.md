@@ -338,7 +338,7 @@ No container mounts `/var/run/docker.sock` (it was equivalent to host root; see 
 - **Peer enumeration** (`list_agents`): the broker's `list-containers` action runs `docker ps` on the host and streams structured records back. Agents don't enumerate at all -- message replies address the sender by the full name carried in the message, delivered by filesystem, so agents need no host channel.
 - **Running tests and the GraphQL server** (`run-tests`, `graphql`): host-side, against the repo the caller's own `org.cld.repo-root` label names, with secrets mounted into a throwaway container the caller never sees.
 
-See `cld/broker.py` (the host-vs-broker seam) and `broker/cld-broker.sh` (the actions). Path translation (`CLD_HOST_PROJECT_DIR`/`CLD_HOST_HOME`) still converts container paths to host paths; it is set unconditionally rather than riding along with the socket mount.
+See `cld/broker.py` (the host-vs-broker seam) and `broker/cld-broker.py` (the actions). Path translation (`CLD_HOST_PROJECT_DIR`/`CLD_HOST_HOME`) still converts container paths to host paths; it is set unconditionally rather than riding along with the socket mount.
 
 ### Security model and known gaps
 
@@ -384,7 +384,7 @@ Full set of keys:
 | `base_image` | string | `"claude-base:latest"` | Common base Docker image |
 | `devcontainer_image` | string | `"claude-devcontainer:latest"` | Devcontainer image (`cld task-agent`, ticket containers) |
 | `run_image` | string | `"claude-run:latest"` | One-shot run image (`cld run`) |
-| `pyproject_dir` | string | `"."` | Directory (relative to repo root) holding `pyproject.toml` and `.env`. Not a `Config` field -- read directly out of `.cld/config.toml` by `cld-broker.sh` on the host, for the broker's `PROJECT_SUBDIR` and secrets path (see "Host-side test running" in `CLAUDE.md`) |
+| `pyproject_dir` | string | `"."` | Directory (relative to repo root) holding `pyproject.toml` and `.env`. Not a `Config` field -- read directly out of `.cld/config.toml` by `cld-broker.py` on the host, for the broker's `PROJECT_SUBDIR` and secrets path (see "Host-side test running" in `CLAUDE.md`) |
 | `ssl_certs_path` | string | `""` | Opt-in override: host path (dir or PEM file) that **replaces** the baked CA bundle. Empty = use the baked bundle |
 | `home_mounts_always` | array of strings | `[".claude.json", ".config/anthropic", ".config/claude", ".config/jj"]` | RO `$HOME` paths staged into every container |
 | `home_mounts_devcontainer` | array of strings | `[".gitconfig", ".bashrc", ".config/nvim", ".local/state/nvim", ".cache/nvim"]` | Additional RO `$HOME` paths staged only for interactive devcontainer sessions |

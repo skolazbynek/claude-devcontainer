@@ -46,12 +46,11 @@ shutdown() {
 
 restart() { shutdown; sleep 0.3; start; }
 
-# Duplicates cld-broker.sh's sweep_gql_orphans() rather than sourcing that
-# file: cld-broker.sh's own tail unconditionally dispatches on $SSH_ORIGINAL_COMMAND
-# once sourced, which would run (or fail oddly) here. Reaps any `graphql`
+# Duplicates cld-broker.py's sweep_gql_orphans() so this script stays plain
+# bash, and adds a line per reaped server. Reaps any `graphql`
 # broker-action server whose owning session container is gone -- useful after
 # a host reboot, without needing to start any session first. Cross-reference:
-# broker/cld-broker.sh:sweep_gql_orphans.
+# broker/cld-broker.py:sweep_gql_orphans.
 graphql-sweep() {
     local c s r
     for c in $(docker ps -a --filter label=org.cld.gql-session --format '{{.Names}}'); do

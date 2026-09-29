@@ -15,7 +15,7 @@ task-agents are instructed (persona prompts, not enforced here) to only run
 authorization.
 
 A container asks over SSH; a dedicated, single-purpose `sshd` answers with a
-forced command (`cld-broker.sh`). It serves **any repo that has a running
+forced command (`cld-broker.py`). It serves **any repo that has a running
 agent, task-agent or ticket container** -- no whitelist: it resolves the target repo
 from the calling container's `org.cld.repo-root` label, resolves which change
 that session is on (reading the jj store, never touching the working copy),
@@ -26,7 +26,7 @@ for the full design.
 
 ```
 container: cld broker run-tests -k login -x tests/
-   └─ssh (restricted key)─▶ dedicated sshd ─ForceCommand▶ cld-broker.sh
+   └─ssh (restricted key)─▶ dedicated sshd ─ForceCommand▶ cld-broker.py
         ├─ validate: action=run-tests, session=cld_agent_… or cld_ticket_…
         ├─ REPO = docker inspect <session> -> org.cld.repo-root label
         ├─ REV  = jj -R <repo> --ignore-working-copy log -r "<session>@"   (workspace tip, store-reading only)
@@ -39,8 +39,8 @@ container: cld broker run-tests -k login -x tests/
 
 | File | Role |
 |---|---|
-| `cld-broker.sh` | the `ForceCommand` target; the only thing the key can run |
-| `broker.conf.sample` | broker-wide config (image, PATH, ssh-agent socket); copy to `/etc/cld/broker.conf` |
+| `cld-broker.py` | the `ForceCommand` target; the only thing the key can run |
+| `broker.conf.sample` | broker-wide config (image, PATH, ssh-agent socket); copy to `/etc/cld/broker.conf`. Read as plain `KEY=VALUE` lines, never sourced: shell quoting works, `$VAR` expansion does not |
 | `sshd_cld_broker.conf` | sample config for the dedicated `sshd` instance |
 | `keygen.sh` | generate the broker keypair, host key, and `authorized_keys` |
 | `cld-cld-brokerctl.sh` | operate the sshd: `start` / `restart` / `shutdown` / `status` / `logs` |
@@ -73,7 +73,7 @@ claude's only host channel).
    request. Set `SSH_AUTH_SOCK` too if the agents and task-agents launched
    through the broker should be able to push (see the sample for why a
    login-shell agent's socket path will not do).
-3. **Broker script.** Install `cld-broker.sh` at `/opt/cld/cld-broker.sh`
+3. **Broker script.** Install `cld-broker.py` at `/opt/cld/cld-broker.py`
    (path referenced by `ForceCommand`), `chmod +x`.
 4. **sshd.** Edit `sshd_cld_broker.conf` (`AllowUsers`, `ListenAddress` for your
    bridge gateway, key paths), then launch the dedicated instance:
@@ -110,23 +110,25 @@ docker rm -f cld_agent_demo; jj -R "$REPO" bookmark delete cld_agent_demo
 ## Adding an action
 
 The broker dispatches `$SSH_ORIGINAL_COMMAND` (`<action> <session> <base64-argv>`)
-to a shell function named `action_<name>` (hyphens → underscores). To add one,
-define a function in `cld-broker.sh` — that's the whole change:
+to a Python function named `action_<name>` (hyphens → underscores). To add one,
+define a function in `cld-broker.py` — that's the whole change:
 
-```bash
-action_lint() {
-    exec docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
-        -v "$REPO:/repo" -e "REVISION=$REV" "${LINT_IMAGE:-runlint:latest}" "$@"
-}
+```python
+def action_lint(ctx: Session, argv: list[str]) -> None:
+    rev, secrets = resolve_test_context(ctx)
+    _exec(["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/tmp",
+           "-v", f"{ctx.repo}:/repo", "-e", f"REVISION={rev}",
+           _setting("LINT_IMAGE") or "runlint:latest", *argv])
 ```
 
-It receives the decoded argv as `"$@"` and the shared context the dispatcher
-prepared: `$session` (validated session id -- agent, task-agent or ticket) and
-`$REPO` (resolved from the session label). Per-action context is resolved
+It receives the shared context the dispatcher prepared -- `ctx.name` (validated
+session id -- agent, task-agent or ticket) and `ctx.repo` (resolved from the
+session label) -- and the decoded argv as a list. Per-action context is resolved
 lazily inside the action --
-`run-tests` calls `resolve_test_context` for `$REV` / `$SECRETS_ENV_FILE` /
-`$PROJECT_SUBDIR` -- so read-only actions don't depend on the session bookmark
-being resolvable. Call it from a container with `cld broker lint <args>`
+`run-tests` calls `resolve_test_context` for the revision and the secrets
+`.env` / `PROJECT_SUBDIR` -- so read-only actions don't depend on the session
+bookmark being resolvable. The script uses the Python standard library only
+(3.12+), so the host needs no venv. Call it from a container with `cld broker lint <args>`
 (action name is the first argument; `run-tests` needs no special-casing). An
 action name that has no matching function is denied, so enabling/disabling is
 just defining/removing the function.
@@ -141,7 +143,7 @@ endpoints against it or a credentialed alias; see
 `task-agent` action validates `<target>` against the caller's host-set
 `org.cld.repo-root` + `org.cld.targets` labels through
 `validate_target`; `graphql`, like `run-tests`, instead operates on the
-calling session's own repo (`$session`'s `org.cld.repo-root` label), since it
+calling session's own repo (the session's `org.cld.repo-root` label), since it
 has no separate target to launch.
 
 Both `run-tests`' `resolve_test_context` and `graphql`'s

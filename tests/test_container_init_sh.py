@@ -3,7 +3,8 @@ claude-devcontainer entrypoint: a warm start (`docker stop` then `docker
 start`) keeps /tmp, so the previous boot's generated `claude` wrapper in
 /tmp/bin -- first on PATH -- shadows `which claude`, and the freshly
 regenerated wrapper would exec its stale predecessor's path, an infinite
-self-exec loop. Same extract-one-function approach as tests/test_broker_sh.py.
+self-exec loop. The function under test is extracted from the real script and
+run via bash.
 """
 
 import os

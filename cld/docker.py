@@ -506,7 +506,7 @@ def build_container_args(
     # No docker socket is mounted into any container (it was equivalent to host
     # root). In-container docker needs -- peer enumeration above all -- go
     # through the host broker over SSH (see cld/broker.py,
-    # broker/cld-broker.sh). The broker key is mounted for the persistent role
+    # broker/cld-broker.py). The broker key is mounted for the persistent role
     # (task-agent) by stage_broker below.
 
     # Host test broker (persistent role): mount the restricted key +
@@ -1181,7 +1181,7 @@ def stage_broker(cfg: Config) -> list[str]:
     Called for task-agent and ticket containers
     (see the call site in ``build_container_args``); the broker's sshd accepts
     any ``cld_*`` session and resolves its role from the ``org.cld.kind`` label
-    set at launch, not from the name -- see ``broker/cld-broker.sh``. See
+    set at launch, not from the name -- see ``broker/cld-broker.py``. See
     docs/design-cld-broker.md.
     """
     if not cfg.broker_key:

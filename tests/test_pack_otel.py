@@ -1,7 +1,7 @@
 """Tests for otel/pack.sh -- the standalone-install packer for otel/ (see
 docs/design-otel-standalone-install.md). Runs the real script via
-subprocess, following tests/test_broker_sh.py's convention: no bespoke shell
-harness, just the script exercised the way a user would run it.
+subprocess: no bespoke shell harness, just the script exercised the way a
+user would run it.
 
 Marked integration: these hit the real filesystem and (for provenance) the
 real jj repo this test suite lives in.
