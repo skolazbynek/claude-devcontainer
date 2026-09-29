@@ -2,8 +2,9 @@
 #
 # Single job: materialize a jj revision into an isolated workspace and run a
 # caller-supplied server command against it. No dependency on any other
-# project. Movable to its own repository as-is. Mirrors runtests/Dockerfile
-# byte for byte (same toolchain, same CA bundle) -- only entrypoint.sh differs.
+# project. Movable to its own repository together with
+# ../scripts/venv-cache.sh. Mirrors runtests/Dockerfile byte for byte (same
+# toolchain, same CA bundle) -- only entrypoint.sh differs.
 FROM debian:stable-slim
 
 # Pin toolchain versions explicitly; do not track "latest".
@@ -42,6 +43,17 @@ RUN curl -sSL https://install.python-poetry.org | \
         POETRY_HOME=/opt/poetry python3 - --version "${POETRY_VERSION}" && \
     ln -s /opt/poetry/bin/poetry /usr/local/bin/poetry && \
     /usr/local/bin/poetry --version
+
+# Fixed venv path shared with scripts/venv-cache.sh: a venv only works at the
+# absolute path it was built at, so cached venvs are copied back here. World-
+# writable because the broker's --user uid is unknown at build time. VIRTUAL_ENV
+# makes poetry use this venv instead of creating its own. /cache is where the
+# broker mounts the host-side cache; unmounted, it is just a scratch dir.
+RUN mkdir -p /opt/venv /cache && chmod 1777 /opt/venv /cache
+ENV VIRTUAL_ENV=/opt/venv \
+    POETRY_CACHE_DIR=/cache/poetry
+# From the `scripts` build context (../scripts, passed by build.sh).
+COPY --from=scripts venv-cache.sh /usr/local/bin/venv-cache.sh
 
 # Bake internal CA certs into the system trust store so python/requests/poetry
 # and TLS to the databases trust them without any host mount.

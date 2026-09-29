@@ -13,6 +13,8 @@
 #                       Explicit args passed to the container still override these.
 #   OUTPUT_MAX_BYTES    cap on returned output; only the last N bytes (which hold
 #                       pytest's summary) are emitted, with a truncation notice.
+#   VENV_CACHE*         venv cache controls, see venv-cache.sh (the cache is
+#                       used only when the broker mounts it at /cache).
 #
 # The repo store is bind-mounted at /repo; the isolated working copy is created
 # under $HOME via `jj workspace add`, which never touches the store's default
@@ -63,8 +65,11 @@ fi
 log=/tmp/runtests.out
 rc=0
 echo "[runtests] installing dependencies (poetry install $POETRY_INSTALL_ARGS)..." >&2
+# Seeds $VIRTUAL_ENV from the cache (never fails); the install below then only
+# adds the project itself. See scripts/venv-cache.sh for VENV_CACHE*.
+POETRY_INSTALL_ARGS="$POETRY_INSTALL_ARGS" venv-cache.sh >"$log" 2>&1
 # shellcheck disable=SC2086  -- intentional word-splitting into separate flags
-poetry install --no-interaction $POETRY_INSTALL_ARGS >"$log" 2>&1 || rc=$?
+poetry install --no-interaction $POETRY_INSTALL_ARGS >>"$log" 2>&1 || rc=$?
 if [ "$rc" -eq 0 ]; then
     echo "[runtests] running: pytest ${*:-<all tests>}  (PYTEST_ADDOPTS=$PYTEST_ADDOPTS)" >&2
     poetry run pytest "$@" >>"$log" 2>&1 || rc=$?

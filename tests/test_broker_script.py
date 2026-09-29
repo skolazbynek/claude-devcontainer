@@ -180,6 +180,7 @@ case "$cmd" in
       *range*)             printf '%s' "${FAKE_LABELS:-}" ;;
     esac
     ;;
+  image) echo sha256:img123 ;;
   run) echo "DOCKER_RUN $*" ;;
 esac
 """, jj="echo rev123\n")
@@ -195,6 +196,7 @@ esac
         env = dict(os.environ)
         env["CLD_BROKER_CONF"] = "/nonexistent"
         env["SSH_ORIGINAL_COMMAND"] = f"run-tests {session} {payload}"
+        env["VENV_CACHE_ROOT"] = ""
         env.update(env_overrides)
         return subprocess.run([sys.executable, str(BROKER_PY)], capture_output=True, text=True, env=env)
 
@@ -233,6 +235,27 @@ esac
         assert result.returncode == 0, result.stderr
         assert f"-v {repos}/lide-api:/repo" in result.stdout
         assert result.stdout.rstrip().endswith("runtests:latest -k login")
+
+    def test_venv_cache_wired(self, repos, tmp_path):
+        cache = tmp_path / "cache"
+        result = self._dispatch(
+            "cld_agent_lide-api_fix", ["-k", "login"],
+            {"FAKE_KIND": "task-agent", "FAKE_REPO_ROOT": f"{repos}/lide-api",
+             "VENV_CACHE_ROOT": str(cache)},
+        )
+        assert result.returncode == 0, result.stderr
+        assert f"-v {cache}:/cache" in result.stdout
+        assert "-e VENV_CACHE_IMAGE_ID=sha256:img123" in result.stdout
+        assert all((cache / d).is_dir() for d in ("venvs", "poetry", "locks"))
+
+    def test_venv_cache_disabled(self, repos):
+        result = self._dispatch(
+            "cld_agent_lide-api_fix", ["-k", "login"],
+            {"FAKE_KIND": "task-agent", "FAKE_REPO_ROOT": f"{repos}/lide-api"},
+        )
+        assert result.returncode == 0, result.stderr
+        assert ":/cache" not in result.stdout
+        assert "VENV_CACHE_IMAGE_ID" not in result.stdout
 
     def test_v1_caller_repo_flag_denied(self, repos):
         result = self._dispatch(
@@ -280,7 +303,8 @@ printf '%s\\n' "$@"
         return tmp_path / "my.repo"
 
     def _run(self, tmp_path, cwd: Path, *args: str) -> subprocess.CompletedProcess:
-        env = dict(os.environ, CLD_BROKER_CONF="/nonexistent", FAKE_JJ_LOG=str(tmp_path / "jj.log"))
+        env = dict(os.environ, CLD_BROKER_CONF="/nonexistent", FAKE_JJ_LOG=str(tmp_path / "jj.log"),
+                   VENV_CACHE_ROOT="")
         env.pop("SSH_ORIGINAL_COMMAND", None)
         return subprocess.run([sys.executable, str(BROKER_PY), *args], cwd=cwd,
                               capture_output=True, text=True, env=env)

@@ -67,9 +67,9 @@ CONF: dict[str, str] = {}
 _DEFAULTS = {
     "RUNTESTS_IMAGE": "runtests:latest",
     "GRAPHQL_IMAGE": "graphqlserver:latest",
-    # poetry install dominates every graphql start/restart (slow path, no fast
-    # restart yet -- see docs/impl-graphql-broker-plan.md §11), so the readiness
-    # budget has to cover it, not just a normal server boot.
+    # poetry install dominates a graphql start/restart on a venv cache miss (no
+    # fast restart yet -- see docs/impl-graphql-broker-plan.md §11), so the
+    # readiness budget has to cover it, not just a normal server boot.
     "GRAPHQL_START_TIMEOUT": "300",
     "GRAPHQL_QUERY_TIMEOUT": "30",
     "GRAPHQL_OUTPUT_MAX_BYTES": "65536",
@@ -385,10 +385,23 @@ def _secret_mount(secrets: SecretsEnv) -> list[str]:
     return ["-v", f"{secrets.env_file}:/secrets/.env:ro"] if os.path.isfile(secrets.env_file) else []
 
 
+def _venv_cache_args(image: str) -> list[str]:
+    """The -v/-e args wiring the host-side venv + poetry download cache
+    (scripts/venv-cache.sh) into a run of *image*; none when the cache is
+    disabled. The image id is part of the cache key -- a container cannot read its own."""
+    # Not _setting: VENV_CACHE_ROOT set empty in the conf disables the cache.
+    if not (root := CONF.get("VENV_CACHE_ROOT", os.path.expanduser("~/.cld/cache"))):
+        return []
+    for sub in ("venvs", "poetry", "locks"):
+        os.makedirs(f"{root}/{sub}", exist_ok=True)
+    image_id = _out_strict("docker", "image", "inspect", "--format", "{{.Id}}", image, stderr=None)
+    return ["-v", f"{root}:/cache", "-e", f"VENV_CACHE_IMAGE_ID={image_id}"]
+
+
 def run_tests(repo: str, rev: str, secrets: SecretsEnv, argv: list[str]) -> NoReturn:
     _exec([
         "docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/tmp",
-        "-v", f"{repo}:/repo", *_secret_mount(secrets),
+        "-v", f"{repo}:/repo", *_secret_mount(secrets), *_venv_cache_args(_setting("RUNTESTS_IMAGE")),
         "-e", f"REVISION={rev}", "-e", f"PROJECT_SUBDIR={secrets.project_subdir}",
         _setting("RUNTESTS_IMAGE"), *argv,
     ])
@@ -910,7 +923,7 @@ def do_graphql_start(scope: Scope, rev: str) -> None:
         "--label", f"org.cld.gql-session={scope.session}",
         "--label", f"org.cld.gql-repo={scope.repo}",
         "--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/tmp",
-        "-v", f"{scope.repo}:/repo", *_secret_mount(secrets),
+        "-v", f"{scope.repo}:/repo", *_secret_mount(secrets), *_venv_cache_args(_setting("GRAPHQL_IMAGE")),
         "-e", f"REVISION={rev}", "-e", f"PROJECT_SUBDIR={secrets.project_subdir}",
         "-e", f"GQL_WORKSPACE={wsname}", "-e", f"GQL_COMMAND={config.command}",
         "-e", f"GQL_PORT={config.port}",

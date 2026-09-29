@@ -518,3 +518,79 @@ With W4, the same checks apply behind `cld start` / `cld stop` /
 - Failure tolerance: point bootstrap at a repo whose `poetry install` fails
   (e.g. unreachable index) — boot logs `[WARN] poetry install failed for
   <name> (continuing)` and still reaches the ready sentinel.
+
+## 9. Venv cache (`scripts/venv-cache.sh`)
+
+Prereq: `runtests` and `graphqlserver` images rebuilt with their `build.sh`,
+broker restarted, `VENV_CACHE_ROOT` unset in the broker config (default
+`~/.cld/cache`). Use a python repo with a `poetry.lock`.
+
+### 9.1 Miss, then hit
+
+**Steps**
+
+1. `rm -rf ~/.cld/cache`, then `cld broker run-tests -k <any>` from the master.
+2. Run it again.
+
+**Observe / confirm**
+
+- First run output starts with `[venv-cache] miss, building: <key>`;
+  `~/.cld/cache/venvs/<key>` exists afterwards.
+- Second run shows `[venv-cache] hit: <key>` and installs only the project
+  itself; it is clearly faster than the first.
+- `cld broker graphql start` for the same repo also hits its own key (the image
+  id differs from `runtests`, so it misses once first).
+
+### 9.2 Lock file change
+
+**Steps**
+
+1. Add a dependency in the workspace (`poetry add <pkg>`), then run tests.
+
+**Observe / confirm**
+
+- A new key is built; the old key's dir stays until evicted.
+- The poetry download cache is reused: only the new package is downloaded.
+
+### 9.3 Parallel runs
+
+**Steps**
+
+1. With an empty cache, start two `run-tests` at once (two task-agents, or two
+   shells).
+
+**Observe / confirm**
+
+- One logs `miss, building`, the other waits and then logs
+  `hit after waiting for another build`; both pass.
+- No `.tmp-*` dirs remain in `~/.cld/cache/venvs`.
+
+### 9.4 Disabled / rebuild / eviction
+
+**Steps**
+
+1. Set `VENV_CACHE_ROOT=` in the broker config, run tests.
+2. Unset it again; run the image directly with `-v ~/.cld/cache:/cache
+   -e VENV_CACHE_IMAGE_ID=$(docker image inspect -f '{{.Id}}' runtests:latest)
+   -e VENV_CACHE=rebuild` (see `runtests/README.md` for the rest of the args).
+3. Same, with `-e VENV_CACHE_KEEP=1` after changing `poetry.lock`.
+
+**Observe / confirm**
+
+- Step 1: no `/cache` mount in `docker inspect`; logs `/cache not mounted,
+  skipping`; tests still pass.
+- Step 2: logs `miss, building` for an existing key and replaces it.
+- Step 3: only one dir remains under `venvs/`.
+
+### 9.5 Killed build recovers
+
+**Steps**
+
+1. With an empty cache, start `run-tests` and `docker rm -f` the runtests
+   container during the `miss, building` phase.
+2. Run tests again.
+
+**Observe / confirm**
+
+- The second run builds normally (the lock died with the container) and the
+  stale `.tmp-*` dir is gone after it publishes.

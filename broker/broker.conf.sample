@@ -21,6 +21,10 @@ RUNTESTS_IMAGE=runtests:latest
 # GRAPHQL_URL_ALLOWLIST=dev.example.internal staging.example.internal
 # GRAPHQL_START_TIMEOUT=300
 
+# Venv + poetry download cache mounted into runtests and graphqlserver at
+# /cache (../scripts/venv-cache.sh). Set it empty to disable the cache.
+# VENV_CACHE_ROOT=/home/you/.cld/cache
+
 # The forced command runs with a minimal PATH; make jj, docker, cld (the
 # `task-agent` action runs host-side `cld task-agent`), and jq/python3 if your `graphql_command`
 # needs them -- plus any other tools your actions call -- reachable:

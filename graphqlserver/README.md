@@ -42,6 +42,10 @@ and sourced into the server's environment only.
 | `GQL_COMMAND` | `-e` | *(required)* | shell command that starts the server; no guessed default |
 | `GQL_PORT` | `-e` | `8000` | port the server must bind **inside** the container |
 | `POETRY_INSTALL_ARGS` | `-e` | `--all-extras --all-groups` | `poetry install` flags |
+| venv cache | `-v <dir>:/cache` (rw) | — | host cache holding `venvs/`, `poetry/`, `locks/`; see [Venv cache](../runtests/README.md#venv-cache) |
+| `VENV_CACHE_IMAGE_ID` | `-e` | — | image id, part of the cache key; the cache is skipped without it |
+| `VENV_CACHE` | `-e` | `on` | `on`, `off`, or `rebuild` (rebuild this key's venv) |
+| `VENV_CACHE_KEEP` | `-e` | `10` | most recently used venvs kept in the cache |
 
 Requires **Poetry 2.x** (the image ships 2.4.1): it reads PEP 621 `[project]`
 metadata, which Poetry 1.x does not.
@@ -64,6 +68,9 @@ into `$GQL_COMMAND`, so signals reach it directly).
 ./build.sh                        # -> graphqlserver:latest
 GRAPHQL_IMAGE=graphqlserver:dev ./build.sh
 ```
+
+`build.sh` passes `../scripts` as the extra build context `scripts` (for
+`venv-cache.sh`), which needs BuildKit (the default builder since Docker 23).
 
 ## Run
 

@@ -3,4 +3,4 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE="${GRAPHQL_IMAGE:-graphqlserver:latest}"
-exec docker build -t "$IMAGE" "$here"
+exec docker build --build-context scripts="$here/../scripts" -t "$IMAGE" "$here"

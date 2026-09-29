@@ -15,6 +15,8 @@
 #   GQL_COMMAND           shell command that starts the server (required, no guessed default)
 #   GQL_PORT              port the server binds to *inside* the container (default: 8000)
 #   POETRY_INSTALL_ARGS   flags for `poetry install` (default: --all-extras --all-groups)
+#   VENV_CACHE*           venv cache controls, see venv-cache.sh (the cache is
+#                         used only when the broker mounts it at /cache).
 #
 # The repo store is bind-mounted at /repo; the isolated working copy is created
 # under $HOME via `jj workspace add`, which never touches the store's default
@@ -65,6 +67,9 @@ fi
 # for the server process this script execs into, which the broker's `logs`
 # action reads back as the deliverable stream.
 echo "[graphqlserver] installing dependencies (poetry install $POETRY_INSTALL_ARGS)..." >&2
+# Seeds $VIRTUAL_ENV from the cache (never fails); the install below then only
+# adds the project itself. See scripts/venv-cache.sh for VENV_CACHE*.
+POETRY_INSTALL_ARGS="$POETRY_INSTALL_ARGS" venv-cache.sh >&2
 # shellcheck disable=SC2086  -- intentional word-splitting into separate flags
 poetry install --no-interaction $POETRY_INSTALL_ARGS >&2
 

@@ -100,7 +100,9 @@ claude's only host channel).
    is nothing per-repo to set -- the repo and its secrets path are resolved per
    request. Set `SSH_AUTH_SOCK` too if the agents and task-agents launched
    through the broker should be able to push (see the sample for why a
-   login-shell agent's socket path will not do).
+   login-shell agent's socket path will not do). `VENV_CACHE_ROOT` (default
+   `~/.cld/cache`) holds the venvs reused across `run-tests` and `graphql`
+   runs; see `../runtests/README.md#venv-cache`.
 3. **Broker script.** Install `cld-broker.py` at `/opt/cld/cld-broker.py`
    (path referenced by `ForceCommand`), `chmod +x`.
 4. **sshd.** Edit `sshd_cld_broker.conf` (`AllowUsers`, `ListenAddress` for your
