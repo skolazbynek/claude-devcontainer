@@ -18,6 +18,7 @@ from pathlib import Path
 
 from cld.docker import in_master_container
 from cld.log import get_logger
+from cld.manifest import TicketManifest
 
 log = get_logger(__name__)
 
@@ -28,6 +29,10 @@ KNOWN_HOSTS_MOUNT = "/run/secrets/broker-known-hosts"
 
 # Login user when `broker_endpoint` carries no `user@`.
 _DEFAULT_USER = "zet"
+
+# Actions that act on the caller's revision, which the broker reads from the
+# jj store without snapshotting (broker/cld-broker.py:LabelCaller.revision).
+_REVISION_ACTIONS = ("run-tests", "graphql")
 
 
 def broker_available() -> bool:
@@ -54,6 +59,40 @@ def _endpoint() -> tuple[str, str, str]:
     return (user if sep else _DEFAULT_USER), host, (port or "2222")
 
 
+# Bounds the pre-call snapshot: a stuck jj lock must not hang every broker call.
+_SNAPSHOT_TIMEOUT = 30
+
+
+def _workspaces() -> list[str]:
+    """This container's repo workspaces: one per mounted repo for a ticket, else the v1 one."""
+    if raw := os.environ.get("CLD_TICKET_MANIFEST"):
+        manifest = TicketManifest.from_json(raw)
+        return [f"/workspace/{manifest.ticket}/{repo.name}" for repo in manifest.repos]
+    return ["/workspace/current"]
+
+
+def snapshot_workspaces() -> None:
+    """Snapshot every repo workspace, so the broker sees edits made a moment ago.
+
+    Watchman snapshots on its own, but only after the edit settles. Best effort:
+    a git repo, an unreadable manifest or a failed snapshot leaves the broker
+    reading the last snapshot.
+    """
+    try:
+        workspaces = _workspaces()
+    except (ValueError, KeyError, RuntimeError) as e:
+        log.warning("not snapshotting before the broker call: %s", e)
+        return
+    for path in workspaces:
+        try:
+            subprocess.run(["jj", "-R", path, "status"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=_SNAPSHOT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            log.warning("snapshot of %s timed out; the broker reads its last snapshot", path)
+        except OSError:
+            return
+
+
 def run_action(action: str, *args: str, capture: bool = False) -> subprocess.CompletedProcess:
     """Run *action* on the host broker with *args*, over ssh.
 
@@ -68,8 +107,12 @@ def run_action(action: str, *args: str, capture: bool = False) -> subprocess.Com
             "the cld broker is not configured for this container, so '%s' cannot "
             "reach the host.", action,
         )
-        return subprocess.CompletedProcess([], 127, stdout="", stderr="broker not available")
+        return subprocess.CompletedProcess(
+            [], 127, stdout="", stderr="the cld broker is not configured for this container",
+        )
 
+    if action in _REVISION_ACTIONS:
+        snapshot_workspaces()
     user, host, port = _endpoint()
     payload = base64.b64encode(b"".join(a.encode() + b"\0" for a in args)).decode("ascii")
     session = os.environ.get("SESSION_NAME", "")
@@ -82,7 +125,9 @@ def run_action(action: str, *args: str, capture: bool = False) -> subprocess.Com
         "--", f"{action} {session} {payload}",
     ]
     log.debug("broker: %s %s (%d args)", action, session, len(args))
-    return subprocess.run(cmd, capture_output=capture, text=True)
+    # No action reads stdin, and inside the graphql MCP server stdin carries its
+    # protocol messages: an inheriting ssh would swallow them.
+    return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=capture, text=True)
 
 
 def _parse_container_line(line: str) -> dict | None:

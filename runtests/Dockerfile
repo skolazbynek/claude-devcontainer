@@ -24,6 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         default-libmysqlclient-dev \
         default-mysql-client \
+        libnss-wrapper \
+        openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # jj: static musl binary works on any glibc/musl base.
@@ -49,6 +51,9 @@ ENV VIRTUAL_ENV=/opt/venv \
     POETRY_CACHE_DIR=/cache/poetry
 # From the `scripts` build context (../scripts, passed by build.sh).
 COPY --from=scripts venv-cache.sh /usr/local/bin/venv-cache.sh
+# `git+ssh://` dependencies: git and poetry's dulwich run `ssh` from PATH, and
+# this wrapper (ahead of /usr/bin/ssh) makes it work as the broker's --user uid.
+COPY --from=scripts ssh-wrapper.sh /usr/local/bin/ssh
 
 # Bake internal CA certs into the system trust store so python/requests/poetry
 # and TLS to the databases trust them without any host mount.

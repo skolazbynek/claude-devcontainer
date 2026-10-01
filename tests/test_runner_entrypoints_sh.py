@@ -1,0 +1,162 @@
+"""Tests for the shell glue of the runtests and graphqlserver images.
+
+The jj workspace step shared by both entrypoints must never snapshot the
+mounted store's own working copy -- the host user's checkout, possibly
+mid-edit -- and forgetting the workspace must leave no stray commit behind.
+Both rest on jj behaviour, so the real fragment runs against a real jj repo: a
+jj upgrade that changes it fails here. The ssh wrapper (scripts/ssh-wrapper.sh)
+runs with ssh, getent and mountpoint stubbed.
+"""
+
+import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+ENTRYPOINTS = [ROOT / "runtests" / "entrypoint.sh", ROOT / "graphqlserver" / "entrypoint.sh"]
+SSH_WRAPPER = ROOT / "scripts" / "ssh-wrapper.sh"
+
+
+def _fragment(entrypoint: Path, repo: Path) -> str:
+    """From `cd /repo` through the cd into the checked-out workspace, with the
+    store mount point pointed at *repo*."""
+    match = re.search(r'^cd /repo$.*?^cd "\$work/\$PROJECT_SUBDIR"$', entrypoint.read_text(),
+                      re.MULTILINE | re.DOTALL)
+    assert match, f"workspace fragment not found in {entrypoint}"
+    return match.group(0).replace("/repo", str(repo))
+
+
+@pytest.fixture
+def env(tmp_path):
+    config = tmp_path / "jj-config.toml"
+    config.write_text('[user]\nname = "test"\nemail = "test@localhost"\n')
+    (tmp_path / "home").mkdir()
+    return {**os.environ, "JJ_CONFIG": str(config), "HOME": str(tmp_path / "home"), "HOSTNAME": "abc123",
+            "GQL_WORKSPACE": "gql-abc123", "PROJECT_SUBDIR": "."}
+
+
+def _jj(env: dict, repo: Path, *args: str) -> str:
+    return subprocess.run(["jj", "-R", str(repo), "--ignore-working-copy", *args], env=env,
+                          capture_output=True, text=True, check=True).stdout
+
+
+@pytest.fixture
+def repo(tmp_path, env):
+    """A store whose working copy has an edit jj has not snapshotted yet."""
+    repo = tmp_path / "repo"
+    subprocess.run(["jj", "git", "init", str(repo)], env=env, capture_output=True, check=True)
+    (repo / "tracked.txt").write_text("committed\n")
+    subprocess.run(["jj", "-R", str(repo), "commit", "-m", "first"], env=env, capture_output=True, check=True)
+    (repo / "host-edit.txt").write_text("in progress\n")
+    return repo
+
+
+def _run(entrypoint: Path, repo: Path, env: dict, revision: str, after: str = "") -> subprocess.CompletedProcess:
+    script = "\n".join(["set -euo pipefail", _fragment(entrypoint, repo), after])
+    return subprocess.run(["bash", "-c", script], env={**env, "REVISION": revision}, capture_output=True, text=True)
+
+
+@pytest.mark.skipif(shutil.which("jj") is None, reason="needs jj")
+@pytest.mark.parametrize("entrypoint", ENTRYPOINTS, ids=["runtests", "graphqlserver"])
+class TestWorkspaceStep:
+    def test_checks_out_the_revision_without_snapshotting_the_store(self, entrypoint, repo, env):
+        result = _run(entrypoint, repo, env, "@-", after="cat tracked.txt; test ! -e host-edit.txt")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "committed\n"
+        assert _jj(env, repo, "diff", "-r", "default@", "--name-only") == ""
+
+    def test_forget_on_exit_leaves_no_stray_commit(self, entrypoint, repo, env):
+        default_wc = _jj(env, repo, "log", "--no-graph", "-r", "default@", "-T", "commit_id")
+        result = _run(entrypoint, repo, env, "@-", after="echo junk > byproduct.txt")
+        assert result.returncode == 0, result.stderr
+        assert _jj(env, repo, "workspace", "list", "-T", 'name ++ "\\n"') == "default\n"
+        assert _jj(env, repo, "log", "--no-graph", "-r", "heads(all())", "-T", "commit_id") == default_wc
+
+    def test_unknown_revision_fails_with_jj_error(self, entrypoint, repo, env):
+        result = _run(entrypoint, repo, env, "no-such-rev")
+        assert result.returncode != 0
+        assert "no-such-rev" in result.stderr
+
+    def test_workspace_add_failure_is_reported(self, entrypoint, repo, env):
+        name = "runtests-abc123" if entrypoint.parent.name == "runtests" else "gql-abc123"
+        subprocess.run(["jj", "-R", str(repo), "workspace", "add", "--name", name, str(repo.parent / "taken")],
+                       env=env, capture_output=True, check=True)
+        result = _run(entrypoint, repo, env, "@-")
+        assert result.returncode != 0
+        assert "already exists" in result.stderr
+
+    def test_rewritten_revision_uses_the_current_commit(self, entrypoint, repo, env):
+        """The caller snapshotted again after REVISION was resolved: its old
+        commit is hidden, and building on it would revive it as a divergent twin."""
+        old = _jj(env, repo, "log", "--no-graph", "-r", "@-", "-T", "commit_id")
+        change = _jj(env, repo, "log", "--no-graph", "-r", "@-", "-T", "change_id")
+        (repo / "tracked.txt").write_text("rewritten\n")
+        subprocess.run(["jj", "-R", str(repo), "squash"], env=env, capture_output=True, check=True)
+        result = _run(entrypoint, repo, env, old, after="cat tracked.txt")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "rewritten\n"
+        assert _jj(env, repo, "log", "--no-graph", "-r", f"change_id({change})", "-T", 'commit_id ++ "\n"').count("\n") == 1
+
+
+class TestSshWrapper:
+    """The broker runs the images as the host uid, which has no passwd entry
+    there; ssh refuses to run without one, so the wrapper supplies it through
+    nss_wrapper. It also never prompts, and trusts a new host key on first use."""
+
+    def _run(self, tmp_path, passwd_entry: bool, cache_mounted: bool) -> dict:
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        stubs = {
+            "getent": f"exit {0 if passwd_entry else 2}\n",
+            "mountpoint": f"exit {0 if cache_mounted else 1}\n",
+            "fake-ssh": 'printf "%s\\n" "$@" > "$OUT.argv"; env > "$OUT.env"; '
+                        '[ -z "${NSS_WRAPPER_PASSWD:-}" ] || tail -n1 "$NSS_WRAPPER_PASSWD" > "$OUT.passwd"\n',
+        }
+        for name, body in stubs.items():
+            (bindir / name).write_text("#!/bin/sh\n" + body)
+            (bindir / name).chmod(0o755)
+        cache = tmp_path / "cache"
+        wrapper = tmp_path / "ssh"
+        wrapper.write_text(SSH_WRAPPER.read_text().replace("/usr/bin/ssh", str(bindir / "fake-ssh"))
+                           .replace("/cache", str(cache)))
+        wrapper.chmod(0o755)
+        home = tmp_path / "home"
+        home.mkdir()
+        out = tmp_path / "out"
+        env = {"PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(home), "USER": "runtests", "OUT": str(out)}
+        result = subprocess.run([str(wrapper), "git@gitlab.example", "git-upload-pack 'g/p.git'"],
+                                env=env, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        env_lines = Path(f"{out}.env").read_text().splitlines()
+        return {
+            "argv": Path(f"{out}.argv").read_text().splitlines(),
+            "env": dict(line.partition("=")[::2] for line in env_lines),
+            "passwd": Path(f"{out}.passwd").read_text() if Path(f"{out}.passwd").exists() else None,
+            "home": home, "cache": cache,
+        }
+
+    def test_supplies_a_passwd_entry_for_an_unknown_uid(self, tmp_path):
+        run = self._run(tmp_path, passwd_entry=False, cache_mounted=False)
+        assert run["env"]["LD_PRELOAD"] == "libnss_wrapper.so"
+        assert run["env"]["NSS_WRAPPER_GROUP"] == "/etc/group"
+        assert run["passwd"] == f"runtests:x:{os.getuid()}:{os.getgid()}::{run['home']}:/bin/sh\n"
+
+    def test_known_uid_runs_ssh_unwrapped(self, tmp_path):
+        run = self._run(tmp_path, passwd_entry=True, cache_mounted=False)
+        assert "LD_PRELOAD" not in run["env"]
+        assert run["passwd"] is None
+
+    def test_never_prompts_and_trusts_on_first_use(self, tmp_path):
+        run = self._run(tmp_path, passwd_entry=True, cache_mounted=False)
+        assert run["argv"] == ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+                               "-o", f"UserKnownHostsFile={run['home']}/.ssh/known_hosts",
+                               "git@gitlab.example", "git-upload-pack 'g/p.git'"]
+
+    def test_learned_host_keys_persist_in_the_cache_mount(self, tmp_path):
+        run = self._run(tmp_path, passwd_entry=True, cache_mounted=True)
+        assert f"UserKnownHostsFile={run['cache']}/ssh/known_hosts" in run["argv"]
+        assert (run["cache"] / "ssh").is_dir()

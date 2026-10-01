@@ -275,6 +275,21 @@ Prerequisites: the target repo has `graphql_command` set in `.cld/config.toml`
 - `jj bookmark list` in the repo shows a `gql-<session>` workspace bookmark
   while running, forgotten after `stop`.
 
+### 7.1b Signed-in local query
+
+**Steps**
+
+1. Add `CLD_GRAPHQL_AUTH_LOCAL='Bearer <token>'` (quoted; or `CLD_GRAPHQL_COOKIE_LOCAL`)
+   to the repo's `.env`.
+2. `query` a field that needs a signed-in user against `target="local"`.
+
+**Observe / confirm**
+
+- The query succeeds as that user; without the variable it fails the same
+  way an anonymous request does.
+- Nothing in the container's environment or the MCP response shows the
+  token.
+
 ### 7.2 Orphan sweep
 
 **Steps**
@@ -348,6 +363,27 @@ b.check_url_allowlisted(sys.argv[1])' "http://allowed.example:80@evil.com/"
 echo "rc=$?"
 # expect: denied: host 'evil.com' is not in GRAPHQL_URL_ALLOWLIST ...  /  rc=3
 ```
+
+### 7.6 git+ssh dependency
+
+**Steps**
+
+1. In a scratch change of a repo, add a dependency pinned to a private GitLab
+   repo over ssh (`poetry add git+ssh://git@<gitlab>/<group>/<pkg>.git`).
+2. From a container whose `ssh-add -l` lists a key with access, run
+   `cld broker run-tests -k <any>`, then `cld broker graphql start`.
+3. Run once more from a container started without an agent
+   (`ssh_auth_sock = ""` in its cld config).
+
+**Observe / confirm**
+
+- Step 2: both install the dependency; the first run logs `Permanently added
+  '<gitlab>'`, and `~/.cld/cache/ssh/known_hosts` holds the host key
+  afterwards. A second run adds nothing.
+- Step 3: the install fails with `Permission denied (publickey)` -- the run
+  never gets an agent its caller lacks.
+- Editing that key in `~/.cld/cache/ssh/known_hosts` makes the next run fail
+  with `REMOTE HOST IDENTIFICATION HAS CHANGED`.
 
 ---
 
@@ -540,6 +576,31 @@ broker restarted, `VENV_CACHE_ROOT` unset in the broker config (default
   itself; it is clearly faster than the first.
 - `cld broker graphql start` for the same repo also hits its own key (the image
   id differs from `runtests`, so it misses once first).
+- No `cp: preserving times` lines anywhere in the output: before the restore
+  fix every hit fell back to a full build after printing them.
+
+### 9.1b Host working copy untouched
+
+**Steps**
+
+1. On the host, edit a tracked file in the repo's default workspace without
+   running any jj command; note the latest operation with
+   `jj -R <repo> --ignore-working-copy op log -n1`.
+2. Run `cld broker run-tests -k <any>` from a container, then
+   `cld broker graphql start` and `stop`.
+3. Edit a file in the container during a run (rewrites the run's base).
+
+**Observe / confirm**
+
+- `jj -R <repo> --ignore-working-copy op log` shows no `snapshot working copy`
+  operation from user `runtests` or `graphqlserver`; the host edit is still
+  unsnapshotted.
+- After each run, `jj workspace list` shows no `runtests-*` workspace, and
+  `jj log -r 'heads(all())'` shows no new commit from those users -- also
+  for the run whose base was rewritten in step 3.
+- After step 3, `jj log` shows the container's change once, not as a
+  divergent pair (`??` after the change id): the runner builds on the
+  change's current commit, never on the hidden one the broker resolved.
 
 ### 9.2 Lock file change
 

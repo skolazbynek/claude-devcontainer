@@ -163,9 +163,12 @@ printf '[user]\nname = "runtests"\nemail = "runtests@localhost"\n' > "$JJ_CONFIG
 cd /repo
 ws="runtests-${HOSTNAME:-$$}"                                  # unique per container; no SIGPIPE pipe
 work="$HOME/rt-workspace"                                      # under $HOME: writable with --user
-trap 'jj workspace forget "$ws" >/dev/null 2>&1 || true' EXIT   # cleanup even on crash
+# --ignore-working-copy: never snapshot /repo's working copy (the host user's)
+trap 'jj -R /repo --ignore-working-copy workspace forget "$ws" >/dev/null 2>&1 || true' EXIT
 
-jj workspace add --name "$ws" -r "$REVISION" "$work"           # ← never touches host @
+rev=$(jj --ignore-working-copy log --no-graph -n1 -r "$REVISION" -T commit_id)
+jj --ignore-working-copy workspace add --name "$ws" -r "$rev" "$work"   # ← never touches host @
+cd "$work" && jj new "$rev"                                    # the checkout add refused without a snapshot
 cd "$work/$PROJECT_SUBDIR"
 
 set -a; [ -f "$SECRETS_FILE" ] && . "$SECRETS_FILE"; set +a      # secrets → env for pytest
@@ -292,11 +295,17 @@ master> cld broker run-tests -k login -x tests/                       (claude or
 
 ## 10. Caveats
 
-1. **Snapshot freshness** — store-reading the bookmark tip can be seconds behind
-   `claude`'s latest edit (watchman lag). Accepted per decision 5.
+1. **Snapshot freshness** — store-reading the workspace tip can be seconds behind
+   `claude`'s latest edit (watchman lag). The container client therefore
+   snapshots its workspaces right before `run-tests` / `graphql`
+   (`cld/broker.py:snapshot_workspaces`); the broker itself still only reads.
 2. **Concurrent store access** — master's watchman writes while `runtests` does
    `workspace add`; jj supports concurrent workspaces via its op-log, but this is
-   the one behavior to explicitly exercise.
+   the one behavior to explicitly exercise. Every jj call the runner makes on
+   `/repo` passes `--ignore-working-copy`: a plain one snapshotted the host
+   user's checkout, racing their own jj commands into divergent changes, and a
+   `forget` run from a workspace gone stale mid-run failed and left the
+   workspace behind.
 3. **Transient store writes** — `workspace add`/`forget` add ephemeral objects
    (GC'd later); they never touch the user's `@` or bookmarks.
 4. **Ownership** — the runner runs `--user host-uid:gid` so store writes match host
@@ -414,7 +423,7 @@ the wire (a validated `cld_agent_*` session running the `run-tests` action). The
 constraint that agents/task-agents may only invoke it with master's explicit
 per-run authorization is instructed in their persona prompts
 (`prompts/personas/agent.md`, `prompts/personas/task-agent.md`) and the
-`broker-run-tests` skill (Step 0), not enforced by the broker, sshd, or
+`broker-run-tests` / `broker-graphql-server` skills, not enforced by the broker, sshd, or
 `build_container_args`. This trades a larger blast radius (every agent and
 task-agent container — potentially several per master, per `max_task_agents` —
 now holds a broker-key mount, versus one master) for the ability to run tests from

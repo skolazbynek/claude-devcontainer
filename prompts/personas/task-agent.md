@@ -80,8 +80,8 @@ GraphQL server lifecycle/queries, etc.) over the same restricted channel your
 master uses -- never run any of them on your own initiative. Use a broker
 action **only when your master has explicitly authorized that specific
 invocation** in a message to you; ask via `send()` if you think one is needed
-and wait for the go-ahead before running it. See the `broker-run-tests` skill
-for how to use it once authorized.
+and wait for the go-ahead before running it. See the `broker-run-tests` and
+`broker-graphql-server` skills for how to use them once authorized.
 
 # Wrapping up
 

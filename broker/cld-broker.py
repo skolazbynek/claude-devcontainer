@@ -80,6 +80,11 @@ _DEFAULTS = {
 
 _ASSIGNMENT_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", re.DOTALL)
 
+# Where cld mounts the host ssh-agent into a container (cld/docker.py:
+# _CONTAINER_SSH_AUTH_SOCK), and where the runner images get it.
+_CALLER_AGENT_SOCK = "/run/host-ssh-agent.sock"
+_RUNNER_AGENT_SOCK = "/run/ssh-agent.sock"
+
 
 class Caller(Protocol):
     """The caller-derived inputs of every action. Methods are lazy, so an action
@@ -97,6 +102,10 @@ class Caller(Protocol):
 
     def targets(self) -> list[str]:
         """Host repos the caller may launch task-agents for."""
+        ...
+
+    def ssh_agent(self) -> str:
+        """Host ssh-agent socket the caller's runs may use, "" for none."""
         ...
 
 
@@ -318,6 +327,14 @@ class LabelCaller:
         return [target for target in (self.repo_root, *(_label(self.name, "org.cld.targets") or "").split(":"))
                 if target]
 
+    # The agent already forwarded into the caller (cld/docker.py:stage_ssh_agent),
+    # so a run can do with the key exactly what the caller itself can, no more:
+    # a container launched without an agent gets none here either.
+    def ssh_agent(self) -> str:
+        return _out("docker", "inspect", self.name, "--format",
+                    f'{{{{range .Mounts}}}}{{{{if eq .Destination "{_CALLER_AGENT_SOCK}"}}}}'
+                    "{{.Source}}{{end}}{{end}}") or ""
+
 
 @dataclass
 class CliCaller:
@@ -346,6 +363,11 @@ class CliCaller:
 
     def targets(self) -> list[str]:
         return [self.repo_path, *self.extra_targets]
+
+    # `cld-brokerctl run` clears the environment, so the operator's agent comes
+    # from broker.conf, as for the task-agent launcher (stage_agent_socket).
+    def ssh_agent(self) -> str:
+        return CONF.get("SSH_AUTH_SOCK", "")
 
 
 # ---- actions --------------------------------------------------------------
@@ -385,6 +407,23 @@ def _secret_mount(secrets: SecretsEnv) -> list[str]:
     return ["-v", f"{secrets.env_file}:/secrets/.env:ro"] if os.path.isfile(secrets.env_file) else []
 
 
+# The caller's ssh-agent for the runner images, which fetch `git+ssh://`
+# dependencies with it (scripts/ssh-wrapper.sh). Never fatal: without a live
+# socket the run goes on keyless, and only an ssh dependency then fails.
+def _agent_mount(sock: str) -> list[str]:
+    if not sock:
+        return []
+    try:
+        live = stat.S_ISSOCK(os.stat(sock).st_mode)
+    except OSError:
+        live = False
+    if not live:
+        print(f"[cld-broker] ssh-agent socket {sock} is not a live socket -- running without it",
+              file=sys.stderr)
+        return []
+    return ["-v", f"{sock}:{_RUNNER_AGENT_SOCK}", "-e", f"SSH_AUTH_SOCK={_RUNNER_AGENT_SOCK}"]
+
+
 def _venv_cache_args(image: str) -> list[str]:
     """The -v/-e args wiring the host-side venv + poetry download cache
     (scripts/venv-cache.sh) into a run of *image*; none when the cache is
@@ -398,10 +437,11 @@ def _venv_cache_args(image: str) -> list[str]:
     return ["-v", f"{root}:/cache", "-e", f"VENV_CACHE_IMAGE_ID={image_id}"]
 
 
-def run_tests(repo: str, rev: str, secrets: SecretsEnv, argv: list[str]) -> NoReturn:
+def run_tests(repo: str, rev: str, secrets: SecretsEnv, agent: str, argv: list[str]) -> NoReturn:
     _exec([
         "docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/tmp",
-        "-v", f"{repo}:/repo", *_secret_mount(secrets), *_venv_cache_args(_setting("RUNTESTS_IMAGE")),
+        "-v", f"{repo}:/repo", *_secret_mount(secrets), *_agent_mount(agent),
+        *_venv_cache_args(_setting("RUNTESTS_IMAGE")),
         "-e", f"REVISION={rev}", "-e", f"PROJECT_SUBDIR={secrets.project_subdir}",
         _setting("RUNTESTS_IMAGE"), *argv,
     ])
@@ -410,7 +450,7 @@ def run_tests(repo: str, rev: str, secrets: SecretsEnv, argv: list[str]) -> NoRe
 def action_run_tests(caller: Caller, argv: list[str]) -> None:
     name, argv = parse_repo_arg(argv)
     repo = caller.repo(name)
-    run_tests(repo, *resolve_test_context(caller, repo), argv)
+    run_tests(repo, *resolve_test_context(caller, repo), caller.ssh_agent(), argv)
 
 
 # Enumerate cld containers for the messenger / `cld task-agent status`.
@@ -734,7 +774,8 @@ def check_url_allowlisted(target: str) -> None:
 
 
 # Resolves <target> (§5.1) into (url, authorization, cookie):
-#   local              this session's own server, discovered via `docker port`
+#   local              this session's own server, discovered via `docker port` --
+#                      with the alias `local`'s auth/cookie from the repo's .env, if set
 #   [A-Za-z0-9_-]+     an alias, looked up in the repo's .env -- auth attached
 #   http(s)://…        the URL verbatim, gated on the allowlist -- never any auth
 #   anything else      denied
@@ -744,7 +785,8 @@ def resolve_target(scope: Scope, target: str) -> tuple[str, str, str]:
         host_port = _first_line(_out("docker", "port", f"cld_gql_{scope.session}", f"{config.port}/tcp") or "")
         if not host_port:
             _die(f"denied: no local graphql server running for {scope.session} -- start one first", 3)
-        return f"http://{host_port}{config.health_path}", "", ""
+        _, auth, cookie = lookup_alias("local", resolve_secrets_env_file(scope.repo).env_file)
+        return f"http://{host_port}{config.health_path}", auth, cookie
     if target.startswith(("http://", "https://")):
         check_url_allowlisted(target)
         return target, "", ""
@@ -889,7 +931,7 @@ def _dump_logs(cname: str) -> None:
 # Port allocation: let Docker do it. No probing for a free port, no deriving
 # one from a hash -- publish with an empty host port and read it back via
 # `docker port`. Race-free, and no port range to own.
-def do_graphql_start(scope: Scope, rev: str) -> None:
+def do_graphql_start(scope: Scope, rev: str, agent: str) -> None:
     sweep_gql_orphans()
     secrets, config = resolve_graphql_context(scope.repo)
     cname, wsname = f"cld_gql_{scope.session}", f"gql-{scope.session}"
@@ -923,7 +965,8 @@ def do_graphql_start(scope: Scope, rev: str) -> None:
         "--label", f"org.cld.gql-session={scope.session}",
         "--label", f"org.cld.gql-repo={scope.repo}",
         "--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/tmp",
-        "-v", f"{scope.repo}:/repo", *_secret_mount(secrets), *_venv_cache_args(_setting("GRAPHQL_IMAGE")),
+        "-v", f"{scope.repo}:/repo", *_secret_mount(secrets), *_agent_mount(agent),
+        *_venv_cache_args(_setting("GRAPHQL_IMAGE")),
         "-e", f"REVISION={rev}", "-e", f"PROJECT_SUBDIR={secrets.project_subdir}",
         "-e", f"GQL_WORKSPACE={wsname}", "-e", f"GQL_COMMAND={config.command}",
         "-e", f"GQL_PORT={config.port}",
@@ -979,13 +1022,13 @@ def action_graphql(caller: Caller, argv: list[str]) -> None:
     op, args = (argv[0], argv[1:]) if argv else ("", [])
     match op:
         case "start":
-            do_graphql_start(scope, resolve_revision(caller, scope.repo))
+            do_graphql_start(scope, resolve_revision(caller, scope.repo), caller.ssh_agent())
         case "stop":
             do_graphql_stop(scope)
             print("stopped")
         case "restart":
             do_graphql_stop(scope)
-            do_graphql_start(scope, resolve_revision(caller, scope.repo))
+            do_graphql_start(scope, resolve_revision(caller, scope.repo), caller.ssh_agent())
         case "status":
             do_graphql_status(scope, caller.revision(scope.repo))
         case "logs":
@@ -994,7 +1037,11 @@ def action_graphql(caller: Caller, argv: list[str]) -> None:
                 _die(f"denied: bad tail count '{tail}'", 2)
             if int(tail) > 2000:  # a debugging aid, not a log export
                 tail = "2000"
-            logs = _capture(["docker", "logs", "--tail", tail, f"cld_gql_{scope.session}"], stderr=subprocess.STDOUT)
+            cname = f"cld_gql_{scope.session}"
+            if _capture(["docker", "inspect", cname]).returncode:
+                _die(f"no graphql server for {scope.session} -- start one first (a failed start "
+                     "already printed its last logs)", 3)
+            logs = _capture(["docker", "logs", "--tail", tail, cname], stderr=subprocess.STDOUT)
             cap_output(mask_output(logs.stdout), int(_setting("GRAPHQL_OUTPUT_MAX_BYTES")), "tail")
             sys.exit(logs.returncode)
         case "query":

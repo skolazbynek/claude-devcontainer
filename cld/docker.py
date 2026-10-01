@@ -131,6 +131,7 @@ def base_extra_paths(cld_root: Path) -> list[Path]:
         cld_root / "imgs/claude-devcontainer/vcs-lib.sh",
         cld_root / "cld",
         cld_root / "prompts",
+        cld_root / ".claude/skills",
     ]
 
 

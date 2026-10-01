@@ -10,6 +10,7 @@ import http.server
 import importlib.util
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -177,6 +178,7 @@ case "$cmd" in
     case "$fmt" in
       *org.cld.kind*)      printf '%s\\n' "${FAKE_KIND:-}" ;;
       *org.cld.repo-root*) printf '%s\\n' "${FAKE_REPO_ROOT:-}" ;;
+      *.Mounts*)           printf '%s' "${FAKE_AGENT:-}" ;;
       *range*)             printf '%s' "${FAKE_LABELS:-}" ;;
     esac
     ;;
@@ -256,6 +258,29 @@ esac
         assert result.returncode == 0, result.stderr
         assert ":/cache" not in result.stdout
         assert "VENV_CACHE_IMAGE_ID" not in result.stdout
+
+    def test_callers_agent_mounted(self, repos, tmp_path):
+        """The run gets the ssh-agent socket already mounted into the caller."""
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.bind(str(tmp_path / "agent.sock"))
+            result = self._dispatch(
+                "cld_agent_lide-api_fix", ["-k", "login"],
+                {"FAKE_KIND": "task-agent", "FAKE_REPO_ROOT": f"{repos}/lide-api",
+                 "FAKE_AGENT": str(tmp_path / "agent.sock")},
+            )
+        assert result.returncode == 0, result.stderr
+        assert f"-v {tmp_path}/agent.sock:/run/ssh-agent.sock -e SSH_AUTH_SOCK=/run/ssh-agent.sock" in result.stdout
+
+    @pytest.mark.parametrize("agent,warned", [("", False), ("/gone/agent.sock", True)],
+                             ids=["caller-has-none", "dead-socket"])
+    def test_no_usable_agent_runs_keyless(self, repos, agent, warned):
+        result = self._dispatch(
+            "cld_agent_lide-api_fix", ["-k", "login"],
+            {"FAKE_KIND": "task-agent", "FAKE_REPO_ROOT": f"{repos}/lide-api", "FAKE_AGENT": agent},
+        )
+        assert result.returncode == 0, result.stderr
+        assert "SSH_AUTH_SOCK" not in result.stdout
+        assert ("not a live socket" in result.stderr) == warned
 
     def test_v1_caller_repo_flag_denied(self, repos):
         result = self._dispatch(
@@ -518,6 +543,30 @@ class TestResolveTargetAlias:
         assert "CLD_GRAPHQL_URL_NOPE" in capsys.readouterr().err
 
 
+class TestResolveTargetLocal:
+    """`local` is the session's own server, found via `docker port`; the
+    operator's CLD_GRAPHQL_AUTH_LOCAL / CLD_GRAPHQL_COOKIE_LOCAL from the
+    repo's .env ride along, so a signed-in query works without the container
+    ever holding the credential."""
+
+    @pytest.fixture(autouse=True)
+    def fakebin(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(broker, "resolve_graphql_config", lambda repo: broker.GraphqlConfig("serve", "8000", "/graphql"))
+        return _fakebin(tmp_path, monkeypatch, docker='[ "$1" = port ] && echo "172.17.0.1:32768"\n')
+
+    def _resolve(self, monkeypatch, secrets: Path) -> tuple[str, str, str]:
+        monkeypatch.setattr(broker, "resolve_secrets_env_file", lambda repo: broker.SecretsEnv(".", str(secrets)))
+        return broker.resolve_target(broker.Scope("cld_agent_test", "/repo"), "local")
+
+    def test_credentials_come_from_the_env_file(self, tmp_path, monkeypatch):
+        secrets = tmp_path / ".env"
+        secrets.write_text("CLD_GRAPHQL_AUTH_LOCAL='Bearer abc'\nCLD_GRAPHQL_COOKIE_LOCAL=sid=1\n")
+        assert self._resolve(monkeypatch, secrets) == ("http://172.17.0.1:32768/graphql", "Bearer abc", "sid=1")
+
+    def test_anonymous_without_credentials(self, tmp_path, monkeypatch):
+        assert self._resolve(monkeypatch, tmp_path / "missing.env") == ("http://172.17.0.1:32768/graphql", "", "")
+
+
 class TestGraphqlStatusStale:
     """M5: do_graphql_status's 6th field (stale) compares the container's own
     served revision (REVISION env) against the session's current jj tip, as
@@ -612,7 +661,7 @@ esac
 
     def _start(self, monkeypatch, repo: str, gql_repo: str) -> None:
         monkeypatch.setenv("FAKE_GQL_REPO", gql_repo)
-        broker.do_graphql_start(broker.Scope("cld_ticket_x", repo), "rev")
+        broker.do_graphql_start(broker.Scope("cld_ticket_x", repo), "rev", "")
 
     def test_cross_repo_reuse_refused_naming_the_running_repo(self, monkeypatch, capsys):
         with pytest.raises(SystemExit) as excinfo:
@@ -632,6 +681,34 @@ esac
         # v1 / pre-label containers carry no org.cld.gql-repo label.
         self._start(monkeypatch, repo="/repos/a", gql_repo="")
         assert "STATUS_CALLED" in capsys.readouterr().out
+
+
+class TestGraphqlLogs:
+    """`logs` with no server is a clear broker message, not docker's raw
+    "No such container" error."""
+
+    def _logs(self, tmp_path, monkeypatch, exists: bool) -> None:
+        _fakebin(tmp_path, monkeypatch, docker=f"""
+case "$1" in
+  inspect) exit {0 if exists else 1} ;;
+  logs) echo "server line" ;;
+esac
+""")
+        broker.action_graphql(broker.CliCaller("cld_agent_test", "/repo", "@", []), ["logs", "5"])
+
+    def test_no_server(self, tmp_path, monkeypatch, capsys):
+        with pytest.raises(SystemExit) as excinfo:
+            self._logs(tmp_path, monkeypatch, exists=False)
+        assert _exit_code(excinfo) == 3
+        out, err = capsys.readouterr()
+        assert "no graphql server for cld_agent_test" in err
+        assert out == ""
+
+    def test_running_server(self, tmp_path, monkeypatch, capsysbinary):
+        with pytest.raises(SystemExit) as excinfo:
+            self._logs(tmp_path, monkeypatch, exists=True)
+        assert _exit_code(excinfo) == 0
+        assert capsysbinary.readouterr().out == b"server line"
 
 
 class TestGraphqlQuery:

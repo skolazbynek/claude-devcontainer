@@ -9,21 +9,28 @@ Lifecycle and queries run on the **host**, through the cld broker's `graphql`
 action (see `docs/design-cld-broker.md` §16 and
 `docs/impl-graphql-broker-plan.md`), not as a subprocess inside this
 container. That means: the server runs from the real repo checkout with the
-real `.env` secrets, on the exact jj revision the calling container is on --
+real `.env` secrets, on the exact jj revision the calling container is on
+(the client snapshots its workspaces first, so uncommitted edits count) --
 and this container never holds a database password or an API token. The
 tradeoff is speed: every start/restart is a fresh container + `poetry
-install`, there is no fast-restart path.
+install` (dependencies come from the venv cache after the first run), there
+is no fast-restart path.
 
 ## Setup
+
+Every container with the broker wired gets the MCP built in: its tools are
+only broker clients, so `build_claude_config`
+(`imgs/claude-devcontainer/container-init.sh`) registers it whether or not the
+host's `~/.claude.json` has a `graphql-tester` entry. A host entry, if present,
+is rewritten to the container path. Usage instructions for the agent are the
+baked-in `broker-graphql-server` skill.
+
+On the host itself (no container), register it by hand; this needs the cld
+venv (`poetry install`):
 
 ```bash
 claude mcp add -s user graphql-tester -- /path/to/cld/scripts/mcp/run-graphql.sh
 ```
-
-Requires the cld venv (`poetry install`) and a working broker connection (see
-`docs/design-cld-broker.md`). The tool only appears in a container when the
-**host's** `~/.claude.json` already has a `graphql-tester` entry
-(`imgs/claude-devcontainer/container-init.sh:129`).
 
 Per-repo, add to `.cld/config.toml`:
 
@@ -56,7 +63,7 @@ is `COPY`'d into the image, not bind-mounted.
 | `stop_server` | Stop it. |
 | `restart_server` | Stop + start -- use after editing code or config the server serves. |
 | `server_status` | `not_started` / `starting` / `running` / `exited`, with port/endpoint/revision/container when running, plus `stale` (true if the running server's revision no longer matches the session's tip -- `restart_server` fixes it; null if there's nothing to compare). |
-| `get_server_logs` | Tail server logs. `filter_pattern` is a client-side regex over the returned lines. |
+| `get_server_logs` | Tail server logs. `filter_pattern` is a client-side regex over the returned lines. Errors with "no graphql server" when none exists -- a failed `start_server` already returns the server's last log lines in its error. |
 | `list_endpoints` | List configured aliases (see "Targets" below). |
 
 There is no `set_env` tool. The server's environment comes entirely from the
@@ -69,7 +76,7 @@ credentials, so that path doesn't exist.
 | Tool | Purpose |
 |---|---|
 | `introspect` | Run introspection, cache the schema. `target` defaults to `"local"`. |
-| `query` | Execute a query/mutation. Supports `variables`. `target` defaults to `"local"`. |
+| `query` | Execute a query/mutation. Supports `variables`. `target` defaults to `"local"`. On a non-2xx response the error carries the response body. |
 | `describe_type` | Full details for one type from the cached schema (local, no broker round-trip). |
 
 ### Resource
@@ -81,7 +88,10 @@ credentials, so that path doesn't exist.
 `query` and `introspect` take a `target`, resolved host-side by the broker:
 
 - **`"local"`** (the default) -- this session's own server, started with
-  `start_server`.
+  `start_server`. Requests are anonymous unless the repo's `.env` sets
+  `CLD_GRAPHQL_AUTH_LOCAL` and/or `CLD_GRAPHQL_COOKIE_LOCAL`; the broker
+  attaches those the same way it does for an alias, so a query needing a
+  signed-in user works without the container seeing the credential.
 - **an alias** (e.g. `"dev"`, `"staging"`) -- looked up in the repo's `.env`
   as `CLD_GRAPHQL_URL_<ALIAS>`, `CLD_GRAPHQL_AUTH_<ALIAS>` (a full
   `Authorization` header value) and/or `CLD_GRAPHQL_COOKIE_<ALIAS>`. The
@@ -91,6 +101,11 @@ credentials, so that path doesn't exist.
   broker operator's `GRAPHQL_URL_ALLOWLIST` (`broker/broker.conf.sample`); no
   credentials are ever attached to a raw URL. Denied by default (empty
   allowlist).
+
+The `CLD_GRAPHQL_*` variables are removed from the environment of the server
+and of `run-tests`' pytest after the `.env` is sourced, so code under test
+cannot print them by accident. That is not a hard boundary: that code runs
+with the rest of the `.env` and can read the mounted file itself.
 
 ## Typical workflow
 

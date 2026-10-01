@@ -6,7 +6,8 @@
 # something a one-shot pytest run does not (a deterministic workspace name
 # the broker can name later, and a port to publish).
 #
-#   REVISION             revset to serve (default: @)
+#   REVISION             revset to serve (default: @). Resolved without snapshotting
+#                        /repo's working copy, so `@` means its last snapshot.
 #   PROJECT_SUBDIR       dir under the workspace holding pyproject.toml (default: .)
 #   SECRETS_FILE         env file sourced into the server's environment (default: /secrets/.env)
 #   GQL_WORKSPACE         deterministic jj workspace name (default: gql-$HOSTNAME) -- must be
@@ -52,13 +53,34 @@ work="$HOME/gql-workspace"
 # Best effort only -- `docker rm -f` sends SIGKILL and this trap does not run,
 # which is exactly why the broker's `stop`/`restart` forgets $GQL_WORKSPACE
 # explicitly by its (deterministic) name rather than relying on this.
-trap 'jj workspace forget "$GQL_WORKSPACE" >/dev/null 2>&1 || true' EXIT
+# --ignore-working-copy wherever /repo is touched, as in runtests: a plain jj
+# command there snapshots the host user's checkout.
+trap 'jj -R /repo --ignore-working-copy workspace forget "$GQL_WORKSPACE" >/dev/null 2>&1 || true' EXIT
 
-jj workspace add --name "$GQL_WORKSPACE" -r "$REVISION" "$work"
+rev=$(jj --ignore-working-copy log --no-graph -n1 -r "$REVISION" -T commit_id)
+# The caller may have snapshotted again since REVISION was resolved. Building on
+# its now-hidden old commit would make that commit visible again -- a divergent
+# twin of the caller's change -- so take the change's current commit instead.
+if change=$(jj --ignore-working-copy log --no-graph -r "$rev" -T 'if(hidden, change_id)') && [ -n "$change" ]; then
+    rev=$(jj --ignore-working-copy log --no-graph -n1 -r "change_id($change)" -T commit_id)
+    [ -n "$rev" ] || { echo "[graphqlserver] $REVISION was abandoned" >&2; exit 1; }
+fi
+# Without a snapshot jj creates the workspace but refuses to check it out;
+# `jj new` inside it does the checkout. Any other failure is real.
+err=$(jj --quiet --ignore-working-copy workspace add --name "$GQL_WORKSPACE" -r "$rev" "$work" 2>&1) ||
+    case "$err" in
+        *"must be able to update the working copy"*) ;;
+        *) echo "$err" >&2; exit 1 ;;
+    esac
+cd "$work"
+jj --quiet new "$rev"
 cd "$work/$PROJECT_SUBDIR"
 
 if [ -f "$SECRETS_FILE" ]; then
     set -a; . "$SECRETS_FILE"; set +a
+    # The broker's own graphql credentials (cld-broker.py:lookup_alias): code
+    # under test has no use for them, so keep them out of its environment.
+    unset "${!CLD_GRAPHQL_@}"
 else
     echo "[graphqlserver] WARN: secrets file $SECRETS_FILE not found; running without it" >&2
 fi

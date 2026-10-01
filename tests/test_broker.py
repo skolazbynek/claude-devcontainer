@@ -1,6 +1,8 @@
 """Tests for the broker seam (local daemon on the host vs ssh to the cld broker)."""
 
 import base64
+import json
+import subprocess
 from unittest.mock import patch
 
 import pytest
@@ -120,6 +122,60 @@ class TestRunAction:
         assert "StrictHostKeyChecking=yes" in cmd
         assert f"UserKnownHostsFile={broker.KNOWN_HOSTS_MOUNT}" in cmd
         assert broker.KEY_MOUNT in cmd
+
+    def test_ssh_never_reads_stdin(self, configured):
+        """Inside the graphql MCP server, stdin carries the MCP protocol."""
+        with patch("cld.broker.subprocess.run", return_value=_cp()) as run:
+            broker.run_action("list-containers")
+        assert run.call_args.kwargs["stdin"] is subprocess.DEVNULL
+
+
+class TestSnapshotBeforeRevisionActions:
+    """The broker reads the caller's revision from the jj store without
+    snapshotting, so the client snapshots every workspace first -- otherwise an
+    edit made a moment ago could be missing from the run."""
+
+    _MANIFEST = json.dumps({"v": 1, "ticket": "lide-1", "repos": [
+        {"name": "api", "path": "/h/api", "anchor_base": "a" * 40},
+        {"name": "diskuze", "path": "/h/diskuze", "anchor_base": "b" * 40},
+    ]})
+
+    def _commands(self, run_mock) -> list[list[str]]:
+        return [c[0][0] for c in run_mock.call_args_list]
+
+    @pytest.mark.parametrize("action", ["run-tests", "graphql"])
+    def test_ticket_snapshots_every_mounted_repo_before_ssh(self, configured, monkeypatch, action):
+        monkeypatch.setenv("CLD_TICKET_MANIFEST", self._MANIFEST)
+        with patch("cld.broker.subprocess.run", return_value=_cp()) as run:
+            broker.run_action(action, "status")
+        cmds = self._commands(run)
+        assert cmds[:2] == [["jj", "-R", "/workspace/lide-1/api", "status"],
+                            ["jj", "-R", "/workspace/lide-1/diskuze", "status"]]
+        assert cmds[2][0] == "ssh"
+
+    def test_v1_snapshots_its_single_workspace(self, configured, monkeypatch):
+        monkeypatch.delenv("CLD_TICKET_MANIFEST", raising=False)
+        with patch("cld.broker.subprocess.run", return_value=_cp()) as run:
+            broker.run_action("run-tests")
+        assert self._commands(run)[0] == ["jj", "-R", "/workspace/current", "status"]
+
+    def test_other_actions_do_not_snapshot(self, configured):
+        with patch("cld.broker.subprocess.run", return_value=_cp()) as run:
+            broker.run_action("list-containers")
+        assert [c[0] for c in self._commands(run)] == ["ssh"]
+
+    @pytest.mark.parametrize("failure", [FileNotFoundError("jj"), subprocess.TimeoutExpired("jj", 30)],
+                             ids=["missing-jj", "stuck-jj"])
+    def test_failed_snapshot_still_reaches_the_broker(self, configured, failure):
+        with patch("cld.broker.subprocess.run", side_effect=[failure, _cp()]) as run:
+            assert broker.run_action("run-tests").returncode == 0
+        assert self._commands(run)[-1][0] == "ssh"
+
+    def test_unreadable_manifest_skips_the_snapshot(self, configured, monkeypatch):
+        monkeypatch.setenv("CLD_TICKET_MANIFEST", '{"v": 99}')
+        with patch("cld.broker.subprocess.run", return_value=_cp()) as run:
+            assert broker.run_action("graphql", "status").returncode == 0
+        assert [c[0] for c in self._commands(run)] == ["ssh"]
 
 
 class TestGraphqlOp:

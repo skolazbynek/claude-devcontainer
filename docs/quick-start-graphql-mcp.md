@@ -25,9 +25,8 @@ PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
 cld-brokerctl restart
 ```
 
-Then make sure the **host's** `~/.claude.json` has a `graphql-tester` entry
-(`claude mcp add -s user graphql-tester -- /path/to/cld/scripts/mcp/run-graphql.sh`),
-and rebuild so containers pick up the MCP:
+Then rebuild the images, so containers get the MCP and its
+`broker-graphql-server` skill built in (any container with the broker wired):
 
 ```bash
 cld build
@@ -58,9 +57,27 @@ probe waits for the server before returning.
   not as `8000`.
 - **`graphql_command` must bind `0.0.0.0`, not `127.0.0.1`** — otherwise the
   port publishes but nothing answers. See `graphqlserver/README.md`.
-- **The MCP only appears in a container if the *host's* `~/.claude.json` has
-  the `graphql-tester` entry.** Adding it inside a container does nothing
+- **The MCP only appears in a container that has the broker wired**
+  (`broker_key` set in cld config) and was started from an image built after
+  this change. Adding it inside a container does nothing
   (`imgs/claude-devcontainer/container-init.sh`).
+
+## Optional: signed-in queries to your own server
+
+Queries to `target="local"` are anonymous by default. To run them as a user,
+add to the repo's `.env`:
+
+```
+CLD_GRAPHQL_AUTH_LOCAL='Bearer eyJ...'   # full Authorization value
+CLD_GRAPHQL_COOKIE_LOCAL='session=...'   # and/or a full Cookie value
+```
+
+The broker attaches them to every `local` query; the container never sees
+them.
+
+Quote every value. The runner images load `.env` with the shell, so an
+unquoted value with a space (`Bearer eyJ...`) runs its second word as a
+command and the server or test run exits at startup.
 
 ## Optional: querying a deployed environment
 
@@ -68,8 +85,8 @@ Add to the repo's `.env`:
 
 ```
 CLD_GRAPHQL_URL_DEV=https://dev.example.internal/graphql
-CLD_GRAPHQL_AUTH_DEV=Bearer eyJ...       # optional, full Authorization value
-CLD_GRAPHQL_COOKIE_DEV=session=...       # optional, full Cookie value
+CLD_GRAPHQL_AUTH_DEV='Bearer eyJ...'     # optional, full Authorization value
+CLD_GRAPHQL_COOKIE_DEV='session=...'     # optional, full Cookie value
 ```
 
 Then pass `target="dev"` to `query`/`introspect`. The broker attaches the

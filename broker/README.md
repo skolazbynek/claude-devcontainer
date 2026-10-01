@@ -155,7 +155,7 @@ def action_lint(caller: Caller, argv: list[str]) -> None:
 It receives the `Caller` the dispatcher built and the decoded argv as a list.
 `Caller` is the seam between the two domains of the script: the caller source
 answers who called and what they may reach, the actions consume the answers as
-plain values. It has four members, all resolved lazily, so read-only actions
+plain values. It has five members, all resolved lazily, so read-only actions
 don't depend on inputs they don't use:
 
 | Member | Meaning | `LabelCaller` (the sshd route) |
@@ -164,6 +164,7 @@ don't depend on inputs they don't use:
 | `repo(selector)` | host repo to act on; `selector` is the `--repo` name | `org.cld.repo-root`, or `org.cld.repo.<name>` for a ticket |
 | `revision(repo)` | caller's current commit, `None` if unresolvable | jj `<session>@` in that repo |
 | `targets()` | repos the caller may launch task-agents for | `org.cld.repo-root` + `org.cld.targets` |
+| `ssh_agent()` | host ssh-agent socket its runs may use, `""` for none | the socket cld mounted into the caller (`cld/docker.py:stage_ssh_agent`) |
 
 `run-tests` calls `resolve_test_context` for the revision and the secrets
 `.env` / `PROJECT_SUBDIR`. Feeding actions from another source (e.g. inputs
@@ -224,3 +225,8 @@ let the token after an `--opt=value` slip by unchecked.
   structurally unable to push.
 - **Network scope.** Bind the instance to the docker bridge gateway so only
   containers on the bridge can reach it.
+- **ssh-agent in runs.** `run-tests` and `graphql start` mount the caller's own
+  forwarded ssh-agent (if it has one) so `git+ssh://` dependencies install.
+  The code under test can then use the key for the whole run -- exactly what
+  the caller container can already do, nothing more. On the host route
+  (`cld-brokerctl run`) it is broker.conf's `SSH_AUTH_SOCK`.

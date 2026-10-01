@@ -13,15 +13,21 @@ The repo whose jj store holds the change is bind-mounted at `/repo`. The
 entrypoint runs:
 
 ```
-jj workspace add --name runtests-<id> -r "$REVISION" "$HOME/rt-workspace"
+jj --ignore-working-copy workspace add --name runtests-<id> -r <rev> "$HOME/rt-workspace"
+cd "$HOME/rt-workspace" && jj new <rev>
 ```
 
-which creates an **independent** working copy under `$HOME` sharing only
-`/repo/.jj/repo/store`. jj never moves the origin's default-workspace `@` or its
-bookmarks, so the change under test is materialized without touching whatever the
-user is working on. The workspace is `forget`-ten on exit (even on crash). It
-lives under `$HOME` (not `/`) so it is writable when the container runs with
-`--user`.
+(`<rev>` is `$REVISION` resolved to a commit id first), which creates an
+**independent** working copy under `$HOME` sharing only `/repo/.jj/repo/store`.
+jj never moves the origin's default-workspace `@` or its bookmarks, so the change
+under test is materialized without touching whatever the user is working on.
+`--ignore-working-copy` keeps jj from snapshotting `/repo`'s
+own working copy -- the user's checkout, possibly mid-edit -- which would race
+their own jj commands into divergent changes. jj then refuses to check the new
+workspace out, so `jj new` inside it does that. The workspace is `forget`-ten on
+exit (even on crash), again without a snapshot, so the run's byproducts leave no
+commit behind. It lives under `$HOME` (not `/`) so it is writable when the
+container runs with `--user`.
 
 Secrets (DB hosts/passwords etc.) are read from a mounted env file and sourced
 into pytest's environment only.
@@ -31,10 +37,11 @@ into pytest's environment only.
 | Input | Via | Default | Meaning |
 |---|---|---|---|
 | jj store | `-v <repo>:/repo` (rw) | — | repo whose store holds the change |
-| `REVISION` | `-e` | `@` | revset to test (any jj revset) |
+| `REVISION` | `-e` | `@` | revset to test (any jj revset); read without a snapshot, so `@` is `/repo`'s last snapshot |
 | secrets | `-v <file>:/secrets/.env:ro` | — | env file, sourced into pytest env |
 | `SECRETS_FILE` | `-e` | `/secrets/.env` | override secrets path |
 | `PROJECT_SUBDIR` | `-e` | `.` | dir holding `pyproject.toml` |
+| ssh-agent | `-v <socket>:/run/ssh-agent.sock -e SSH_AUTH_SOCK=/run/ssh-agent.sock` | — | key for `git+ssh://` dependencies; see [git+ssh dependencies](#gitssh-dependencies) |
 | `POETRY_INSTALL_ARGS` | `-e` | `--all-extras --all-groups` | `poetry install` flags (installs test deps however declared); set e.g. `--no-root` or `--with dev` to narrow |
 | `PYTEST_ADDOPTS` | `-e` | `--tb=short --disable-warnings -q --maxfail=30` | default pytest opts; explicit argv still overrides them |
 | `OUTPUT_MAX_BYTES` | `-e` | `65536` | cap on returned output; only the last N bytes (the summary) are emitted |
@@ -48,6 +55,23 @@ Requires **Poetry 2.x** (the image ships 2.4.1): it reads PEP 621 `[project]`
 metadata, which Poetry 1.x does not.
 
 The container exits with pytest's exit code.
+
+## git+ssh dependencies
+
+A `git+ssh://` dependency (e.g. a package pinned to a GitLab repo) is fetched
+by git or poetry's dulwich, both of which run `ssh` from `PATH`. The image's
+`/usr/local/bin/ssh` is a wrapper (`../scripts/ssh-wrapper.sh`) that:
+
+- gives the `--user` uid a passwd entry through nss_wrapper -- without one,
+  ssh exits `No user exists for uid N`;
+- never prompts (`BatchMode=yes`);
+- trusts a new host key on first use, and keeps learned keys in
+  `/cache/ssh/known_hosts` when the venv cache is mounted, so a host key that
+  later changes fails the run.
+
+The key comes from an ssh-agent socket at `$SSH_AUTH_SOCK`; the broker mounts
+the calling container's own agent. Without one, the fetch fails with
+`Permission denied (publickey)`.
 
 ## Build
 

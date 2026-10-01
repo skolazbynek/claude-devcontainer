@@ -14,15 +14,18 @@ The repo whose jj store holds the change is bind-mounted at `/repo`. The
 entrypoint runs:
 
 ```
-jj workspace add --name "$GQL_WORKSPACE" -r "$REVISION" "$HOME/gql-workspace"
+jj --ignore-working-copy workspace add --name "$GQL_WORKSPACE" -r <rev> "$HOME/gql-workspace"
+cd "$HOME/gql-workspace" && jj new <rev>
 ```
 
-which creates an **independent** working copy under `$HOME` sharing only
-`/repo/.jj/repo/store`. jj never moves the origin's default-workspace `@` or its
-bookmarks, so the change under test is materialized without touching whatever the
-user is working on. Unlike `runtests`, this container is **long-lived** (a server,
-not a one-shot command), so `$GQL_WORKSPACE` must be **deterministic** rather than
-random: a `docker rm -f` sends SIGKILL, which skips this script's own `trap ...
+(`<rev>` is `$REVISION` resolved to a commit id first), which creates an
+**independent** working copy under `$HOME` sharing only `/repo/.jj/repo/store`.
+jj never moves the origin's default-workspace `@` or its bookmarks, so the change
+under test is materialized without touching whatever the user is working on --
+nor snapshotting it: see [runtests](../runtests/README.md#how-it-works) for why
+and for the `jj new` step. Unlike `runtests`, this container is **long-lived** (a
+server, not a one-shot command), so `$GQL_WORKSPACE` must be **deterministic**
+rather than random: a `docker rm -f` sends SIGKILL, which skips this script's own `trap ...
 EXIT`, so whatever manages this container's lifecycle (the broker) needs to name
 the workspace itself to `jj workspace forget` it afterwards.
 
@@ -34,10 +37,11 @@ and sourced into the server's environment only.
 | Input | Via | Default | Meaning |
 |---|---|---|---|
 | jj store | `-v <repo>:/repo` (rw) | -- | repo whose store holds the change |
-| `REVISION` | `-e` | `@` | revset to serve (any jj revset) |
+| `REVISION` | `-e` | `@` | revset to serve (any jj revset); read without a snapshot, so `@` is `/repo`'s last snapshot |
 | secrets | `-v <file>:/secrets/.env:ro` | -- | env file, sourced into the server's env |
 | `SECRETS_FILE` | `-e` | `/secrets/.env` | override secrets path |
 | `PROJECT_SUBDIR` | `-e` | `.` | dir holding `pyproject.toml` |
+| ssh-agent | `-v <socket>:/run/ssh-agent.sock -e SSH_AUTH_SOCK=/run/ssh-agent.sock` | — | key for `git+ssh://` dependencies; see [git+ssh dependencies](../runtests/README.md#gitssh-dependencies) |
 | `GQL_WORKSPACE` | `-e` | `gql-$HOSTNAME` | **deterministic** jj workspace name -- set this explicitly if the caller needs to name it later |
 | `GQL_COMMAND` | `-e` | *(required)* | shell command that starts the server; no guessed default |
 | `GQL_PORT` | `-e` | `8000` | port the server must bind **inside** the container |

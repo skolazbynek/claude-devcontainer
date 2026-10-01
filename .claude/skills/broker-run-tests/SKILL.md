@@ -1,110 +1,89 @@
 ---
 name: broker-run-tests
 description: >
-  Run the target repo's test suite (pytest) via the cld broker's
-  `cld broker` client instead of raw ssh, mysql, or docker commands. Use this
-  whenever you need to run tests inside a `cld master` or `cld task-agent`
-  container and secrets (DB/Redis credentials etc.) are not otherwise
-  available in-container. Invoke when the user (or, for a task-agent, your
-  master) asks to run tests, run pytest, or check whether tests pass. If you
-  are a task-agent (not master), you need your master's explicit
-  authorization for this specific run first -- see Step 0.
+  Run the repo's pytest suite through the cld broker (`cld broker run-tests`)
+  from inside a cld ticket or task-agent container. The broker runs it on the
+  host, with the repo's real secrets (DB/Redis credentials etc.), against
+  your latest edits. Invoke whenever you need to run tests, run pytest, or
+  check whether tests pass. A task-agent needs its parent's explicit go-ahead
+  for the run first.
 user-invocable: true
 ---
 
-# Run tests via the cld broker (`cld broker run-tests`)
+# Run tests through the cld broker
 
-Some repos keep test secrets (MySQL/Redis/etc. credentials) entirely on the
-host and never mount them into `cld master`. For those repos, the master
-container ships a `cld broker` client that triggers a fixed, host-side action
-over a restricted SSH connection: it runs the repo's tests in an isolated
-`runtests` container against your current change, and streams back only the
-output. You never see or need the raw secrets, and you never construct the
-SSH call yourself.
+`cld broker run-tests` checks out your workspace's current state into a fresh
+workspace on the host, installs the repo's dependencies, sources the repo's
+host `.env` and runs pytest there. Only the output comes back. This container
+never holds the secrets, so a database-backed suite run in-container tests
+nothing real.
 
-**Do not hand-roll `ssh` to the broker.** The wrapper already encodes the
-session name and base64-packs your argv exactly the way the broker expects;
-a manually-built `ssh ... "run-tests ..."` command will not match and will be
-denied, and it bypasses the safety property that arbitrary args can only ever
-become pytest arguments.
+**Task-agent:** run it only when your parent asked for this run. Ask with
+`send()` and wait otherwise.
 
-## Step 0: If you are a task-agent, get authorization first
-
-`cld master` and `cld task-agent` containers both have the broker wired --
-but for a task-agent, **every** broker action
-(`run-tests` here, but the same gate applies to any other action the broker
-exposes, e.g. `graphql`) may be invoked **only with your master's explicit
-authorization for this specific invocation**. Your master is the trusted
-operator context; you are not. Do not run `cld broker run-tests` (or any
-other broker action) on your own initiative, speculatively, or because you
-judge it's time -- wait for (or ask for, via `send()`) an explicit
-instruction from your master naming this run, then proceed with Step 1. A
-`cld master` session has no such gate -- it is the human-adjacent context and
-may run it directly.
-
-## Step 1: Confirm the broker is wired
-
-This only exists for `cld master` and `cld task-agent` containers (never
-`cld run`). Check for the client:
+## Run
 
 ```bash
-cld broker --help >/dev/null 2>&1 && echo broker-ok
+cld broker run-tests [--repo <name>] [pytest args...]
 ```
-
-If that fails, this repo isn't configured with a host test broker
-(`broker_key`, and `broker_known_hosts`, unset in its `.cld/config.toml`); a
-failing `cld broker` run names what to set. Don't try to set one up
-yourself -- that's host-side infrastructure the user configures out-of-band.
-Don't fall back to running the plain test command in-container either:
-without the broker there is no other way to get real DB/Redis/etc. secrets
-into this container, and a suite run without them is not a meaningful test
-result -- it'll look like it ran while actually testing nothing real (or
-erroring on missing config in a way that's easy to misread as a code bug).
-Tell the user (or, for an agent/task-agent, your master) the broker isn't
-configured for this repo and stop.
-
-## Step 2: Run the tests
 
 ```bash
-cld broker run-tests <pytest args...>
+cld broker run-tests                               # whole suite
+cld broker run-tests -x tests/unit/test_foo.py     # one file, stop at first failure
+cld broker run-tests --repo api -k login tests/    # multi-repo ticket
 ```
 
-Examples:
+- Set the Bash tool's `timeout` to `600000` for this command, or use
+  `run_in_background` for a whole suite. The default two minutes is often too
+  short; a killed call loses the output.
+- `--repo <name>` comes first, and only when the ticket mounts more than one
+  repo. `cld repos` lists the names.
+- Everything else goes to pytest unchanged. Defaults are
+  `--tb=short --disable-warnings -q --maxfail=30`; your own flags override
+  them. Do not add `-q`: twice-quiet pytest drops the pass/fail count line.
+- The exit code is pytest's: 0 passed, 1 failures, 2 interrupted, 4 usage
+  error, 5 no tests collected.
 
-```bash
-cld broker run-tests           # full suite
-cld broker run-tests -k login -x tests/  # filtered, stop on first failure
-cld broker run-tests tests/unit/test_foo.py
-```
+## What is tested
 
-The action name is required -- `run-tests` here. (A repo's broker admin may have
-defined extra actions, `cld broker <name> <args>`; the ones that always exist
-are `run-tests`, `list-containers`, `task-agent` and `graphql`, and the last
-three are what the `task-agent-*` / messenger skills go through rather than
-something you call directly.)
+- Your workspace tip, uncommitted edits included: the client snapshots the
+  working copy right before the call. No commit is needed.
+- Only files under version control. Ignored files (local fixtures, caches,
+  your workspace's `.env` link) do not exist in the test checkout.
+- Runs are independent: several can run at the same time.
 
-The command runs synchronously and streams pytest's own stdout/stderr; its
-exit code is pytest's exit code (0 = passed, 1 = failures, etc.) in the
-normal case.
+## Reading the output
 
-## Step 3: Interpret broker-level failures
+- `[runtests] ...` lines are progress markers. The rest is the install log
+  followed by pytest's own output, capped to the last 64 KiB.
+- The first run after a dependency change installs every package (minutes).
+  Later runs reuse a cached environment and install only the project.
+- `[runtests] WARN: secrets file /secrets/.env not found` means the repo has
+  no `.env` on the host. Tests needing a database or other services will fail
+  on configuration. Tell the user.
+- An install failure ends the run before pytest; the error is at the end.
+- `git+ssh://` dependencies (e.g. pinned to GitLab) install with your
+  container's own forwarded ssh-agent. Errors from that step are in the table
+  below.
 
-These come from the broker itself (printed to stderr, distinct from pytest
-failures):
+## Broker-level failures
 
-| Message | Meaning | What to do |
-|---|---|---|
-| `denied: bad action` / `denied: unknown action '...'` | Malformed action name | Shouldn't happen via the wrapper; report it, don't retry with a hand-built command |
-| `denied: bad session id` | Session name doesn't look like `cld_master_*` or `cld_agent_*` | Shouldn't happen from inside a real master/agent/task-agent; report it |
-| `no master/agent/task-agent container for session ...` | The host broker couldn't find a running container matching this session with the expected repo label | Host-side problem (broker or container state) -- tell the user, don't attempt an ssh workaround |
-| ssh-level connection/auth errors | The broker's sshd is unreachable or misconfigured | Host-side problem -- tell the user; this is not something fixable from inside the container |
+| Message | What to do |
+|---|---|
+| `the cld broker is not configured for this container` | Not wired for this container. Tell the user and stop. Do not fall back to in-container runs for tests that need secrets. |
+| `denied: ... mounts N repos -- pass --repo <name>` | Add `--repo <name>` as the first argument. |
+| `denied: repo '<x>' is not mounted` | Use a name from `cld repos`. |
+| `denied: --repo is only for ticket containers` | Drop `--repo`; a task-agent has one repo. |
+| `cannot resolve revision for workspace ...` | The repo is not jj-backed, or this workspace is gone. Tell the user. |
+| `no cld container for session ...` | Host-side state problem. Tell the user. |
+| ssh `Connection refused` / `timed out` | The broker is not running on the host. Ask the user to run `cld-brokerctl start`. |
+| ssh `Host key verification failed` | The pinned broker host key does not match. Tell the user. |
+| `No such image: runtests:latest` / `Unable to find image` | The image is not built on the host. Ask the user to run `runtests/build.sh`. |
+| `No user exists for uid N`, or `ssh: not found` while installing a git dependency | The host image predates ssh support. Ask the user to rebuild it (`runtests/build.sh`). |
+| `Permission denied (publickey)` while installing a git dependency | This container has no ssh-agent, or its key cannot read that repo. Check `ssh-add -l` here; tell the user. |
+| `REMOTE HOST IDENTIFICATION HAS CHANGED` / `Host key verification failed` | The git host's key differs from the one learned earlier. Possibly an attack: tell the user, do not work around it. |
 
-## Why this exists
+Never hand-build an `ssh` call to the broker, and never try to fix the broker
+from inside the container: it is host infrastructure the user operates.
 
-Full design: the repo's own `docs/design-cld-broker.md` and
-`broker/README.md` (only present when working in the `cld` tool's own
-repo, not in target repos). The short version: `jj`/`git`'s multi-workspace
-model isolates the test run from your host `@`, and the raw `.env` is
-mounted only into the ephemeral, `claude`-unreachable `runtests` container --
-`cld broker` is the *only* host-facing channel, and it can only ever run the
-fixed, pre-defined action with pytest-shaped arguments.
+Design: `docs/design-cld-broker.md` and `broker/README.md` in the cld repo.

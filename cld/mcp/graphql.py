@@ -40,7 +40,9 @@ def _run_result(op: str, *args: str, repo: str = ""):
     """Run a `graphql` broker op, returning the raw completed-process result."""
     result = graphql_op(op, *args, repo=repo)
     if result.returncode != 0:
-        detail = (result.stderr or "").strip() or (result.stdout or "").strip()
+        # Both streams: a non-2xx query prints the response body on stdout, and
+        # that body is what names the problem.
+        detail = "\n".join(s for s in ((result.stderr or "").strip(), (result.stdout or "").strip()) if s)
         raise ToolError(f"graphql {op} failed: {detail}")
     return result
 

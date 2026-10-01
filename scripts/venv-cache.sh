@@ -61,13 +61,15 @@ evict() {
 }
 
 # Copy venvs/<key> into $VIRTUAL_ENV under a shared lock, so eviction cannot
-# delete it mid-copy. The touch records the use for eviction.
+# delete it mid-copy. The touch records the use for eviction. The entries are
+# copied, not the dir itself: $VIRTUAL_ENV is root-owned in the images, so
+# `cp -a dir/.` fails setting its timestamps and every hit became a miss.
 restore() {
     (
         flock -s 9
         [ -d "$venvs/$1" ] || exit 1
         touch "$venvs/$1"
-        cp -a "$venvs/$1/." "$VIRTUAL_ENV/"
+        find "$venvs/$1" -mindepth 1 -maxdepth 1 -exec cp -a -t "$VIRTUAL_ENV/" {} +
     ) 9>"$locks/venvs.lock"
 }
 

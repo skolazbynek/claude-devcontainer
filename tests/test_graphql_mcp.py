@@ -99,6 +99,15 @@ class TestBrokerFailurePropagates:
             with pytest.raises(ToolError, match="denied: bad target"):
                 server_status()
 
+    def test_non_2xx_query_keeps_the_response_body(self):
+        body = '{"errors": [{"message": "Cannot query field \'nope\'"}]}'
+        with patch("cld.mcp.graphql.graphql_op",
+                   return_value=_cp(returncode=1, stdout=body, stderr="graphql endpoint returned HTTP 400")):
+            with pytest.raises(ToolError) as excinfo:
+                query("{ nope }")
+        assert "HTTP 400" in str(excinfo.value)
+        assert "Cannot query field" in str(excinfo.value)
+
 
 class TestStatusLineParsing:
     def test_running_fresh(self):

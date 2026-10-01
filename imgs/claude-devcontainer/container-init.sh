@@ -10,7 +10,12 @@ export PATH="/tmp/bin:$PATH"
 # one implementation of the ssh call, shared by the CLI and by everything that
 # reaches the host through it. CLD_BROKER_ENDPOINT is [user@]host:port (default
 # user: zet). See docs/design-cld-broker.md.
-if [ -n "${CLD_BROKER_ENDPOINT:-}" ] && [ -f /run/secrets/broker-key ]; then
+# Same test as cld/broker.py:broker_available -- the client always pins the
+# host key, so without known_hosts every call fails.
+cld_broker_wired() {
+    [ -n "${CLD_BROKER_ENDPOINT:-}" ] && [ -f /run/secrets/broker-key ] && [ -f /run/secrets/broker-known-hosts ]
+}
+if cld_broker_wired; then
     echo "[INFO] cld broker ready: run tests via 'cld broker run-tests <pytest args>'"
 fi
 
@@ -91,6 +96,23 @@ widens the editable tree to every descendant of the anchor; isolated mode
 
 Each repo's own CLAUDE.md governs work in its subtree.
 EOF
+    if cld_broker_wired; then
+        cat >> "$ticket_root/CLAUDE.md" <<'EOF'
+
+## Tests and the live GraphQL server
+
+Run the test suite and the GraphQL server through the cld broker. It runs
+them on the host, with the repo's real secrets (this container has none),
+against your latest edits -- uncommitted ones included.
+
+- Tests: `cld broker run-tests [--repo <name>] [pytest args]` -- skill `broker-run-tests`.
+- Server: the `graphql-tester` MCP tools (`start_server`, `query`,
+  `restart_server` after edits) -- skill `broker-graphql-server`.
+
+Pass the repo name (`--repo <name>`, tool argument `repo`) only when this
+ticket mounts more than one repo.
+EOF
+    fi
     echo "[cld] wrote ${ticket_root}/CLAUDE.md"
 }
 
@@ -186,9 +208,11 @@ build_claude_config() {
         cp "$host_config" "$HOME/.claude.json"
     fi
 
-    # Rewrite baked-in MCP servers to use container paths
+    # Rewrite baked-in MCP servers to use container paths. graphql-tester is
+    # also added wherever the broker is wired: its tools are only broker
+    # clients, so it needs no registration on the host.
     local rewrites='{}'
-    if jq -e '.mcpServers["graphql-tester"]' "$HOME/.claude.json" &>/dev/null; then
+    if jq -e '.mcpServers["graphql-tester"]' "$HOME/.claude.json" &>/dev/null || cld_broker_wired; then
         rewrites=$(echo "$rewrites" | jq '.["graphql-tester"] = {
             "type": "stdio",
             "command": "python3",

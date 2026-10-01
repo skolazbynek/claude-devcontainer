@@ -2,7 +2,8 @@
 # runtests entrypoint: materialize a jj revision in an isolated workspace and
 # run pytest against it. All args are passed straight through to pytest.
 #
-#   REVISION            revset to test (default: @)
+#   REVISION            revset to test (default: @). Resolved without snapshotting
+#                       /repo's working copy, so `@` means its last snapshot.
 #   PROJECT_SUBDIR      dir under the workspace holding pyproject.toml (default: .)
 #   SECRETS_FILE        env file sourced into pytest's environment (default: /secrets/.env)
 #   POETRY_INSTALL_ARGS flags for `poetry install` (default: --all-extras --all-groups,
@@ -49,13 +50,37 @@ ws="runtests-${HOSTNAME:-$$}"
 # Workspace dir lives under $HOME: with `--user` (the broker path always uses
 # it) the container user cannot mkdir at / (root-owned), but $HOME is writable.
 work="$HOME/rt-workspace"
-trap 'jj workspace forget "$ws" >/dev/null 2>&1 || true' EXIT
+# --ignore-working-copy wherever /repo is touched: a plain jj command there
+# snapshots /repo's own working copy -- the host user's checkout, possibly
+# mid-edit -- and racing their jj commands that way forks divergent changes.
+# Forgetting from inside the workspace would snapshot it instead, keeping the
+# run's byproducts as a stray commit (or failing if the run went stale).
+trap 'jj -R /repo --ignore-working-copy workspace forget "$ws" >/dev/null 2>&1 || true' EXIT
 
-jj workspace add --name "$ws" -r "$REVISION" "$work"
+rev=$(jj --ignore-working-copy log --no-graph -n1 -r "$REVISION" -T commit_id)
+# The caller may have snapshotted again since REVISION was resolved. Building on
+# its now-hidden old commit would make that commit visible again -- a divergent
+# twin of the caller's change -- so take the change's current commit instead.
+if change=$(jj --ignore-working-copy log --no-graph -r "$rev" -T 'if(hidden, change_id)') && [ -n "$change" ]; then
+    rev=$(jj --ignore-working-copy log --no-graph -n1 -r "change_id($change)" -T commit_id)
+    [ -n "$rev" ] || { echo "[runtests] $REVISION was abandoned" >&2; exit 1; }
+fi
+# Without a snapshot jj creates the workspace but refuses to check it out;
+# `jj new` inside it does the checkout. Any other failure is real.
+err=$(jj --quiet --ignore-working-copy workspace add --name "$ws" -r "$rev" "$work" 2>&1) ||
+    case "$err" in
+        *"must be able to update the working copy"*) ;;
+        *) echo "$err" >&2; exit 1 ;;
+    esac
+cd "$work"
+jj --quiet new "$rev"
 cd "$work/$PROJECT_SUBDIR"
 
 if [ -f "$SECRETS_FILE" ]; then
     set -a; . "$SECRETS_FILE"; set +a
+    # The broker's own graphql credentials (cld-broker.py:lookup_alias): code
+    # under test has no use for them, so keep them out of its environment.
+    unset "${!CLD_GRAPHQL_@}"
 else
     echo "[runtests] WARN: secrets file $SECRETS_FILE not found; running without it" >&2
 fi
