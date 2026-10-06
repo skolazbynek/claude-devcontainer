@@ -574,9 +574,15 @@ app.add_typer(msg_app, name="msg")
 # --- Ticket containers (v2 lifecycle verbs; see docs/design-ticket-containers.md) ---
 
 _TICKET_HELP = "Ticket name (e.g. LIDE-2600); sanitized into the container slug"
+_DEFAULT_TICKET_HELP = _TICKET_HELP + "; defaults to the cwd repo's directory name"
 # `cld claude <ticket> -- <args>`: everything after `--` lands in ctx.args and
 # passes through to claude untouched.
 _PASSTHROUGH_ARGS = {"allow_extra_args": True, "ignore_unknown_options": True}
+
+
+def _default_ticket(cfg: Config, ticket: str | None) -> str:
+    """The ticket a bare verb targets: the one bare `cld start` names after the cwd repo."""
+    return ticket or find_target_repo(cfg).name
 
 
 @app.command()
@@ -617,36 +623,44 @@ def start(
 @_handle_errors
 def claude(
     ctx: typer.Context,
-    ticket: str = typer.Argument(..., help=_TICKET_HELP),
+    ticket: Optional[str] = typer.Argument(None, help=_DEFAULT_TICKET_HELP),
 ):
     """Exec the Claude harness at the ticket root; everything after -- passes to claude."""
     require_docker()
-    setup_logging(Config.from_env())
-    exec_claude(ticket, ctx.args)
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    extra_args = ctx.args
+    if ticket and ticket.startswith("-"):
+        # Bare `cld claude -- --continue`: click fills the empty ticket slot
+        # with the first passthrough arg.
+        ticket, extra_args = None, [ticket, *ctx.args]
+    exec_claude(_default_ticket(cfg, ticket), extra_args)
 
 
 @app.command()
 @_handle_errors
-def shell(ticket: str = typer.Argument(..., help=_TICKET_HELP)):
+def shell(ticket: Optional[str] = typer.Argument(None, help=_DEFAULT_TICKET_HELP)):
     """Interactive bash in the ticket container -- for debugging the sandbox itself."""
     require_docker()
-    setup_logging(Config.from_env())
-    exec_shell(ticket)
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    exec_shell(_default_ticket(cfg, ticket))
 
 
 @app.command()
 @_handle_errors
-def stop(ticket: str = typer.Argument(..., help=_TICKET_HELP)):
+def stop(ticket: Optional[str] = typer.Argument(None, help=_DEFAULT_TICKET_HELP)):
     """Pause a ticket container (docker stop); `cld start` warm-starts it."""
     require_docker()
-    setup_logging(Config.from_env())
-    stop_ticket(ticket)
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    stop_ticket(_default_ticket(cfg, ticket))
 
 
 @app.command()
 @_handle_errors
 def restart(
-    ticket: str = typer.Argument(..., help=_TICKET_HELP),
+    ticket: Optional[str] = typer.Argument(None, help=_DEFAULT_TICKET_HELP),
     reanchor: list[str] = typer.Option(
         [], "--reanchor", metavar="REPO@REV",
         help="Move a repo's anchor commit onto REV before recreating "
@@ -661,25 +675,26 @@ def restart(
     require_docker()
     cfg = Config.from_env()
     setup_logging(cfg)
-    restart_ticket(cfg, ticket, reanchor)
+    restart_ticket(cfg, _default_ticket(cfg, ticket), reanchor)
 
 
 @app.command()
 @_handle_errors
 def shutdown(
-    ticket: Optional[str] = typer.Argument(None, help=_TICKET_HELP),
+    ticket: Optional[str] = typer.Argument(None, help=_DEFAULT_TICKET_HELP),
     all_: bool = typer.Option(False, "--all", help="Shut down every ticket container on this host"),
 ):
     """End a ticket: teardown plus per-repo bookmark/workspace forget (commits survive)."""
-    if all_ == bool(ticket):
+    if all_ and ticket:
         typer.echo("Error: pass a ticket, or --all -- not both", err=True)
         raise typer.Exit(1)
     require_docker()
-    setup_logging(Config.from_env())
+    cfg = Config.from_env()
+    setup_logging(cfg)
     if all_:
         shutdown_all_tickets()
     else:
-        shutdown_ticket(ticket)
+        shutdown_ticket(_default_ticket(cfg, ticket))
 
 
 @app.command()
@@ -697,13 +712,14 @@ def status(ticket: Optional[str] = typer.Argument(None, help=_TICKET_HELP)):
 @app.command()
 @_handle_errors
 def logs(
-    ticket: str = typer.Argument(..., help=_TICKET_HELP),
+    ticket: Optional[str] = typer.Argument(None, help=_DEFAULT_TICKET_HELP),
     tail: int = typer.Option(80, "-n", "--tail", help="Number of lines to show"),
 ):
     """Entrypoint/boot logs of a ticket container."""
     require_docker()
-    setup_logging(Config.from_env())
-    print_ticket_logs(ticket, tail)
+    cfg = Config.from_env()
+    setup_logging(cfg)
+    print_ticket_logs(_default_ticket(cfg, ticket), tail)
 
 
 # --- Repo registry ------------------------------------------------------------

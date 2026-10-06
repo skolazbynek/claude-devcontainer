@@ -214,11 +214,35 @@ class TestTicketVerbs:
             "lide-api@feature-x", "diskuze-api@main",
         ]
 
-    def test_shutdown_requires_ticket_xor_all(self):
-        for argv in (["shutdown"], ["shutdown", "t1", "--all"]):
-            result, _ = self._invoke(argv, names=["shutdown_ticket", "shutdown_all_tickets"])
-            assert result.exit_code == 1
-            assert "not both" in result.output
+    def test_shutdown_rejects_ticket_and_all(self):
+        result, _ = self._invoke(
+            ["shutdown", "t1", "--all"], names=["shutdown_ticket", "shutdown_all_tickets"])
+        assert result.exit_code == 1
+        assert "not both" in result.output
+
+    @pytest.mark.parametrize(
+        ("argv", "name", "expect"),
+        [
+            (["claude", "--", "--continue"], "exec_claude", ("diskuze-api", ["--continue"])),
+            (["shell"], "exec_shell", ("diskuze-api",)),
+            (["stop"], "stop_ticket", ("diskuze-api",)),
+            (["logs", "-n", "5"], "print_ticket_logs", ("diskuze-api", 5)),
+            (["shutdown"], "shutdown_ticket", ("diskuze-api",)),
+        ],
+        ids=["claude", "shell", "stop", "logs", "shutdown"],
+    )
+    def test_bare_verb_targets_cwd_repo_ticket(self, argv, name, expect):
+        """Bare verbs name the ticket after the cwd repo directory, as bare `cld start` does."""
+        with patch("cld.cli.find_target_repo", return_value=Path("/home/z/diskuze-api")):
+            result, mocks = self._invoke(argv, names=[name])
+        assert result.exit_code == 0, result.output
+        assert mocks[name].call_args.args == expect
+
+    def test_bare_restart_targets_cwd_repo_ticket(self):
+        with patch("cld.cli.find_target_repo", return_value=Path("/home/z/diskuze-api")):
+            result, mocks = self._invoke(["restart"], names=["restart_ticket"])
+        assert result.exit_code == 0, result.output
+        assert mocks["restart_ticket"].call_args.args[1:] == ("diskuze-api", [])
 
     def test_shutdown_one_and_all(self):
         result, mocks = self._invoke(

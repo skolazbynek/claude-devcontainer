@@ -91,13 +91,15 @@ Each entry is a `[repos.<name>]` TOML table: `path`, optional `default_rev` (anc
 | Verb | Semantics |
 |---|---|
 | `cld start <ticket> [repo[@rev]...]` | Create-or-start. On a TTY with no repos: interactive picker over the registry. Each repo arg is a registry name or path, with an optional `@rev` anchor override. Against an existing ticket, a different repo set shows a diff, asks to confirm, and recreates the container. Bare `cld start` (no args at all) targets the cwd's repo directly -- ad hoc, regardless of registration -- under a ticket named after the repo directory. |
-| `cld claude <ticket> [-- args...]` | The daily verb: exec the harness at the ticket root. Everything after `--` passes to claude (`--model`, `--continue`, `--resume`, `-p`). One live session per container (POC): a second `cld claude` is refused, naming the holder. |
-| `cld shell <ticket>` | Escape hatch: interactive bash in the container, for debugging the sandbox itself. |
-| `cld stop <ticket>` | Pause (`docker stop`). Workspaces stay in place; `cld start` on a stopped ticket is a warm start. |
-| `cld restart <ticket> [--reanchor repo@rev]...` | Recreate the container from its persisted launch manifest (labels, read back before removal -- no argument drop). Workspaces reattach at their bookmarks; venvs and caches in the container layer are lost. `--reanchor` (repeatable, jj only) moves a repo's anchor commit onto a new revision first. |
-| `cld shutdown <ticket> [--all]` | End of ticket: teardown, forget the ticket's bookmark and workspace in every mounted repo. Commits always survive in the repo stores. |
+| `cld claude [<ticket>] [-- args...]` | The daily verb: exec the harness at the ticket root. Everything after `--` passes to claude (`--model`, `--continue`, `--resume`, `-p`). One live session per container (POC): a second `cld claude` is refused, naming the holder. |
+| `cld shell [<ticket>]` | Escape hatch: interactive bash in the container, for debugging the sandbox itself. |
+| `cld stop [<ticket>]` | Pause (`docker stop`). Workspaces stay in place; `cld start` on a stopped ticket is a warm start. |
+| `cld restart [<ticket>] [--reanchor repo@rev]...` | Recreate the container from its persisted launch manifest (labels, read back before removal -- no argument drop). Workspaces reattach at their bookmarks; venvs and caches in the container layer are lost. `--reanchor` (repeatable, jj only) moves a repo's anchor commit onto a new revision first. |
+| `cld shutdown [<ticket>] [--all]` | End of ticket: teardown, forget the ticket's bookmark and workspace in every mounted repo. Commits always survive in the repo stores. |
 | `cld status [<ticket>]` | Roster (repos, state, live session) or one-ticket detail (per-repo anchors, modes, bookmark tips, session, uptime). |
-| `cld logs <ticket> [-n N]` | Entrypoint/boot logs. |
+| `cld logs [<ticket>] [-n N]` | Entrypoint/boot logs. |
+
+Without a ticket, `claude`, `shell`, `stop`, `restart`, `shutdown` and `logs` target the ticket bare `cld start` creates: the one named after the cwd repo's directory. Bare `cld status` stays the roster.
 
 Resume: transcripts land on the host under the per-ticket cwd slug, so `cld claude <ticket> -- --continue` resumes the ticket's latest conversation and `-- --resume` lists only that ticket's sessions. This works even after `cld shutdown` followed by a fresh `cld start` of the same ticket -- cld itself keeps no session state.
 
