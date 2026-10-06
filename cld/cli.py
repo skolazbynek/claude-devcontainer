@@ -319,7 +319,7 @@ def task_agent_start(
     )
     # The already-resolved anchor, not `revision`: the launch must pin exactly the
     # commit the overlap check inspected. The brief rides in the same envelope.
-    args += anchor_env_args(cfg, session, anchor, brief=brief, mode=mode)
+    args += anchor_env_args(cfg, anchor, brief=brief, mode=mode)
     args += ["-e", f"AGENT_PERSONA={role}"]
     if model:
         args += ["-e", f"AGENT_MODEL={model}"]

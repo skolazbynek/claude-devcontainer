@@ -482,7 +482,7 @@ class TestTaskAgentStart:
         assert start_env.resolve_anchor.call_args.args[2] == "some-revset"
         # The already-resolved hash, not the raw -r: the launch must pin exactly
         # the commit the live-stack refusal inspected.
-        assert start_env.anchor_env.call_args.args[2] == start_env.anchor_hash
+        assert start_env.anchor_env.call_args.args[1] == start_env.anchor_hash
 
     def test_capacity_refusal_skips_image_build_and_run(self, start_env):
         start_env.capacity.side_effect = RuntimeError("task-agent cap reached for X: 4/4")

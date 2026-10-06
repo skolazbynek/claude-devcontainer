@@ -69,8 +69,8 @@ cld_recover_anchor() {
 #       $4=base_rev (revision to anchor on at first launch)
 #       $5=mode (isolated|shared)
 #       $6=scratch_source: "env" decodes AGENT_SCRATCH (v1 wire, required on
-#          first launch); "default" synthesizes the session-marker payload
-#          in-container (`--default-payload`, ticket kind -- design 4.2).
+#          first launch); "default" stages the scratch commit empty
+#          (`--default-payload`, ticket kind -- design 4.2).
 #
 # Invariant: bookmark $3 exists in the origin store <=> a live or
 # restart-paused lifecycle owns this session. Restart preserves the bookmark
@@ -113,8 +113,8 @@ cld_boot_workspace() {
         return 0
     fi
 
-    # First launch. Scratch commit B (child of anchor A, carrying `.cld-run/*`)
-    # is staged INSIDE the workspace by `python3 -m cld.vcs.scratch`, so the
+    # First launch. Scratch commit B (child of anchor A; empty, or carrying
+    # `.cld-run/brief.md` when the launch composed a brief) is staged INSIDE the workspace by `python3 -m cld.vcs.scratch`, so the
     # origin working copy is never touched -- crucial for the common jj case
     # where the user's @ is A itself.
     if [ "$scratch_source" = "env" ] && [ -z "${AGENT_SCRATCH:-}" ]; then

@@ -7,8 +7,9 @@ which produces B as a child of A. Change A in the origin store is never
 rewritten, and the user's origin working copy is never touched — even in the
 common case where the user's ``@`` is A itself.
 
-B carries the scratch payload (task brief, session marker) and its description
-carries the session and anchor mode, so a restart or reattach can recover both
+B carries the scratch payload (the task brief, when the launching command
+composed one; otherwise B is empty) and its description carries the session
+and anchor mode, so a restart or reattach can recover both
 from the store. The enforced/exported anchor (``AGENT_ANCHOR_HASH``) depends
 on the mode (PRODUCT_DESIGN.md section 8): isolated (default) — the anchor is
 B itself, so only B's own descendants are editable; shared — the anchor is A,
@@ -20,8 +21,7 @@ The host passes:
   ``resolve_anchor`` is idempotent on a change id).
 - ``AGENT_SCRATCH``: a base64 envelope of the scratch payload. Ticket
   containers (v2) pass none: they have no brief, so the entrypoint invokes
-  ``python3 -m cld.vcs.scratch --default-payload`` and the session-marker
-  payload is synthesized in-container.
+  ``python3 -m cld.vcs.scratch --default-payload`` and B is staged empty.
 
 ``stage_from_env()`` is the peer-side entry point. It's invoked from inside the
 already-created workspace (cwd = ``/workspace/current``), writes the payload,
@@ -52,6 +52,11 @@ def stage_in_workspace(
 ) -> str:
     """Materialize scratch and commit B inside an already-created jj workspace.
 
+    B is empty when *scratch_files* is: its description alone carries the
+    session and mode, and jj keeps an empty commit that has a description.
+    The commit stays limited to ``.cld-run/`` either way, so no stray
+    working-copy file lands in the anchor.
+
     Args:
         workspace_path: path to a jj secondary workspace (typically ``/workspace/current``).
             Its ``@`` must be an empty child of A when this is called.
@@ -65,11 +70,10 @@ def stage_in_workspace(
 
     Returns:
         Change id of B, the scratch commit whose only diff vs. A is
-        ``.cld-run/*``. The change id, not the commit id: a host-side rebase
+        ``.cld-run/*`` (none when *scratch_files* is empty). The change id, not the commit id: a host-side rebase
         of B rewrites the latter.
     """
     scratch_dir = workspace_path / SCRATCH_DIR
-    scratch_dir.mkdir(parents=True, exist_ok=True)
     for rel, content in scratch_files.items():
         dest = scratch_dir / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -118,8 +122,8 @@ def stage_from_env(default_payload: bool = False) -> str:
     - ``SESSION_NAME``  -- required.
     - ``AGENT_SCRATCH`` -- required, base64 envelope from
       ``encode_scratch_envelope`` -- unless *default_payload* is set, which
-      synthesizes the bare session-marker payload locally instead (the ticket
-      kind has no brief, so the envelope wire is dead weight for it).
+      stages B empty instead (the ticket kind has no brief, so the envelope
+      wire is dead weight for it).
     - ``AGENT_ANCHOR_MODE`` -- optional, ``"isolated"`` (default) or ``"shared"``;
       embedded in B's description for restart/reattach recovery.
     - ``WORKSPACE_CURRENT`` -- optional; defaults to cwd.
@@ -130,7 +134,7 @@ def stage_from_env(default_payload: bool = False) -> str:
     if not session:
         raise RuntimeError("stage_from_env: SESSION_NAME is required")
     if default_payload:
-        scratch: dict[str, bytes] = {"session": f"{session}\n".encode()}
+        scratch: dict[str, bytes] = {}
     else:
         scratch_b64 = os.environ.get("AGENT_SCRATCH") or ""
         if not scratch_b64:

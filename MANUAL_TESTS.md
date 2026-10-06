@@ -434,9 +434,9 @@ With W4, the same checks apply behind `cld start` / `cld stop` /
   `mode=isolated`.
 - `docker exec cld_ticket_smoke-t1 cat /workspace/smoke-t1/CLAUDE.md` — table
   row per repo (name, anchor, mode, backend) and the anchor-contract sentence.
-- `docker exec cld_ticket_smoke-t1 cat /workspace/smoke-t1/<repo-a>/.cld-run/session`
-  prints `cld_ticket_smoke-t1` (the default payload; no `AGENT_SCRATCH` env
-  on the container: `docker inspect` shows none).
+- `jj log -r 'description(glob:"cld anchor: cld_ticket_smoke-t1*")' -T empty`
+  in the repo on the host prints `true`: the ticket's scratch commit carries no
+  files (no `AGENT_SCRATCH` env on the container: `docker inspect` shows none).
 - Watchman snapshots: edit a file via
   `docker exec cld_ticket_smoke-t1 sh -c 'echo x >> /workspace/smoke-t1/<repo-a>/README.md'`,
   then within ~10 s the host-side `jj log -r cld_ticket_smoke-t1@` (workspace

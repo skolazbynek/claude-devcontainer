@@ -83,7 +83,7 @@ def launch_run(
     args += build_container_args(repo_root, session, cfg, anchor_hash=anchor, anchor_mode=mode)
     # The brief travels in the anchor scratch envelope (-> .cld-run/brief.md); no
     # prompt mounts, no host temp file to outlive this detached launch.
-    args += anchor_env_args(cfg, session, anchor, brief=brief, mode=mode)
+    args += anchor_env_args(cfg, anchor, brief=brief, mode=mode)
     if model:
         args += ["-e", f"AGENT_MODEL={model}"]
     if extra_env:

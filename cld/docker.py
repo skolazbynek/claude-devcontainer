@@ -261,7 +261,7 @@ def find_target_repo(cfg: Config) -> Path:
 
 
 def anchor_env_args(
-    cfg: Config, session: str, revision: str, brief: str = "", mode: str = "isolated",
+    cfg: Config, revision: str, brief: str = "", mode: str = "isolated",
 ) -> list[str]:
     """Return the docker `-e` args carrying anchor info to a peer container.
 
@@ -285,13 +285,11 @@ def anchor_env_args(
     from cld.vcs.anchor import resolve_anchor
     from cld.vcs.scratch import encode_scratch_envelope
 
-    scratch = {"session": f"{session}\n".encode()}
-    # The composed brief rides in the same envelope, so it lands in anchor commit B as
+    # The composed brief rides in the envelope, so it lands in anchor commit B as
     # .cld-run/brief.md: one channel instead of the old /config/{persona,task}.md mounts
     # plus AGENT_INLINE_PROMPT, and readable by the agent mid-task. See
-    # docs/design-prompt-chaining.md §3.
-    if brief:
-        scratch["brief.md"] = brief.encode()
+    # docs/design-prompt-chaining.md §3. Without a brief, B is empty.
+    scratch = {"brief.md": brief.encode()} if brief else {}
     payload = encode_scratch_envelope(scratch)
 
     hint = resolve_anchor(get_backend(), revision)

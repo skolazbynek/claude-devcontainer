@@ -113,6 +113,18 @@ class TestStageInWorkspace:
         ).stdout.strip()
         assert anchor in parents
 
+    def test_empty_payload_stages_an_empty_b(self, jj_repo, tmp_path):
+        """No payload: B is empty, and a stray working-copy file stays out of it."""
+        anchor = _add_second_commit(jj_repo.repo_root)
+        peer = _make_peer_workspace(jj_repo, anchor, tmp_path)
+        (peer / "stray.txt").write_text("not scratch\n")
+
+        b_id = stage_in_workspace(peer, "sess_empty", {})
+
+        assert _rev(jj_repo, b_id, "empty") == "true"
+        assert "cld anchor: sess_empty mode=isolated" in _rev(jj_repo, b_id, "description")
+        assert not (peer / SCRATCH_DIR).exists()
+
     def test_returns_the_change_id_of_b(self, jj_repo, tmp_path):
         """A host-side rebase of B rewrites its commit id, never its change id."""
         anchor = _add_second_commit(jj_repo.repo_root)
@@ -213,8 +225,8 @@ class TestStageFromEnv:
 
 
 class TestStageFromEnvDefaultPayload:
-    """`--default-payload` (ticket kind): no AGENT_SCRATCH, the session-marker
-    payload is synthesized in-container (design-ticket-containers.md 4.2)."""
+    """`--default-payload` (ticket kind): no AGENT_SCRATCH, B is staged empty
+    in-container (design-ticket-containers.md 4.2)."""
 
     def test_stages_without_agent_scratch(self, jj_repo, tmp_path, monkeypatch):
         anchor = _add_second_commit(jj_repo.repo_root)
@@ -225,25 +237,10 @@ class TestStageFromEnvDefaultPayload:
         monkeypatch.delenv("AGENT_SCRATCH", raising=False)
         b_hash = stage_from_env(default_payload=True)
 
-        # B's shape is unchanged: session marker under .cld-run/, the
-        # `cld anchor: <session> mode=<mode>` description.
-        show = subprocess.run(
-            ["jj", "log", "-r", b_hash, "--no-graph", "--summary", "-T", "description"],
-            cwd=jj_repo.repo_root, check=True, capture_output=True, text=True,
-        )
-        assert f"{SCRATCH_DIR}/session" in show.stdout
-        assert "cld anchor: cld_ticket_lide-2600 mode=isolated" in show.stdout
-
-    def test_session_marker_content_is_session_name(self, jj_repo, tmp_path, monkeypatch):
-        anchor = _add_second_commit(jj_repo.repo_root)
-        peer = _make_peer_workspace(jj_repo, anchor, tmp_path)
-
-        monkeypatch.setenv("SESSION_NAME", "cld_ticket_t1")
-        monkeypatch.setenv("WORKSPACE_CURRENT", str(peer))
-        monkeypatch.delenv("AGENT_SCRATCH", raising=False)
-        stage_from_env(default_payload=True)
-
-        assert (peer / SCRATCH_DIR / "session").read_text() == "cld_ticket_t1\n"
+        # B carries no files, only the `cld anchor: <session> mode=<mode>` description.
+        assert _rev(jj_repo, b_hash, "empty") == "true"
+        assert "cld anchor: cld_ticket_lide-2600 mode=isolated" in _rev(jj_repo, b_hash, "description")
+        assert not (peer / SCRATCH_DIR).exists()
 
     def test_mode_env_still_lands_in_description(self, jj_repo, tmp_path, monkeypatch):
         anchor = _add_second_commit(jj_repo.repo_root)
