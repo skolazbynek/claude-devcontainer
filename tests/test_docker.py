@@ -36,6 +36,7 @@ from cld.docker import (
 )
 from cld.manifest import RepoManifestEntry, TicketManifest
 from cld.registry import RepoEntry
+from cld.vcs.anchor import resolve_anchor
 
 
 def _ps(names: str, rc: int = 0):
@@ -525,14 +526,14 @@ class TestResolveAnchorChecked:
     """Overlap check against a real jj repo; the occupant list is faked."""
 
     def _commits(self, jj_repo):
-        base = jj_repo.resolve_revision("@-")
+        base = resolve_anchor(jj_repo, "@-")
         jj_repo.run(["new", base])
         (jj_repo.repo_root / "live.txt").write_text("live\n")
         jj_repo.run(["commit", "-m", "live agent anchor"])
-        live_anchor = jj_repo.resolve_revision("@-")
+        live_anchor = resolve_anchor(jj_repo, "@-")
         (jj_repo.repo_root / "more.txt").write_text("more\n")
         jj_repo.run(["commit", "-m", "live agent work"])
-        inside = jj_repo.resolve_revision("@-")
+        inside = resolve_anchor(jj_repo, "@-")
         return base, live_anchor, inside
 
     def _fleet(self, tmp_path, jj_repo, anchor, name="cld_agent_r_live", anchor_mode="isolated", kind="task-agent"):
@@ -724,16 +725,18 @@ class TestEffectiveAnchorDerivation:
     SESSION = "cld_agent_r_live"
 
     def _staged(self, jj_repo):
-        """base A, its staged scratch child B (session-marked), and B's child."""
-        base = jj_repo.resolve_revision("@-")
+        """base A, its staged scratch child B (session-marked), and B's child,
+        bookmarked at the session as the entrypoint leaves it."""
+        base = resolve_anchor(jj_repo, "@-")
         jj_repo.run(["new", base])
         (jj_repo.repo_root / ".cld-run").mkdir()
         (jj_repo.repo_root / ".cld-run" / "anchor.json").write_text("{}\n")
         jj_repo.run(["commit", "-m", f"cld anchor: {self.SESSION} mode=isolated"])
-        scratch = jj_repo.resolve_revision("@-")
+        scratch = resolve_anchor(jj_repo, "@-")
         (jj_repo.repo_root / "work.txt").write_text("work\n")
         jj_repo.run(["commit", "-m", "live agent work"])
-        inside_b = jj_repo.resolve_revision("@-")
+        inside_b = resolve_anchor(jj_repo, "@-")
+        jj_repo.run(["bookmark", "create", self.SESSION, "-r", inside_b])
         return base, scratch, inside_b
 
     def _fleet(self, tmp_path, jj_repo, base, kind="task-agent"):
@@ -764,6 +767,17 @@ class TestEffectiveAnchorDerivation:
             with pytest.raises(RuntimeError, match="inside the live reach"):
                 resolve_anchor_checked(cfg, jj_repo.repo_root, scratch)
 
+    def test_scratch_rebased_off_base_on_host_is_still_found(self, tmp_path, jj_repo):
+        """The host may rebase B off the labeled base A; B is found through the
+        session bookmark, so A stays outside the occupant's reach."""
+        base, scratch, inside_b = self._staged(jj_repo)
+        jj_repo.run(["rebase", "-s", scratch, "-o", f"parents({base})"])
+        cfg, records = self._fleet(tmp_path, jj_repo, base)
+        with patch("cld.docker.docker_occupant_list", return_value=records):
+            assert resolve_anchor_checked(cfg, jj_repo.repo_root, base) == base
+            with pytest.raises(RuntimeError, match="inside the live reach"):
+                resolve_anchor_checked(cfg, jj_repo.repo_root, inside_b)
+
     def test_other_sessions_scratch_is_not_mine(self, tmp_path, jj_repo):
         """The derivation is session-scoped: a sibling's scratch child of the
         same base must not be mistaken for this occupant's boundary."""
@@ -780,11 +794,13 @@ class TestEffectiveAnchorDerivation:
         """The description glob ends in ' *' (space before the wildcard), so
         session x must not match the scratch of session x2 staged off the same
         base -- a prefix collision would swap in the sibling's boundary."""
-        base = jj_repo.resolve_revision("@-")
+        base = resolve_anchor(jj_repo, "@-")
         jj_repo.run(["new", base])
         (jj_repo.repo_root / ".cld-run").mkdir()
         (jj_repo.repo_root / ".cld-run" / "anchor.json").write_text("{}\n")
         jj_repo.run(["commit", "-m", f"cld anchor: {self.SESSION}2 mode=isolated"])
+        # Bookmarked so the sibling's scratch sits in SESSION's searched ancestry.
+        jj_repo.run(["bookmark", "create", self.SESSION, "-r", "@-"])
         cfg, records = self._fleet(tmp_path, jj_repo, base)
         # SESSION itself has no scratch commit -> its effective anchor must
         # fall back to base A, whose reach covers A itself.
@@ -807,14 +823,14 @@ class TestOverlapKindMatrix:
     proceeds, everything else involving an occupant blocks."""
 
     def _commits(self, jj_repo):
-        base = jj_repo.resolve_revision("@-")
+        base = resolve_anchor(jj_repo, "@-")
         jj_repo.run(["new", base])
         (jj_repo.repo_root / "live.txt").write_text("live\n")
         jj_repo.run(["commit", "-m", "occupant anchor"])
-        occupant_anchor = jj_repo.resolve_revision("@-")
+        occupant_anchor = resolve_anchor(jj_repo, "@-")
         (jj_repo.repo_root / "more.txt").write_text("more\n")
         jj_repo.run(["commit", "-m", "occupant work"])
-        inside = jj_repo.resolve_revision("@-")
+        inside = resolve_anchor(jj_repo, "@-")
         return occupant_anchor, inside
 
     def _fleet(self, tmp_path, jj_repo, anchor, kind, name="cld_occupant"):
@@ -874,7 +890,7 @@ class TestOverlapKindMatrix:
                 resolve_anchor_checked(cfg, jj_repo.repo_root, inside)
 
     def test_shared_ticket_vs_ticket_still_warns(self, tmp_path, jj_repo, caplog):
-        base = jj_repo.resolve_revision("@-")
+        base = resolve_anchor(jj_repo, "@-")
         occupant_anchor, _ = self._commits(jj_repo)
         cfg, records = self._fleet(tmp_path, jj_repo, occupant_anchor, "ticket", name="cld_ticket_other")
         with caplog.at_level("WARNING"), patch("cld.docker.docker_occupant_list", return_value=records):
@@ -969,11 +985,11 @@ class TestTicketAnchorResolver:
     """The resolve_manifest hook: ticket caller semantics and mode passthrough."""
 
     def _occupied(self, jj_repo, kind):
-        base = jj_repo.resolve_revision("@-")
+        base = resolve_anchor(jj_repo, "@-")
         jj_repo.run(["new", base])
         (jj_repo.repo_root / "live.txt").write_text("live\n")
         jj_repo.run(["commit", "-m", "occupant anchor"])
-        occupant_anchor = jj_repo.resolve_revision("@-")
+        occupant_anchor = resolve_anchor(jj_repo, "@-")
         return base, occupant_anchor, _occupants(
             ("cld_occupant", str(jj_repo.repo_root), occupant_anchor, "isolated"), kind=kind,
         )

@@ -181,7 +181,7 @@ class TestResolveManifest:
         assert m.repos[0].path == str(tmp_path / "projects" / "r")
 
     def test_default_resolver_pins_a_real_jj_revision(self, jj_repo):
-        base = jj_repo.resolve_revision("@-")
+        base = jj_repo.run(["log", "-r", "@-", "--no-graph", "-T", "change_id"]).stdout.strip()
         repos = {"seed": RepoEntry(path=str(jj_repo.repo_root))}
         m = resolve_manifest("t", ["seed@@-"], repos)
         assert m.repos[0].anchor_base == base

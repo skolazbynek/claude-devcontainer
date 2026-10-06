@@ -103,7 +103,7 @@ def wait_ticket_ready(container: str, n_repos: int, timeout: int = 0) -> bool:
 def _launch(cfg: Config, manifest: TicketManifest) -> None:
     """``docker run -d`` from a resolved manifest, then the scaled readiness wait.
 
-    Anchors ride in the manifest (already hash-pinned); the same host-side
+    Anchors ride in the manifest (already pinned to change ids); the same host-side
     extras every interactive kind gets -- devcontainer home mounts, the
     forwarded ssh-agent -- ride along, recomputed per launch.
     """
@@ -450,7 +450,7 @@ def restart_ticket(cfg: Config, ticket: str, reanchor: tuple[str, ...] = ()) -> 
 
     Labels die with ``docker rm``, so the manifest is read back first -- this
     read-before-remove is what fixes v1's parameter-dropping restart. Anchors
-    are not re-resolved: ``anchor_base`` is already a hash, and each repo's
+    are not re-resolved: ``anchor_base`` is already a pinned change id, and each repo's
     workspace reattaches at its bookmark anyway (design section 2.3) --
     unless *reanchor* names repos to move first (design-anchor-move section 5).
     """

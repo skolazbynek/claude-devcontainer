@@ -105,7 +105,7 @@ Resume: transcripts land on the host under the per-ticket cwd slug, so `cld clau
 
 ### Anchors per repo
 
-At first launch, each repo's anchor revision resolves as: explicit `@rev` from the launch args, else the registry `default_rev`, else `trunk()`. In isolated mode (default), a scratch commit is staged as a child of the anchor and the ticket may edit only its descendants; `--shared-anchor <repo>` (repeatable, per repo) widens the editable tree to every descendant of the anchor itself. The anchor is never written to. The contract is policy, enforced by prompt and convention, not mechanism.
+At first launch, each repo's anchor revision resolves as: explicit `@rev` from the launch args, else the registry `default_rev`, else `trunk()`. In isolated mode (default), a scratch commit is staged as a child of the anchor and the ticket may edit only its descendants; `--shared-anchor <repo>` (repeatable, per repo) widens the editable tree to every descendant of the anchor itself. The anchor is pinned by its jj change ID (a commit hash on git), so a host-side rebase of the anchor keeps it the same anchor; no container ever rewrites, moves or rebases it. The contract is policy, enforced by prompt and convention, not mechanism.
 
 When a new ticket's anchor lies inside another live ticket's editable tree in the same repo, cld **warns and proceeds** (stacked tickets are legitimate). Anchoring inside a headless container's tree (`task-agent`, `run`) still blocks, in both directions.
 

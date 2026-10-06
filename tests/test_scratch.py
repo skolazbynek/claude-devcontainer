@@ -113,8 +113,15 @@ class TestStageInWorkspace:
         ).stdout.strip()
         assert anchor in parents
 
+    def test_returns_the_change_id_of_b(self, jj_repo, tmp_path):
+        """A host-side rebase of B rewrites its commit id, never its change id."""
+        anchor = _add_second_commit(jj_repo.repo_root)
+        peer = _make_peer_workspace(jj_repo, anchor, tmp_path)
+        b_id = stage_in_workspace(peer, "sess_id", {"session": b"sess_id\n"})
+        assert b_id == _rev(jj_repo, "description(glob:'cld anchor: sess_id *')", "change_id")
 
-_VCS_LIB = Path(__file__).resolve().parent.parent / "imgs/claude-devcontainer/vcs-lib.sh"
+
+_VCS_LIB =Path(__file__).resolve().parent.parent / "imgs/claude-devcontainer/vcs-lib.sh"
 
 
 class TestRecoverAnchorSessionGlob:
@@ -427,7 +434,7 @@ class TestMoveAnchorCommit:
         base, s_hash, _c = _stage_and_work(jj_repo, tmp_path, session)
 
         op_before = _op_head(jj_repo)
-        ops = move_anchor_commit(jj_repo, s_hash, base, "isolated", session)
+        ops = move_anchor_commit(jj_repo, s_hash, _rev(jj_repo, base, "change_id"), "isolated", session)
         assert ops == []
         assert _op_head(jj_repo) == op_before
 

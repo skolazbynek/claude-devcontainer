@@ -139,7 +139,7 @@ def _split_rev(spec: str) -> tuple[str, str]:
 
 
 def default_resolver(path: str, revision: str, mode: str) -> str:
-    """Resolve *revision* to a commit hash in the repo at *path*.
+    """Resolve *revision* to an anchor id (``resolve_anchor``) in the repo at *path*.
 
     *mode* (``isolated`` | ``shared``) is unused here; the overlap-checking
     resolver (``cld.docker.ticket_anchor_resolver``) needs it, so it is part
@@ -162,7 +162,7 @@ def resolve_manifest(
     anchor override; without one the registry ``default_rev`` applies, falling
     back to ``trunk()``. *shared* names the repos launched with
     ``--shared-anchor``. *resolver* pins each ``(path, revision, mode)`` to a
-    commit hash --- the launch path passes the overlap-checking resolver here.
+    change id (jj) --- the launch path passes the overlap-checking resolver here.
     """
     bare: list[str] = []
     overrides: list[str] = []

@@ -3,7 +3,8 @@
 Two primitives that every cld subcommand uses to satisfy the contract
 described in docs/design-anchor-change.md:
 
-- ``resolve_anchor``     pin a (possibly symbolic) revision to a commit hash.
+- ``resolve_anchor``     pin a (possibly symbolic) revision to a change id
+                         (jj) or commit hash (git).
 - ``assert_descendant``  verify a revision lies in the anchor's descendants.
 
 Anchor staging (creating a child commit B of the resolved anchor A containing
@@ -20,14 +21,21 @@ log = get_logger(__name__)
 
 
 def resolve_anchor(vcs: VcsBackend, revision: str) -> str:
-    """Pin the anchor revision to a concrete commit hash.
+    """Pin the anchor revision: its change id on jj, a commit hash on git.
 
-    Empty ``revision`` defaults to ``@`` (jj) or ``HEAD`` (git), respecting
-    ``vcs.workspace_revision`` when invoked from a secondary workspace.
+    The change id survives a host-side rebase of the anchor, which rewrites
+    its commit hash. Git has no change ids. Empty ``revision`` defaults to
+    ``@`` (jj) or ``HEAD`` (git), respecting ``vcs.workspace_revision`` when
+    invoked from a secondary workspace.
     """
     if not revision:
         revision = vcs.workspace_revision or ("@" if vcs.name == "jj" else "HEAD")
-    return vcs.resolve_revision(revision)
+    if vcs.name != "jj":
+        return vcs.resolve_revision(revision)
+    result = vcs.run(["log", "-r", revision, "--no-graph", "-T", "change_id", "-n", "1"])
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError(f"Failed to resolve revision '{revision}': {result.stderr.strip()}")
+    return result.stdout.strip()
 
 
 def assert_descendant(vcs: VcsBackend, anchor_hash: str, candidate: str) -> None:
@@ -50,7 +58,7 @@ def assert_descendant(vcs: VcsBackend, anchor_hash: str, candidate: str) -> None
 
 
 def find_anchor_commit(vcs: VcsBackend, session: str) -> str:
-    """Find a ticket's own scratch commit S: the ancestor of the *session*
+    """Find the change id of a ticket's own scratch commit S: the ancestor of the *session*
     bookmark carrying its own ``cld anchor: <session> mode=<mode>`` staging
     description (the same revset ``cld_recover_anchor`` and ``_effective_anchor``
     use to find it -- see ``imgs/claude-devcontainer/vcs-lib.sh`` and
@@ -62,7 +70,7 @@ def find_anchor_commit(vcs: VcsBackend, session: str) -> str:
     revset = (
         f"heads(ancestors({session}) & description(glob:'cld anchor: {session} *'))"
     )
-    result = vcs.run(["log", "-r", revset, "--no-graph", "-T", 'commit_id ++ "\\n"'])
+    result = vcs.run(["log", "-r", revset, "--no-graph", "-T", 'change_id ++ "\\n"'])
     hashes = (
         [line for line in result.stdout.splitlines() if line.strip()]
         if result.returncode == 0
@@ -119,7 +127,8 @@ def revert_ops(vcs: VcsBackend, op_ids: list[str]) -> None:
 def move_anchor_commit(
     vcs: VcsBackend, anchor: str, target: str, mode: str, session: str,
 ) -> list[str]:
-    """Move a ticket's scratch commit S onto *target* (design section 3):
+    """Move a ticket's scratch commit S onto *target* (design section 3). Both
+    are change ids, so S keeps its id across the move:
 
     - isolated: ``jj rebase -r S -o target`` -- only S moves; S's own old
       children stay behind on S's old parent.
@@ -131,7 +140,7 @@ def move_anchor_commit(
     bookmark follows the old work to the old-base side and a reattach can no
     longer find S.
 
-    Already-in-place rule: if S's current parent already equals *target*, no
+    Already-in-place rule: if S's current parent already is *target*, no
     jj command runs at all (this is what makes undo idempotent).
 
     Returns the op ids this call created, newest first, so a caller that
@@ -139,12 +148,8 @@ def move_anchor_commit(
     RuntimeError -- after reverting its own ops -- on a jj command failure or
     on a new conflict appearing that was not there before.
     """
-    change_id = vcs.run(["log", "-r", anchor, "--no-graph", "-T", "change_id"]).stdout.strip()
-    if not change_id:
-        raise RuntimeError(f"could not resolve the change id of anchor commit {anchor}")
-
     current_parent = vcs.run(
-        ["log", "-r", f"parents({anchor})", "--no-graph", "-T", "commit_id", "-n", "1"],
+        ["log", "-r", f"parents({anchor})", "--no-graph", "-T", "change_id", "-n", "1"],
     ).stdout.strip()
     if current_parent == target:
         return []
@@ -167,20 +172,16 @@ def move_anchor_commit(
     if new_conflicts:
         _fail(f"reanchor introduced new conflicts: {', '.join(sorted(new_conflicts))}")
 
-    new_anchor = vcs.run(["log", "-r", change_id, "--no-graph", "-T", "commit_id"]).stdout.strip()
-    if not new_anchor:
-        _fail(f"could not resolve the rebased anchor commit (change id {change_id})")
-
     in_place = vcs.run(
-        ["log", "-r", f"{session} & {new_anchor}::", "--no-graph", "-T", "commit_id", "-n", "1"],
+        ["log", "-r", f"{session} & {anchor}::", "--no-graph", "-T", "commit_id", "-n", "1"],
     )
     if in_place.returncode != 0:
         _fail(f"could not check the session bookmark's position: {(in_place.stderr or '').strip()}")
     if not in_place.stdout.strip():
         op_before = _op_log_head(vcs)
-        bm_result = vcs.run(["bookmark", "set", session, "-r", new_anchor, "--allow-backwards"])
+        bm_result = vcs.run(["bookmark", "set", session, "-r", anchor, "--allow-backwards"])
         ops = _ops_since(vcs, op_before) + ops
         if bm_result.returncode != 0:
-            _fail(f"jj bookmark set {session} -r {new_anchor} failed: {(bm_result.stderr or '').strip()}")
+            _fail(f"jj bookmark set {session} -r {anchor} failed: {(bm_result.stderr or '').strip()}")
 
     return ops

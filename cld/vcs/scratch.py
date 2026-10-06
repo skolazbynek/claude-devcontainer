@@ -15,9 +15,9 @@ B itself, so only B's own descendants are editable; shared — the anchor is A,
 so any pre-existing descendant of A is inside the container's editable tree.
 
 The host passes:
-- ``AGENT_REVISION_HINT``: the revision to anchor on (a commit hash the host
+- ``AGENT_REVISION_HINT``: the revision to anchor on (a change id the host
   resolved from its own jj view; a symbolic revset still works, since
-  ``resolve_anchor`` is idempotent on a hash).
+  ``resolve_anchor`` is idempotent on a change id).
 - ``AGENT_SCRATCH``: a base64 envelope of the scratch payload. Ticket
   containers (v2) pass none: they have no brief, so the entrypoint invokes
   ``python3 -m cld.vcs.scratch --default-payload`` and the session-marker
@@ -25,7 +25,7 @@ The host passes:
 
 ``stage_from_env()`` is the peer-side entry point. It's invoked from inside the
 already-created workspace (cwd = ``/workspace/current``), writes the payload,
-commits, and prints B's commit id to stdout; the entrypoint picks
+commits, and prints B's change id to stdout; the entrypoint picks
 ``AGENT_ANCHOR_HASH`` from B (isolated) or A (shared) per the contract above.
 """
 
@@ -64,8 +64,9 @@ def stage_in_workspace(
             as ``AGENT_ANCHOR_HASH``. Shared: the caller uses A (B's parent).
 
     Returns:
-        Commit id of B, the scratch commit whose only diff vs. A is
-        ``.cld-run/*``.
+        Change id of B, the scratch commit whose only diff vs. A is
+        ``.cld-run/*``. The change id, not the commit id: a host-side rebase
+        of B rewrites the latter.
     """
     scratch_dir = workspace_path / SCRATCH_DIR
     scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -83,9 +84,9 @@ def stage_in_workspace(
             f"{(result.stderr or '').strip()}"
         )
 
-    show = vcs.run(["log", "-r", "@-", "--no-graph", "-T", "commit_id", "-n", "1"])
+    show = vcs.run(["log", "-r", "@-", "--no-graph", "-T", "change_id", "-n", "1"])
     if show.returncode != 0 or not show.stdout.strip():
-        raise RuntimeError("could not read anchor commit id from @-")
+        raise RuntimeError("could not read anchor change id from @-")
     b_hash = show.stdout.strip()
     log.info("staged anchor: %s (session=%s)", b_hash[:12], session)
     return b_hash
@@ -123,7 +124,7 @@ def stage_from_env(default_payload: bool = False) -> str:
       embedded in B's description for restart/reattach recovery.
     - ``WORKSPACE_CURRENT`` -- optional; defaults to cwd.
 
-    Returns B's commit id.
+    Returns B's change id.
     """
     session = os.environ.get("SESSION_NAME") or ""
     if not session:

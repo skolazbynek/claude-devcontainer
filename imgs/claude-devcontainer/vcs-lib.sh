@@ -41,12 +41,12 @@ cld_recover_anchor() {
     local bookmark="$1" session="$2" scratch_hash desc
     scratch_hash=$(jj log --no-graph -n 1 \
         -r "heads(ancestors(${bookmark}) & description(glob:'cld anchor: ${session} *'))" \
-        -T commit_id 2>/dev/null || true)
+        -T change_id 2>/dev/null || true)
     [ -n "$scratch_hash" ] || return 0
     desc=$(jj log --no-graph -n 1 -r "$scratch_hash" -T description 2>/dev/null || true)
     case "$desc" in
         *"mode=shared"*)
-            jj log --no-graph -n 1 -r "parents($scratch_hash)" -T commit_id 2>/dev/null || true
+            jj log --no-graph -n 1 -r "parents($scratch_hash)" -T change_id 2>/dev/null || true
             ;;
         *)
             echo "$scratch_hash"
@@ -57,7 +57,7 @@ cld_recover_anchor() {
 # Three-branch jj workspace boot (warm restart / reattach / first launch),
 # extracted from the v1 single-repo entrypoint flow so the ticket boot loop
 # can run it once per repo. Sets:
-#   CLD_BOOT_ANCHOR       effective anchor hash (empty when no scratch commit
+#   CLD_BOOT_ANCHOR       effective anchor change id (empty when no scratch commit
 #                         is recoverable, e.g. a git-era bookmark)
 #   CLD_BOOT_FIRST_LAUNCH 1 on the first-launch branch, else 0
 # Returns non-zero on any fatal boot error; the caller decides whether that
@@ -123,7 +123,7 @@ cld_boot_workspace() {
     fi
     CLD_BOOT_FIRST_LAUNCH=1
     local a_hash b_hash
-    if ! a_hash=$(cd "$origin" && jj log --no-graph -n 1 -r "$base_rev" -T commit_id 2>/dev/null); then
+    if ! a_hash=$(cd "$origin" && jj log --no-graph -n 1 -r "$base_rev" -T change_id 2>/dev/null); then
         echo "Error: could not resolve base revision '$base_rev'" >&2
         return 1
     fi

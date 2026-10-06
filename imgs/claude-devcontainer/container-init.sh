@@ -19,7 +19,7 @@ if cld_broker_wired; then
     echo "[INFO] cld broker ready: run tests via 'cld broker run-tests <pytest args>'"
 fi
 
-# Append one repo's resolved anchor as `export NAME_ANCHOR=<hash>` to
+# Append one repo's resolved anchor as `export NAME_ANCHOR=<change id>` to
 # $CLD_TICKET_ANCHOR_ENV_FILE. `docker exec` only inherits env set at
 # container creation, not vars the entrypoint exports at runtime (PID 1
 # idles; harness/shell sessions attach later via exec), so the anchors are
@@ -90,7 +90,9 @@ Each subdirectory below is one repo's workspace, mounted for this ticket:
 |---|---|---|---|
 ${rows}
 Anchor contract: in each repo, create and edit only changes descending from
-that repo's anchor above. The anchor itself is never rewritten. Shared mode
+that repo's anchor above. The anchor is a jj change ID (a commit hash on git).
+The host may rebase the anchor, which changes its commit hash but not its
+change ID. Never rewrite, move or rebase the anchor yourself. Shared mode
 widens the editable tree to every descendant of the anchor; isolated mode
 (default) means only your own work descends from it.
 

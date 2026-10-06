@@ -24,7 +24,7 @@ log_error() {
 # user.email/user.name from ~/.config/jj.
 copy_host_configs
 
-# Anchor: base revision arrives as AGENT_REVISION_HINT (a commit hash the host
+# Anchor: base revision arrives as AGENT_REVISION_HINT (a change id the host
 # resolved from its own jj view).
 # Scratch commit B (child of anchor A, carrying `.cld-run/*`) is created
 # INSIDE /workspace/current by `python3 -m cld.vcs.scratch` -- the origin
@@ -38,7 +38,7 @@ BOOKMARK="$AGENT_NAME"
 
 cd "$WORKSPACE_ORIGIN"
 BASE_REV="${AGENT_REVISION_HINT:-@}"
-if ! A_HASH=$(jj log --no-graph -n 1 -r "$BASE_REV" -T commit_id 2>/dev/null); then
+if ! A_HASH=$(jj log --no-graph -n 1 -r "$BASE_REV" -T change_id 2>/dev/null); then
     echo "Error: could not resolve AGENT_REVISION_HINT='$BASE_REV'" >&2
     exit 1
 fi

@@ -265,7 +265,7 @@ def anchor_env_args(
 ) -> list[str]:
     """Return the docker `-e` args carrying anchor info to a peer container.
 
-    The host resolves the base revision to a commit hash from its jj view; the
+    The host resolves the base revision to a change id from its jj view; the
     peer entrypoint uses it as the base for ``jj workspace add`` and then creates
     the scratch commit B inside that workspace via ``stage_from_env``. See
     docs/design-anchor-change.md. Only ever called host-side: a container has
@@ -277,9 +277,9 @@ def anchor_env_args(
     -- the entrypoint exports A (B's parent) instead, so any pre-existing
     descendant of A is editable too (docs/design-ticket-containers.md
     section 3). *revision*
-    is expected to already be resolved to a concrete hash by the caller (via
+    is expected to already be resolved to a change id by the caller (via
     ``resolve_anchor_checked``) when the overlap check matters; passing a
-    symbolic revision still works (``resolve_anchor`` is idempotent on a hash).
+    symbolic revision still works (``resolve_anchor`` is idempotent on a change id).
     """
     from cld.vcs import get_backend
     from cld.vcs.anchor import resolve_anchor
@@ -920,22 +920,24 @@ def _effective_anchor(vcs, occupant: dict) -> str:
     In isolated mode the editable boundary is the scratch commit B, staged
     in-container as a child of the labeled base A *after* launch -- labels are
     immutable, so B is derived from the jj store at check time using the same
-    description revset the entrypoint's restart recovery uses
-    (cld_recover_anchor, imgs/claude-devcontainer/vcs-lib.sh). An empty result
-    is the transient window between ``docker run`` and staging; falling back
-    to A only ever over-blocks, since A's reach is a superset of B's. Shared
-    mode edits descendants of A itself, so A *is* the effective anchor there.
+    revset the entrypoint's restart recovery uses (cld_recover_anchor,
+    imgs/claude-devcontainer/vcs-lib.sh): searched among the session
+    bookmark's ancestors, not A's children, because the host may rebase B
+    off A. An empty result is the transient window between ``docker run``
+    and staging; falling back to A only ever over-blocks, since A's reach is
+    a superset of B's. Shared mode edits descendants of A itself, so A *is*
+    the effective anchor there.
     """
     if occupant["mode"] != "isolated":
         return occupant["anchor_base"]
     revset = (
-        f"heads({occupant['anchor_base']}+ & "
+        f"heads(ancestors(bookmarks(exact:\"{occupant['session']}\")) & "
         # The trailing space before the wildcard is load-bearing: every staged
         # description is 'cld anchor: <session> mode=<mode>' (stage_in_workspace),
         # and without it session cld_ticket_x-1 would also match cld_ticket_x-12.
         f"description(glob:'cld anchor: {occupant['session']} *'))"
     )
-    result = vcs.run(["log", "-r", revset, "--no-graph", "-T", "commit_id", "-n", "1"])
+    result = vcs.run(["log", "-r", revset, "--no-graph", "-T", "change_id", "-n", "1"])
     if result.returncode != 0:
         log.warning(
             "could not derive the effective anchor of %s, falling back to its base %s: %s",
@@ -953,8 +955,8 @@ def resolve_anchor_checked(
     caller_kind: str = "agent",
     exclude_session: str = "",
 ) -> str:
-    """Resolve *revision* to a commit hash, checking overlap with every other
-    cld container's reach in the same repo.
+    """Resolve *revision* to an anchor id (``resolve_anchor``: a change id on
+    jj), checking overlap with every other cld container's reach in the same repo.
 
     A container's "reach" -- the set of commits it may touch -- is the
     descendant tree of its *effective* anchor: scratch commit B in isolated

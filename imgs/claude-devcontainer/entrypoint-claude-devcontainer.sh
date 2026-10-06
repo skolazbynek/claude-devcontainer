@@ -143,7 +143,7 @@ cd "$WORKSPACE_ORIGIN"
 # image and entrypoint, imgs/claude-run). The three-branch workspace logic (warm
 # restart / reattach / first launch) lives in cld_boot_workspace (vcs-lib.sh),
 # shared with the ticket loop above. Base revision comes from
-# AGENT_REVISION_HINT, a hash the host resolved from its own jj view.
+# AGENT_REVISION_HINT, a change id the host resolved from its own jj view.
 if ! cld_boot_workspace "$WORKSPACE_ORIGIN" /workspace/current "$BOOKMARK" \
         "${AGENT_REVISION_HINT:-@}" "${AGENT_ANCHOR_MODE:-isolated}" env; then
     exit 1
