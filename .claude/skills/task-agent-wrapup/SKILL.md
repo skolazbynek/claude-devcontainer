@@ -19,13 +19,14 @@ processes like any other; there is no special phase.
 deliverable branch (`cld task-agent status <slug>` shows the name), then report what
 landed.
 
-**If the agent worked in a repo that is not yours, ask it to push:**
+**If the agent worked in a repo not mounted in this ticket, ask it to push:**
 
 ```
 jj git push --bookmark <branch> --allow-new
 ```
 
-You have no filesystem view of a sibling repo, so a pushed branch is the only artifact
+You have no filesystem view of a repo that is only registered on the host, so a pushed
+branch is the only artifact
 you can actually inspect — and the only one that outlives the container for anyone who
 does not have access to that host's jj store.
 
@@ -33,9 +34,9 @@ does not have access to that host's jj store.
 
 | Where the agent worked | Evidence |
 |---|---|
-| **Your own repo** | Local: `jj log -r <branch>`, `jj diff -r <branch>`. Direct and free — the repo is mounted. |
-| **A different repo, branch pushed** | The branch/MR through the same GitLab surface a human would use. |
-| **A different repo, not pushed** | The agent's own word. **This is not verification.** |
+| **A repo mounted in this ticket** | Local: `jj -R <workspace path> log -r <branch>`, `jj diff -r <branch>` (paths from `cld repos`). Direct and free. |
+| **A registered-only repo, branch pushed** | The branch/MR through the same GitLab surface a human would use. |
+| **A registered-only repo, not pushed** | The agent's own word. **This is not verification.** |
 
 In the third case, say so to the user in exactly those terms. Do not write "verified" or
 "confirmed" about a self-report — you checked nothing, and the work is invisible to

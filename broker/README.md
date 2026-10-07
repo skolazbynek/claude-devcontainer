@@ -2,12 +2,10 @@
 
 The host-side glue that lets a `cld task-agent` or ticket
 container trigger a fixed set of host-side actions -- run the target repo's
-tests, enumerate cld containers, drive a GraphQL server -- without ever
-seeing the secrets. The `task-agent` launcher action gates `<target>` on the
-caller's host-set labels; since the master role was removed nothing carries an
-`org.cld.targets` allowlist any more, so that action reaches nothing but the
-caller's own repo-root and is pending a ticket-scoped rework. `run-tests`,
-`list-containers` and `graphql` are what containers actually reach --
+tests, enumerate cld containers and registered repos, launch task-agents,
+drive a GraphQL server -- without ever seeing the secrets. The `task-agent`
+launcher action's `start` reaches a repo mounted in the caller or registered on
+the host (`cld repos add`); see `../docs/design-ticket-task-agents.md`.
 `graphql`'s role gate, like `run-tests`', is prompt-based only (persona/skill
 text), not mechanical (see `../docs/design-cld-broker.md` §16). Agents and
 task-agents are instructed (persona prompts, not enforced here) to only run
@@ -63,7 +61,7 @@ after editing the broker config or rebuilding the `runtests` image.
 For debugging, run any action directly, without sshd and without a container:
 
 ```
-cld-brokerctl run [-C <repo>] [-r <revset>] [-s <session>] [-t <target>]... <action> [args...]
+cld-brokerctl run [-C <repo>] [-r <revset>] [-s <session>] <action> [args...]
 cld-brokerctl run run-tests -k login -x tests/
 cld-brokerctl run -r main graphql start
 ```
@@ -78,10 +76,11 @@ It runs the installed `ForceCommand` from the sshd config, with that config's
 | `-C` | `repo` | the repo containing the current directory |
 | `-r` | `revision` | `@`, your working copy (jj snapshots it first, so uncommitted edits count) |
 | `-s` | `name` | `cld_host_<repo dir name>` |
-| `-t` (repeatable) | `targets` | the repo alone |
 
 Everything after the action goes to it as given. An action's `--repo` selector
 is refused: it picks a ticket container's mounted repo, so on the host use `-C`.
+The exception is `task-agent start --repo <name>`, which resolves `<name>` in
+the host registry.
 A graphql server started this way has no container named after its session,
 so the orphan cleanup reaps it on the next `graphql start` or `status` from any
 caller.
@@ -163,7 +162,7 @@ don't depend on inputs they don't use:
 | `name` | session id; names the caller's own resources | the container name |
 | `repo(selector)` | host repo to act on; `selector` is the `--repo` name | `org.cld.repo-root`, or `org.cld.repo.<name>` for a ticket |
 | `revision(repo)` | caller's current commit, `None` if unresolvable | jj `<session>@` in that repo |
-| `targets()` | repos the caller may launch task-agents for | `org.cld.repo-root` + `org.cld.targets` |
+| `mounted_repo(selector)` | host repo mounted in the caller under that name, `None` if none | `org.cld.repo.<name>` for a ticket, `None` for a v1 kind |
 | `ssh_agent()` | host ssh-agent socket its runs may use, `""` for none | the socket cld mounted into the caller (`cld/docker.py:stage_ssh_agent`) |
 
 `run-tests` calls `resolve_test_context` for the revision and the secrets
@@ -176,16 +175,17 @@ just defining/removing the function.
 
 **Built-in actions:** `run-tests` (pytest in the `runtests` container),
 `list-containers` (read-only cld-container enumeration for the messenger /
-`cld task-agent status`), `task-agent` (`<target> <op>` -- the `cld task-agent`
-lifecycle verbs), and `graphql` (`<op> [args...]` -- start/stop/restart/status/
+`cld task-agent status`), `list-repos` (read-only host registry for `cld repos`,
+marking which entries the caller mounts), `task-agent` (`<op>` -- the `cld
+task-agent` lifecycle verbs), and `graphql` (`<op> [args...]` -- start/stop/restart/status/
 logs for the calling session's own GraphQL server, plus query/introspect/
 endpoints against it or a credentialed alias; see
 `../docs/impl-graphql-broker-plan.md` and `../docs/graphql-mcp.md`). The
-`task-agent` action validates `<target>` against the caller's host-set
-`org.cld.repo-root` + `org.cld.targets` labels through
-`validate_target`; `graphql`, like `run-tests`, instead operates on the
-calling session's own repo (the session's `org.cld.repo-root` label), since it
-has no separate target to launch.
+`task-agent` action's `start` takes a leading `--repo <name>` and resolves it
+through `resolve_task_agent_repo`: a repo mounted in the caller first, then the
+host registry. Its other ops act on an agent by name, which carries its repo,
+so they need none. `graphql`, like `run-tests`, stays on the caller's mounted
+repos (`Caller.repo`).
 
 Both `run-tests`' `resolve_test_context` and `graphql`'s
 `resolve_graphql_context` resolve the session's revision by calling `jj`
@@ -217,7 +217,7 @@ let the token after an `--opt=value` slip by unchecked.
   any repo that has a running agent, task-agent or ticket container (no
   per-container key isolation in this design) -- more surface than before this
   key reached agent/task-agent containers too. The `task-agent` launcher action
-  validates its `<target>` against a host-set label the key alone can't forge.
+  reaches every repo in the host registry, which only the host operator edits.
   With
   `SSH_AUTH_SOCK` configured that includes launching an agent that holds your
   forwarded ssh-agent, so the key buys signing inside a container it spawns and

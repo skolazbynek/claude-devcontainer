@@ -141,23 +141,209 @@ printf '%s' "${FAKE_LABELS:-}"
         assert self._resolve(monkeypatch, "", "task-agent", "", repo_preset="/v1/repo") == "/v1/repo"
 
 
-class TestLabelCallerTargets:
-    """LabelCaller.targets is the caller's repo-root plus its org.cld.targets
-    allowlist, with empty fields dropped -- a ticket has no repo-root."""
+class TestLabelCallerMountedRepo:
+    """LabelCaller.mounted_repo is repo() without the refusals: a ticket's labeled
+    path for a name, None for anything else -- a v1 kind mounts nothing by name."""
+
+    @pytest.fixture(autouse=True)
+    def fakebin(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FAKE_LABELS", "org.cld.kind=ticket\norg.cld.repo.lide-api=/h/lide-api\n")
+        return _fakebin(tmp_path, monkeypatch, docker='printf "%s" "$FAKE_LABELS"\n')
 
     @pytest.mark.parametrize(
-        "repo_root,label,expected",
+        "kind,selector,expected",
         [
-            ("/root", "", ["/root"]),
-            ("/root", "/a:/b:", ["/root", "/a", "/b"]),
-            ("", "", []),
+            ("ticket", "lide-api", "/h/lide-api"),
+            ("ticket", "nope", None),
+            ("ticket", "kind", None),
+            ("task-agent", "lide-api", None),
         ],
-        ids=["root-only", "root-plus-allowlist", "ticket-none"],
+        ids=["mounted", "unknown", "non-repo-label", "v1-kind"],
     )
-    def test_targets(self, tmp_path, monkeypatch, repo_root, label, expected):
-        monkeypatch.setenv("FAKE_TARGETS", label)
-        _fakebin(tmp_path, monkeypatch, docker='printf "%s\\n" "$FAKE_TARGETS"\n')
-        assert broker.LabelCaller("cld_x", "task-agent", repo_root).targets() == expected
+    def test_mounted_repo(self, kind, selector, expected):
+        assert broker.LabelCaller("cld_ticket_x", kind, "/root").mounted_repo(selector) == expected
+
+
+def _write_registry(home: Path, body: str) -> None:
+    (home / ".config" / "cld").mkdir(parents=True, exist_ok=True)
+    (home / ".config" / "cld" / "config.toml").write_text(body)
+
+
+class TestHostRegistry:
+    """host_registry reads the [repos.<name>] tables of the operator's user config
+    with a real TOML parser; anything unreadable is an empty registry, not a crash."""
+
+    @pytest.fixture(autouse=True)
+    def home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        return tmp_path
+
+    def test_entries(self, home):
+        _write_registry(home, '''
+base_image = "claude-base:latest"  # unrelated key
+
+[repos.lide-api]
+path = "/srv/lide api"  # a comment
+default_rev = "main"
+bootstrap = true
+
+[repos.home-rel]
+path = "~/deps"
+
+[repos.no-path]
+default_rev = "main"
+''')
+        assert broker.host_registry() == {"lide-api": "/srv/lide api", "home-rel": f"{home}/deps"}
+
+    @pytest.mark.parametrize("body", [None, "repos = [", 'repos = "x"'],
+                             ids=["absent", "malformed", "not-a-table"])
+    def test_unreadable_is_empty(self, home, body):
+        if body is not None:
+            _write_registry(home, body)
+        assert broker.host_registry() == {}
+
+
+class TestResolveTaskAgentRepo:
+    """task-agent start's --repo resolves mount-first, then the host registry --
+    unlike Caller.repo, which stays mounted-only for run-tests/graphql."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        for name in ("mounted", "registered"):
+            (tmp_path / name / ".jj").mkdir(parents=True)
+        (tmp_path / "bare").mkdir()
+        _write_registry(tmp_path, f'''
+[repos.registered]
+path = "{tmp_path}/registered"
+[repos.bare]
+path = "{tmp_path}/bare"
+[repos.mounted]
+path = "/registry/loses"
+''')
+        monkeypatch.setenv("FAKE_LABELS", f"org.cld.repo.mounted={tmp_path}/mounted\n")
+        _fakebin(tmp_path, monkeypatch, docker='printf "%s" "$FAKE_LABELS"\n')
+
+    def _resolve(self, selector: str, kind: str = "ticket") -> str:
+        return broker.resolve_task_agent_repo(broker.LabelCaller("cld_ticket_x", kind, "/v1/root"), selector)
+
+    @pytest.mark.parametrize(
+        "selector,expected",
+        [("mounted", "mounted"), ("registered", "registered"), ("", "mounted")],
+        ids=["mount-wins", "registry-fallback", "single-mount-default"],
+    )
+    def test_resolves(self, tmp_path, selector, expected):
+        assert self._resolve(selector) == f"{tmp_path}/{expected}"
+
+    def test_v1_kind_reaches_the_registry(self, tmp_path):
+        assert self._resolve("registered", kind="task-agent") == f"{tmp_path}/registered"
+
+    def test_neither_mounted_nor_registered_denied(self, capsys):
+        with pytest.raises(SystemExit) as excinfo:
+            self._resolve("nope")
+        assert _exit_code(excinfo) == 3
+        err = capsys.readouterr().err
+        assert "not one of cld_ticket_x's mounted repos" in err
+        assert "cld repos add nope" in err
+
+    def test_registered_path_must_be_a_repo(self, capsys):
+        with pytest.raises(SystemExit) as excinfo:
+            self._resolve("bare")
+        assert _exit_code(excinfo) == 3
+        assert "is not a repo" in capsys.readouterr().err
+
+    def test_several_mounts_without_name_denied_listing_them(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("FAKE_LABELS", f"org.cld.repo.a={tmp_path}/mounted\norg.cld.repo.b={tmp_path}/mounted\n")
+        with pytest.raises(SystemExit) as excinfo:
+            self._resolve("")
+        assert _exit_code(excinfo) == 3
+        assert "pass --repo <name> (mounted: a b)" in capsys.readouterr().err
+
+
+class TestDispatchTaskAgent:
+    """Full-script sshd route for the task-agent and list-repos actions from a
+    ticket caller: start reaches a mounted or registry-only repo, and the other
+    ops run with no repo at all -- they used to be refused for every ticket."""
+
+    @pytest.fixture(autouse=True)
+    def fakebin(self, tmp_path, monkeypatch):
+        return _fakebin(tmp_path, monkeypatch, docker="""
+cmd="$1"; shift
+[ "$cmd" = inspect ] || exit 1
+case "$*" in
+  *org.cld.kind*) printf 'ticket\\n' ;;
+  *range*)        printf '%s' "${FAKE_LABELS:-}" ;;
+esac
+""", cld="""
+printf 'CWD %s\\n' "$PWD"
+printf '%s\\n' "$@"
+""")
+
+    @pytest.fixture
+    def home(self, tmp_path):
+        for name in ("mounted", "registered"):
+            (tmp_path / name / ".jj").mkdir(parents=True)
+        _write_registry(tmp_path, f'''
+[repos.registered]
+path = "{tmp_path}/registered"
+[repos.mounted]
+path = "{tmp_path}/mounted"
+''')
+        return tmp_path
+
+    def _dispatch(self, home: Path, action: str, argv: list) -> subprocess.CompletedProcess:
+        payload = base64.b64encode(b"".join(a.encode() + b"\0" for a in argv)).decode()
+        env = dict(os.environ, CLD_BROKER_CONF="/nonexistent", HOME=str(home),
+                   SSH_ORIGINAL_COMMAND=f"{action} cld_ticket_x {payload}",
+                   FAKE_LABELS=f"org.cld.repo.mounted={home}/mounted\norg.cld.repo.other={home}/mounted\n")
+        return subprocess.run([sys.executable, str(BROKER_PY)], capture_output=True, text=True, env=env, cwd=home)
+
+    @pytest.mark.parametrize("name", ["mounted", "registered"])
+    def test_start_runs_in_the_selected_repo(self, home, name):
+        result = self._dispatch(home, "task-agent", ["start", "--repo", name, "@task", "-n", "s"])
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == [
+            f"CWD {home}/{name}", "task-agent", "start", "@task", "-n", "s", "--parent", "cld_ticket_x"]
+
+    def test_start_without_repo_on_several_mounts_denied(self, home):
+        result = self._dispatch(home, "task-agent", ["start", "@task", "-n", "s"])
+        assert result.returncode == 3
+        assert "pass --repo" in result.stderr
+
+    def test_start_still_refuses_a_bare_path(self, home):
+        result = self._dispatch(home, "task-agent", ["start", "--repo", "mounted", "/etc/passwd"])
+        assert result.returncode == 2
+        assert "must be an @ref" in result.stderr
+
+    @pytest.mark.parametrize("arg", ["--force", "--parent=cld_other"])
+    def test_spoofing_still_denied(self, home, arg):
+        result = self._dispatch(home, "task-agent", ["shutdown", "slug", arg])
+        assert result.returncode == 2
+        assert "denied" in result.stderr
+
+    @pytest.mark.parametrize(
+        "argv,forwarded",
+        [
+            (["status"], ["status", "--parent", "cld_ticket_x"]),
+            (["logs", "slug", "-n", "5"], ["logs", "slug", "-n", "5"]),
+            (["shutdown", "--all"], ["shutdown", "--all", "--parent", "cld_ticket_x"]),
+        ],
+        ids=["status", "logs", "shutdown"],
+    )
+    def test_other_ops_need_no_repo(self, home, argv, forwarded):
+        result = self._dispatch(home, "task-agent", argv)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == [f"CWD {home}", "task-agent", *forwarded]
+
+    def test_list_repos_marks_the_callers_mounts(self, home):
+        result = self._dispatch(home, "list-repos", [])
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == [
+            f"registered\t{home}/registered\tno", f"mounted\t{home}/mounted\tyes"]
+
+    def test_list_repos_empty_registry(self, tmp_path):
+        result = self._dispatch(tmp_path, "list-repos", [])
+        assert (result.returncode, result.stdout) == (0, "")
 
 
 class TestDispatchRunTests:
@@ -365,17 +551,17 @@ printf '%s\\n' "$@"
         ids=["default-session-sanitized", "explicit-session"],
     )
     def test_session_becomes_task_agent_parent(self, tmp_path, repo, flags, parent):
-        result = self._run(tmp_path, repo, *flags, "task-agent", str(repo), "status")
+        result = self._run(tmp_path, repo, *flags, "task-agent", "status")
         assert result.returncode == 0, result.stderr
         assert result.stdout.splitlines() == ["task-agent", "status", "--parent", parent]
 
-    def test_extra_target_allowed(self, tmp_path, repo):
+    def test_start_reaches_a_registered_repo(self, tmp_path, repo, monkeypatch):
         (tmp_path / "other" / ".jj").mkdir(parents=True)
-        other = tmp_path / "other"
-        denied = self._run(tmp_path, repo, "task-agent", str(other), "status")
-        allowed = self._run(tmp_path, repo, "-t", str(other), "task-agent", str(other), "status")
-        assert denied.returncode == 3
-        assert allowed.returncode == 0, allowed.stderr
+        _write_registry(tmp_path, f'[repos.other]\npath = "{tmp_path}/other"\n')
+        monkeypatch.setenv("HOME", str(tmp_path))
+        result = self._run(tmp_path, repo, "task-agent", "start", "--repo", "other", "@task")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines()[:3] == ["task-agent", "start", "@task"]
 
     def test_bad_session_denied(self, tmp_path, repo):
         result = self._run(tmp_path, repo, "-s", "../x", "list-containers")
@@ -694,7 +880,7 @@ case "$1" in
   logs) echo "server line" ;;
 esac
 """)
-        broker.action_graphql(broker.CliCaller("cld_agent_test", "/repo", "@", []), ["logs", "5"])
+        broker.action_graphql(broker.CliCaller("cld_agent_test", "/repo", "@"), ["logs", "5"])
 
     def test_no_server(self, tmp_path, monkeypatch, capsys):
         with pytest.raises(SystemExit) as excinfo:

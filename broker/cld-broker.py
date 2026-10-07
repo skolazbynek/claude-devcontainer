@@ -23,12 +23,11 @@
 # v1 sessions are all named `cld_agent_*` (task-agents -- the prefix is a
 # leftover of the removed standing repo agent; kind is a label, not a name, see
 # cld/docker.py:task_agent_container_name), plus the v2 ticket containers. Any
-# of these may call `run-tests` / `list-containers`. The `task-agent` launcher
-# action gates on validate_target, which since the removal of the master role
-# (the only kind that ever carried an `org.cld.targets` allowlist) accepts
-# nothing but the caller's own `org.cld.repo-root` -- and a container resolves
-# its cwd to a container path, not that host path, so in practice the launcher
-# route is unusable until it is reworked ticket-scoped.
+# of these may call `run-tests` / `list-containers` / `list-repos`. The
+# `task-agent` launcher action's `start` resolves its `--repo` against the
+# caller's mounted repos first, then the host registry (`cld repos add`, the
+# operator's own allowlist) -- see resolve_task_agent_repo; its other ops need
+# no repo at all (docs/design-ticket-task-agents.md).
 #
 # The regex below is a format check only, not an authorization boundary --
 # the session doubles as the docker container name, and the label read below
@@ -37,7 +36,7 @@
 # ADD AN ACTION: define a function named `action_<name>` (hyphens in <name>
 # become underscores, so `run-tests` -> `action_run_tests`). It receives the
 # Caller the dispatcher built and the decoded argv as a list, and asks the
-# Caller only for what it needs (repo, revision, targets) -- run-tests does it
+# Caller only for what it needs (repo, revision) -- run-tests does it
 # via `resolve_test_context`.
 #
 # Standard library only: the host's python3 runs this file directly, with no
@@ -53,11 +52,13 @@ import stat
 import subprocess
 import sys
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import IO, NamedTuple, NoReturn, Protocol, Self, TextIO
 
@@ -96,12 +97,12 @@ class Caller(Protocol):
         """The host repo to act on; *selector* is the `--repo` name, "" if absent."""
         ...
 
-    def revision(self, repo: str) -> str | None:
-        """The caller's current commit in *repo*; None if it cannot be resolved."""
+    def mounted_repo(self, selector: str) -> str | None:
+        """The host repo mounted in the caller under the name *selector*, None if none."""
         ...
 
-    def targets(self) -> list[str]:
-        """Host repos the caller may launch task-agents for."""
+    def revision(self, repo: str) -> str | None:
+        """The caller's current commit in *repo*; None if it cannot be resolved."""
         ...
 
     def ssh_agent(self) -> str:
@@ -245,12 +246,28 @@ def cld_conf_get(file: str, key: str) -> str:
     return next((match[1] for line in lines if (match := pattern.match(line))), "")
 
 
+# The host repo registry (`cld repos add`): name -> path of each [repos.<name>]
+# table in the user config, the file cld/config.py:_user_config_path reads -- the
+# broker runs as that same operator. Hand-edited, hence a real TOML parser rather
+# than cld_conf_get's line scan. {} when the file is absent or unparsable.
+def host_registry() -> dict[str, str]:
+    try:
+        data = tomllib.loads((Path.home() / ".config" / "cld" / "config.toml").read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    repos = data.get("repos")
+    if not isinstance(repos, dict):
+        return {}
+    return {name: os.path.expanduser(entry["path"]) for name, entry in repos.items()
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str) and entry["path"]}
+
+
 # ---- caller sources -------------------------------------------------------
 
 @dataclass
 class LabelCaller:
     """The sshd route's Caller: the session container's host-set docker labels
-    (org.cld.kind, org.cld.repo-root or org.cld.repo.<name>, org.cld.targets)
+    (org.cld.kind, org.cld.repo-root or org.cld.repo.<name>)
     and its jj workspace. Labels are set at launch, never by the caller, which
     is what makes them an authorization source."""
 
@@ -284,23 +301,31 @@ class LabelCaller:
             if selector:
                 _die(f"denied: --repo is only for ticket containers ({self.name} is '{self.kind or 'unlabeled'}')", 2)
             return self.repo_root
-        labels = _capture(["docker", "inspect", self.name, "--format",
-                           "{{range $k, $v := .Config.Labels}}{{$k}}={{$v}}{{println}}{{end}}"])
-        mounts = [line.partition("=") for line in os.fsdecode(labels.stdout).splitlines()
-                  if line.startswith("org.cld.repo.")]
-        names = [key.removeprefix("org.cld.repo.") for key, _, _ in mounts]
-        mounted = " ".join(names) or "none"
+        mounted = " ".join(self._mounts) or "none"
         if not selector:
-            if len(mounts) != 1:
-                _die(f"denied: {self.name} mounts {len(mounts)} repos -- pass --repo <name> (mounted: {mounted})", 3)
-            repo = mounts[0][2]
+            if len(self._mounts) != 1:
+                _die(f"denied: {self.name} mounts {len(self._mounts)} repos -- pass --repo <name> (mounted: {mounted})", 3)
+            repo = next(iter(self._mounts.values()))
         else:
-            repo = next((path for key, _, path in reversed(mounts) if key == f"org.cld.repo.{selector}"), "")
+            repo = self._mounts.get(selector, "")
         if not repo:
             _die(f"denied: repo '{selector}' is not mounted in {self.name} (mounted: {mounted})", 3)
         if not _is_repo(repo):
             _die(f"denied: repo path '{repo}' for {self.name} is not a repo", 3)
         return repo
+
+    # A v1 kind mounts its repo-root under no name.
+    def mounted_repo(self, selector: str) -> str | None:
+        return self._mounts.get(selector) if self.kind == "ticket" else None
+
+    # name -> host path of every org.cld.repo.<name> label, read once per request.
+    @cached_property
+    def _mounts(self) -> dict[str, str]:
+        labels = _capture(["docker", "inspect", self.name, "--format",
+                           "{{range $k, $v := .Config.Labels}}{{$k}}={{$v}}{{println}}{{end}}"])
+        return {key.removeprefix("org.cld.repo."): path
+                for key, _, path in (line.partition("=") for line in os.fsdecode(labels.stdout).splitlines())
+                if key.startswith("org.cld.repo.")}
 
     # "<session>@" is the *workspace* tip, not the session bookmark. The bookmark
     # is set once at first container launch
@@ -318,14 +343,6 @@ class LabelCaller:
     def revision(self, repo: str) -> str | None:
         return _out("jj", "-R", repo, "--ignore-working-copy", "log", "--no-graph", "-n1",
                     "-r", f"{self.name}@", "-T", "commit_id")
-
-    # The caller's own repo-root plus its org.cld.targets allowlist. Nothing sets
-    # org.cld.targets since the master role was removed (it was the only kind
-    # that carried one), so today this is the repo-root alone; the read stays
-    # for the ticket-scoped rework of the task-agent route.
-    def targets(self) -> list[str]:
-        return [target for target in (self.repo_root, *(_label(self.name, "org.cld.targets") or "").split(":"))
-                if target]
 
     # The agent already forwarded into the caller (cld/docker.py:stage_ssh_agent),
     # so a run can do with the key exactly what the caller itself can, no more:
@@ -346,7 +363,6 @@ class CliCaller:
     name: str
     repo_path: str
     revset: str
-    extra_targets: list[str]
 
     # One repo, given by -C: a ticket's --repo selector has nothing to select here.
     def repo(self, selector: str) -> str:
@@ -355,14 +371,15 @@ class CliCaller:
                  f"(using {self.repo_path})", 2)
         return self.repo_path
 
+    # -C is the host's selector, so no repo has a name here.
+    def mounted_repo(self, selector: str) -> str | None:
+        return None
+
     # No --ignore-working-copy, unlike LabelCaller: the default revset `@` is the
     # operator's own working copy, and snapshotting it first is what makes
     # uncommitted edits part of the run.
     def revision(self, repo: str) -> str | None:
         return _out("jj", "-R", repo, "log", "--no-graph", "-n1", "-r", self.revset, "-T", "commit_id")
-
-    def targets(self) -> list[str]:
-        return [self.repo_path, *self.extra_targets]
 
     # `cld-brokerctl run` clears the environment, so the operator's agent comes
     # from broker.conf, as for the task-agent launcher (stage_agent_socket).
@@ -475,6 +492,14 @@ def action_list_containers(caller: Caller, argv: list[str]) -> None:
     sys.exit(result.returncode)
 
 
+# The host registry for `cld repos` in a container: one tab-separated
+# `name<TAB>path<TAB>mounted` line per entry, mounted being yes/no for the caller.
+# A read of the operator's own config, so no argv and nothing to authorize.
+def action_list_repos(caller: Caller, argv: list[str]) -> None:
+    for name, path in host_registry().items():
+        print(f"{name}\t{path}\t{'yes' if caller.mounted_repo(name) else 'no'}")
+
+
 # The task-agent launcher: a container that pushes a deliverable branch
 # needs the host user's ssh-agent, and `stage_ssh_agent` (cld/docker.py) forwards
 # whatever socket $SSH_AUTH_SOCK names. sshd builds a fresh session environment,
@@ -498,9 +523,10 @@ def stage_agent_socket() -> None:
         os.environ.pop("SSH_AUTH_SOCK", None)
 
 
-# run-tests / graphql take an optional leading `--repo <name>`, the selector a
-# multi-repo ticket caller passes to Caller.repo. Consume it off an action's
-# argv, returning the name ("" if absent) and the rest.
+# run-tests / graphql / task-agent start take an optional leading `--repo <name>`,
+# the selector a multi-repo ticket caller passes to Caller.repo (or, for start,
+# resolve_task_agent_repo). Consume it off an action's argv, returning the name
+# ("" if absent) and the rest.
 def parse_repo_arg(argv: list[str]) -> tuple[str, list[str]]:
     match argv:
         case ["--repo", *rest]:
@@ -514,18 +540,26 @@ def parse_repo_arg(argv: list[str]) -> tuple[str, list[str]]:
     return name, rest
 
 
-# <target> is validated against Caller.targets, never trusted from the argv
-# alone -- so an action can only ever run for a repo the caller source sanctioned.
-def validate_target(caller: Caller, target: str) -> None:
-    if target not in caller.targets():
-        _die(f"denied: target '{target}' not registered for {caller.name}", 3)
-    if not _is_repo(target):
-        _die(f"denied: target '{target}' is not a repo", 3)
+# task-agent start's repo: the caller's own mount by name, else the host registry.
+# Broader than Caller.repo on purpose -- a new container needs no mount in the
+# caller, only a path the operator registered (docs/design-ticket-task-agents.md
+# §3.1). run-tests / graphql keep Caller.repo's mounted-only contract. No
+# selector keeps Caller.repo's single-repo default.
+def resolve_task_agent_repo(caller: Caller, selector: str) -> str:
+    if not selector:
+        return caller.repo("")
+    if not (repo := caller.mounted_repo(selector) or host_registry().get(selector)):
+        _die(f"denied: '{selector}' is not one of {caller.name}'s mounted repos and is not registered on "
+             f"the host either -- `cld repos add {selector} <path>` on the host first, or pick a mounted name", 3)
+    if not _is_repo(repo):
+        _die(f"denied: repo '{selector}' at '{repo}' is not a repo", 3)
+    return repo
 
 
-# Launch / manage a task-scoped agent for one of the caller's registered repos
-# (docs/design-task-agents.md §9). Target validation as above, plus three
-# argv rules that make this safe to expose to a container:
+# Launch / manage a task-scoped agent (docs/design-task-agents.md §9). `start`
+# takes a leading `--repo <name>` (resolve_task_agent_repo); the other ops act on
+# an agent by name, which already carries its repo, so they need none. Three argv
+# rules make this safe to expose to a container:
 #
 #   --force   denied outright. Overriding a reap-readiness refusal is a human act;
 #             a container must not be able to discard uncaptured work or break a
@@ -538,14 +572,13 @@ def validate_target(caller: Caller, target: str) -> None:
 #             its own local files into `-p` instead (docs/design-prompt-chaining.md §4);
 #             cld.prompts contains the escape check for the refs themselves.
 def action_task_agent(caller: Caller, argv: list[str]) -> None:
-    if len(argv) < 2:
-        _die("denied: task-agent needs <target> <op>", 2)
-    target, op, *args = argv
+    if not argv:
+        _die("denied: task-agent needs an op", 2)
+    op, *args = argv
     # Exactly the ops the container route delegates. `transcript` is absent on
     # purpose: the mailbox is bind-mounted into the caller, never needing the host.
     if op not in ("start", "status", "logs", "shutdown"):
         _die(f"denied: bad task-agent op '{op}'", 2)
-    validate_target(caller, target)
     stage_agent_socket()
 
     # Both spellings of each denial: click accepts `--opt=value`, so matching the bare
@@ -565,6 +598,7 @@ def action_task_agent(caller: Caller, argv: list[str]) -> None:
     # `--opt=value` form, which carries its value inside the token) consumes nothing;
     # assuming it did skipped the positional after it, letting a bare path cross.
     if op == "start":
+        selector, args = parse_repo_arg(args)
         skip_value = False
         for arg in args:
             if skip_value:
@@ -574,11 +608,12 @@ def action_task_agent(caller: Caller, argv: list[str]) -> None:
                 skip_value = True
             elif not arg.startswith(("-", "@")):
                 _die(f"denied: prompt ref '{arg}' must be an @ref, not a path", 2)
-
-    try:
-        os.chdir(target)
-    except OSError:
-        _die(f"cannot cd to {target}", 3)
+        # Host-side start finds its repo from cwd.
+        repo = resolve_task_agent_repo(caller, selector)
+        try:
+            os.chdir(repo)
+        except OSError:
+            _die(f"cannot cd to {repo}", 3)
     # --parent is what makes ownership host-set: it stamps the spawn, scopes the roster
     # and gates the reap. `logs` has no such option (a read needs no authority), so
     # appending it there would just make cld reject the argv.
@@ -1105,8 +1140,8 @@ def main_ssh() -> None:
     # The sshd route's caller source: the calling container's host-set labels.
     # The container name == session, and the labels are set at launch (trusted),
     # so the caller cannot point at an arbitrary host path -- only a repo the host
-    # mounted for it. Everything past the labels (repo selection, revision,
-    # targets) is resolved lazily inside each action_* function, so read-only
+    # mounted for it. Everything past the labels (repo selection, revision)
+    # is resolved lazily inside each action_* function, so read-only
     # actions don't pay for -- or fail on -- resolution they don't need.
     fn(LabelCaller.from_session(session), decode_argv(payload))
 
@@ -1128,8 +1163,6 @@ def main_cli(argv: list[str]) -> None:
     parser.add_argument("-r", dest="revset", default="@", help="jj revset to act on (default: @, your working copy)")
     parser.add_argument("-s", dest="session", help="session name for the caller's own resources "
                                                    "(default: cld_host_<repo dir>)")
-    parser.add_argument("-t", dest="targets", action="append", default=[],
-                        help="extra repo the task-agent action may target (repeatable)")
     parser.add_argument("action")
     parser.add_argument("argv", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
@@ -1139,7 +1172,7 @@ def main_cli(argv: list[str]) -> None:
     session = args.session or "cld_host_" + re.sub(r"[^A-Za-z0-9_-]", "-", Path(repo).name)
     if not _SESSION_RE.fullmatch(session):
         _die(f"denied: bad session id '{session}'", 2)
-    fn(CliCaller(session, repo, args.revset, [str(Path(t).resolve()) for t in args.targets]), args.argv)
+    fn(CliCaller(session, repo, args.revset), args.argv)
 
 
 # sshd's ForceCommand runs this file with no arguments and delivers the client's

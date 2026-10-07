@@ -14,8 +14,7 @@ import typer
 
 from cld.cli_msg import handle_errors as _handle_errors, msg_app
 from cld.config import Config
-from cld.docker import find_target_repo
-from cld.broker import broker_available, broker_task_agent_op, run_action
+from cld.broker import broker_available, broker_task_agent_op, list_registered_repos, run_action
 from cld.log import get_logger, setup_logging
 from cld.manifest import TicketManifest
 from cld.prompts import list_prompt_items
@@ -104,7 +103,8 @@ def logs_stub(ctx: typer.Context):
 def _dispatch_task_agent_to_broker(cfg: Config, op: str, extra_args: list[str]) -> None:
     """Delegate a `cld task-agent <op>` to the host broker.
 
-    Spawning and reaping happen host-side for the cwd-selected target repo. The broker
+    Spawning happens host-side for the repo `start`'s `--repo` names (a mounted one, or
+    any in the host registry); the other ops need none, so cwd never matters. The broker
     stamps `--parent <this container>` on the way through and refuses `--force`, so a
     caller reaps only its own fleet and can never override a reap-readiness refusal
     (docs/design-task-agents.md §7).
@@ -119,15 +119,14 @@ def _dispatch_task_agent_to_broker(cfg: Config, op: str, extra_args: list[str]) 
             err=True,
         )
         raise typer.Exit(1)
-    target = str(find_target_repo(cfg))
-    log.info("Delegating `cld task-agent %s` for %s to host broker", op, target)
-    raise typer.Exit(broker_task_agent_op(target, op, extra_args))
+    log.info("Delegating `cld task-agent %s` to host broker", op)
+    raise typer.Exit(broker_task_agent_op(op, extra_args))
 
 
 def _task_agent_start_argv(
     refs: list[str], name: str, prompt: str,
     branch: str, model: str, revision: str, peer: list[str],
-    shared_anchor: bool = False,
+    shared_anchor: bool = False, repo: str = "",
 ) -> list[str]:
     """Rebuild `start`'s argv for the broker, which re-parses it host-side.
 
@@ -140,9 +139,10 @@ def _task_agent_start_argv(
     among the folded files: host-side the positionals compose first and `-p` is
     appended last, so every local file lands after every `@ref` no matter where it was
     typed. The broker refuses a bare path for the same reason
-    (docs/design-prompt-chaining.md §4).
+    (docs/design-prompt-chaining.md §4). *repo* leads as `--repo <name>`, where the
+    broker consumes it.
     """
-    argv: list[str] = []
+    argv: list[str] = ["--repo", repo] if repo else []
     bodies: list[str] = []
     for ref in refs:
         if ref.startswith("@"):
@@ -192,12 +192,17 @@ def task_agent_start(
         help="Anchor directly on -r, sharing reach with its existing descendants "
         "(needs explicit human approval; default is an isolated sibling)",
     ),
+    repo: str = typer.Option(
+        "", "--repo",
+        help="Repo to target: a name mounted in this ticket, or any registered on the host "
+        "(`cld repos`). Omit when this container has exactly one repo.",
+    ),
 ):
     """Spawn a task-scoped agent. Every start creates a new container (no start-or-attach)."""
     cfg = Config.from_env()
     setup_logging(cfg)
     _dispatch_task_agent_to_broker(cfg, "start", _task_agent_start_argv(
-        refs or [], name, prompt, branch, model, revision, peer, shared_anchor,
+        refs or [], name, prompt, branch, model, revision, peer, shared_anchor, repo,
     ))
 
 
@@ -311,6 +316,9 @@ def repos():
     tagged 'own'. Its host path comes from the host-set CLD_HOST_PROJECT_DIR,
     not from in-container TOML -- `.cld/` is gitignored, so a re-read would
     usually find nothing and disagree with the host.
+
+    With the broker reachable, a second block lists the host registry entries not
+    mounted here -- any of them is a valid `task-agent start --repo`.
     """
     cfg = Config.from_env()
     setup_logging(cfg)
@@ -323,9 +331,12 @@ def repos():
                 f"\t/workspace/{manifest.ticket}/{repo.name}"
                 f"\t{repo.anchor_base[:12]}\t{repo.anchor_mode}"
             )
-        return
-    if cfg.host_project_dir:
+    elif cfg.host_project_dir:
         typer.echo(f"{cfg.host_project_dir}\town")
+    if broker_available() and (others := [(n, p) for n, p, mounted in list_registered_repos() if not mounted]):
+        typer.echo("\nAlso registered on the host (not mounted here):")
+        for name, path in others:
+            typer.echo(f"{name}\t{path}")
 
 
 @app.command()

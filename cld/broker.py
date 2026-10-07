@@ -231,14 +231,28 @@ def graphql_op(
     return run_action("graphql", *repo_args, op, *args, capture=capture)
 
 
-def broker_task_agent_op(target: str, op: str, extra_args: list[str] | None = None) -> int:
-    """Delegate a `cld task-agent <op>` for *target* to the host broker.
+def broker_task_agent_op(op: str, extra_args: list[str] | None = None) -> int:
+    """Delegate a `cld task-agent <op>` to the host broker.
 
     The broker's task-agent action enforces the argv rules a container must not
     be able to bypass -- it denies ``--force`` and a caller-supplied
     ``--parent``, and stamps the calling session as the parent itself (see
-    broker/cld-broker.py). *target* is authorized against the caller's host-set
-    labels, which since the master role's removal means only the caller's own
-    ``org.cld.repo-root``; the ticket-scoped rework of this route is pending.
+    broker/cld-broker.py). ``start`` names its repo with a leading ``--repo
+    <name>`` in *extra_args*, which the broker resolves against the caller's
+    mounts, then the host registry; the other ops need no repo.
     """
-    return run_action("task-agent", target, op, *(extra_args or [])).returncode
+    return run_action("task-agent", op, *(extra_args or [])).returncode
+
+
+def list_registered_repos() -> list[tuple[str, str, bool]]:
+    """The host repo registry as ``(name, path, mounted here)``, via the broker's ``list-repos``.
+
+    Empty when the broker is unreachable or fails: the registry is a hint for
+    picking ``task-agent start --repo``, never needed to work on the mounted repos.
+    """
+    result = run_action("list-repos", capture=True)
+    if result.returncode != 0:
+        log.warning("broker list-repos failed: %s", (result.stderr or "").strip())
+        return []
+    return [(name, path, mounted == "yes")
+            for name, path, mounted in (line.split("\t") for line in result.stdout.splitlines())]

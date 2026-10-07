@@ -81,7 +81,6 @@ class TestTaskAgentDispatch:
     def _broker(self, stack, tmp_path, monkeypatch, available=True):
         monkeypatch.setenv("CLD_MAILBOX_ROOT", str(tmp_path / "mailboxes"))
         stack.enter_context(patch("cld.cli_container.broker_available", return_value=available))
-        stack.enter_context(patch("cld.cli_container.find_target_repo", return_value=Path("/host/myrepo")))
         return stack.enter_context(patch("cld.cli_container.broker_task_agent_op", return_value=0))
 
     def test_start_forwards_rebuilt_argv(self, tmp_path, monkeypatch):
@@ -93,13 +92,22 @@ class TestTaskAgentDispatch:
                 "--branch", "oauth", "-m", "opus", "-r", "@-", "--peer", "cld_agent_x_y:3",
             ])
         assert result.exit_code == 0, result.output
-        target, verb, argv = op.call_args.args
-        assert (target, verb) == ("/host/myrepo", "start")
+        verb, argv = op.call_args.args
+        assert verb == "start"
         assert argv == [
             "@personas/implementer", "@some-task", "-n", "add-oauth", "-p", "do it",
             "--branch", "oauth", "-m", "opus", "-r", "@-", "--peer", "cld_agent_x_y:3",
         ]
         assert "--parent" not in argv          # the broker sets it, host-side
+        assert "--repo" not in argv            # none given: the broker's single-repo default
+
+    def test_start_repo_leads_the_argv(self, tmp_path, monkeypatch):
+        """The broker consumes only a LEADING --repo; anything later is start's own argv."""
+        with ExitStack() as stack:
+            op = self._broker(stack, tmp_path, monkeypatch)
+            result = runner.invoke(app, ["task-agent", "start", "@some-task", "-n", "s", "--repo", "other"])
+        assert result.exit_code == 0, result.output
+        assert op.call_args.args == ("start", ["--repo", "other", "@some-task", "-n", "s"])
 
     def test_start_folds_local_files_into_the_prompt_in_order(self, tmp_path, monkeypatch):
         first = tmp_path / "a.md"; first.write_text("# First\n")
@@ -111,7 +119,7 @@ class TestTaskAgentDispatch:
                 "-n", "s", "-p", "and this",
             ])
         assert result.exit_code == 0, result.output
-        argv = op.call_args.args[2]
+        argv = op.call_args.args[1]
         assert str(first) not in argv         # a container path means nothing host-side
         assert "@personas/implementer" in argv
         body = argv[argv.index("-p") + 1]
@@ -132,23 +140,23 @@ class TestTaskAgentDispatch:
             op = self._broker(stack, tmp_path, monkeypatch)
             result = runner.invoke(app, ["task-agent", "start", "@some-task", "-n", "s"])
         assert result.exit_code == 0, result.output
-        assert "@some-task" in op.call_args.args[2]
+        assert "@some-task" in op.call_args.args[1]
 
     def test_status_and_logs_dispatch(self, tmp_path, monkeypatch):
         with ExitStack() as stack:
             op = self._broker(stack, tmp_path, monkeypatch)
             assert runner.invoke(app, ["task-agent", "status"]).exit_code == 0
-            assert op.call_args.args[1:] == ("status", [])
+            assert op.call_args.args == ("status", [])
             assert runner.invoke(app, ["task-agent", "logs", "slug", "-n", "20"]).exit_code == 0
-            assert op.call_args.args[1:] == ("logs", ["slug", "-n", "20"])
+            assert op.call_args.args == ("logs", ["slug", "-n", "20"])
 
     def test_shutdown_dispatches_name_and_all(self, tmp_path, monkeypatch):
         with ExitStack() as stack:
             op = self._broker(stack, tmp_path, monkeypatch)
             assert runner.invoke(app, ["task-agent", "shutdown", "slug"]).exit_code == 0
-            assert op.call_args.args[1:] == ("shutdown", ["slug"])
+            assert op.call_args.args == ("shutdown", ["slug"])
             assert runner.invoke(app, ["task-agent", "shutdown", "--all"]).exit_code == 0
-            assert op.call_args.args[1:] == ("shutdown", ["--all"])
+            assert op.call_args.args == ("shutdown", ["--all"])
 
     def test_shutdown_force_refused_locally_with_a_reason(self, tmp_path, monkeypatch):
         with ExitStack() as stack:
@@ -190,7 +198,6 @@ class TestBrokerExitCodes:
     def _invoke(self, rc):
         with ExitStack() as stack:
             stack.enter_context(patch("cld.cli_container.broker_available", return_value=True))
-            stack.enter_context(patch("cld.cli_container.find_target_repo", return_value=Path("/host/myrepo")))
             stack.enter_context(patch("cld.cli_container.broker_task_agent_op", return_value=rc))
             return runner.invoke(app, ["task-agent", "status"])
 
@@ -202,6 +209,11 @@ class TestBrokerExitCodes:
 
 
 class TestRepos:
+    @pytest.fixture(autouse=True)
+    def no_broker(self):
+        with patch("cld.cli_container.broker_available", return_value=False):
+            yield
+
     def test_lists_the_containers_own_repo(self, monkeypatch):
         # The host-set CLD_HOST_PROJECT_DIR is the channel, not TOML re-read
         # in-container (see build_container_args in cld/docker.py).
@@ -251,6 +263,28 @@ class TestRepos:
             result = runner.invoke(app, ["repos"])
         assert result.exit_code == 0, result.output
         assert "/host/side/cld\town" in result.output
+
+    def test_registry_block_lists_only_unmounted_repos(self, monkeypatch):
+        monkeypatch.setenv("CLD_TICKET_MANIFEST", self._ticket_manifest_json())
+        registry = [("lide-api", "/home/u/lide-api", True), ("fastapi-deps", "/home/u/deps", False)]
+        with ExitStack() as stack:
+            stack.enter_context(patch("cld.cli_container.Config.from_env", return_value=Config()))
+            stack.enter_context(patch("cld.cli_container.broker_available", return_value=True))
+            stack.enter_context(patch("cld.cli_container.list_registered_repos", return_value=registry))
+            result = runner.invoke(app, ["repos"])
+        assert result.exit_code == 0, result.output
+        block = result.output.split("Also registered on the host (not mounted here):\n", 1)[1]
+        assert block.splitlines() == ["fastapi-deps\t/home/u/deps"]
+
+    def test_no_registry_block_without_the_broker(self, monkeypatch):
+        monkeypatch.setenv("CLD_TICKET_MANIFEST", self._ticket_manifest_json())
+        with ExitStack() as stack:
+            stack.enter_context(patch("cld.cli_container.Config.from_env", return_value=Config()))
+            listing = stack.enter_context(patch("cld.cli_container.list_registered_repos"))
+            result = runner.invoke(app, ["repos"])
+        assert result.exit_code == 0, result.output
+        assert "Also registered" not in result.output
+        assert not listing.called
 
 
 class TestMsg:

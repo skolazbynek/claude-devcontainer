@@ -15,8 +15,8 @@ Run:
 cld msg agents
 ```
 
-Restrict to one kind with `--kind master`, `--kind agent` (the standing per-repo
-agent) or `--kind task-agent` (one per task; see the `task-agent-*` skills). Address
+Restrict to one kind with `--kind ticket` (a ticket container, the parent of its
+task-agents) or `--kind task-agent` (one per task; see the `task-agent-*` skills). Address
 a task-agent by its full container name -- a repo basename is ambiguous when several
 share a repo.
 

@@ -219,12 +219,24 @@ class TestBrokerTaskAgentOp:
         """Its own broker action, with its own op set and argv rules."""
         argv = ["@implementer", "-n", "add-oauth", "-p", "do it", "--peer", "cld_agent_x_y:3"]
         with patch("cld.broker.subprocess.run", return_value=_cp(returncode=0)) as run:
-            rc = broker.broker_task_agent_op("/repo/y", "start", argv)
+            rc = broker.broker_task_agent_op("start", argv)
         assert rc == 0
         assert run.call_args[0][0][-1].startswith("task-agent cld_agent_cld ")
-        assert _argv_of(run) == ["/repo/y", "start", *argv]
+        assert _argv_of(run) == ["start", *argv]
         assert run.call_args.kwargs["capture_output"] is False
 
     def test_propagates_exit_code(self, configured):
         with patch("cld.broker.subprocess.run", return_value=_cp(returncode=2)):
-            assert broker.broker_task_agent_op("/repo/y", "shutdown", ["--all"]) == 2
+            assert broker.broker_task_agent_op("shutdown", ["--all"]) == 2
+
+
+class TestListRegisteredRepos:
+    def test_parses_the_mounted_column(self, configured):
+        out = "lide-api\t/h/lide-api\tyes\ndeps\t/h/deps\tno\n"
+        with patch("cld.broker.subprocess.run", return_value=_cp(returncode=0, stdout=out)) as run:
+            assert broker.list_registered_repos() == [("lide-api", "/h/lide-api", True), ("deps", "/h/deps", False)]
+        assert run.call_args[0][0][-1].startswith("list-repos cld_agent_cld ")
+
+    def test_failure_is_empty(self, configured):
+        with patch("cld.broker.subprocess.run", return_value=_cp(returncode=3, stderr="boom")):
+            assert broker.list_registered_repos() == []

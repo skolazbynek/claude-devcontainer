@@ -1,7 +1,7 @@
 ---
 name: task-agent-fleet
 description: >
-  Reconcile a fleet of task-agents from a master: read the cheap digest, pull only the
+  Reconcile a fleet of task-agents from a ticket container: read the cheap digest, pull only the
   mailboxes that moved, route replies and report what changed. Invoke when the user asks
   what the agents are doing, whether anyone replied, what the fleet has cost, or at the
   start of a turn while a fleet is running.
