@@ -153,7 +153,7 @@ Task agents deliver via a jj/git bookmark, not a `result.json`/`summary.json` fi
 1. Instruct the agent to wrap up (via messenger `send()`): ask it to squash its work
    into its deliverable branch and report back.
 2. For a sibling-repo agent, also instruct it to push:
-   `jj git push --bookmark <branch> --allow-new`.
+   `jj git push --bookmark <branch>`.
 
 **Observe / confirm**
 

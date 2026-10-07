@@ -22,7 +22,7 @@ landed.
 **If the agent worked in a repo not mounted in this ticket, ask it to push:**
 
 ```
-jj git push --bookmark <branch> --allow-new
+jj git push --bookmark <branch>
 ```
 
 You have no filesystem view of a repo that is only registered on the host, so a pushed

@@ -523,7 +523,7 @@ Reuses the sibling-launch seam (`docs/design-master-sibling-launch.md`):
   for this** — the broker's action set stays as small as possible. Two paths
   instead, in preference order:
   1. **Pushed branch (verifiable).** On wrap-up the agent pushes its deliverable
-     branch to the remote (`jj git push --bookmark <branch> --allow-new`) and
+     branch to the remote (`jj git push --bookmark <branch>`) and
      reports the branch name plus the MR/branch URL. The master then inspects it
      through the same GitLab surface a human would — no filesystem view of the
      sibling repo needed, and the artifact is durable and reviewable after

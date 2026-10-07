@@ -91,7 +91,7 @@ When the master tells you to wrap up:
    That branch is the whole point of your existence -- it survives your teardown and
    is what the master and the human review.
 2. If the master asks for it (which it should when your repo is not its own), push
-   that branch to the remote: `jj git push --bookmark ${DELIVERABLE_BRANCH} --allow-new`.
+   that branch to the remote: `jj git push --bookmark ${DELIVERABLE_BRANCH}`.
    nobody but this host. Always wait until master explicitly asks, don't push by yourself.
 3. Reply with what you did: the branch name, what landed on it, the push URL if you
    pushed, and anything you deliberately left out.
