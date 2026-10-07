@@ -41,6 +41,7 @@ cld broker run-tests --repo api -k login tests/    # multi-repo ticket
 - Everything else goes to pytest unchanged. Defaults are
   `--tb=short --disable-warnings -q --maxfail=30`; your own flags override
   them. Do not add `-q`: twice-quiet pytest drops the pass/fail count line.
+- Add `-n logical` to run the tests in parallel. Use this for bigger chunks of long testslike integration.
 - The exit code is pytest's: 0 passed, 1 failures, 2 interrupted, 4 usage
   error, 5 no tests collected.
 
@@ -85,5 +86,3 @@ cld broker run-tests --repo api -k login tests/    # multi-repo ticket
 
 Never hand-build an `ssh` call to the broker, and never try to fix the broker
 from inside the container: it is host infrastructure the user operates.
-
-Design: `docs/design-cld-broker.md` and `broker/README.md` in the cld repo.
