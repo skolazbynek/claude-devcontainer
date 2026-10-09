@@ -51,7 +51,7 @@ and sourced into the server's environment only.
 | `VENV_CACHE` | `-e` | `on` | `on`, `off`, or `rebuild` (rebuild this key's venv) |
 | `VENV_CACHE_KEEP` | `-e` | `10` | most recently used venvs kept in the cache |
 
-Requires **Poetry 2.x** (the image ships 2.4.1): it reads PEP 621 `[project]`
+Requires **Poetry 2.x** (the image ships 2.5.1): it reads PEP 621 `[project]`
 metadata, which Poetry 1.x does not.
 
 ## The one thing to get right: bind `0.0.0.0`, not `127.0.0.1`

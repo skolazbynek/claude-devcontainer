@@ -8,7 +8,7 @@ FROM debian:stable-slim
 # Pin toolchain versions explicitly; do not track "latest".
 ARG JJ_VERSION=0.45.1
 # Poetry 2.x: reads PEP 621 [project] metadata (1.x only reads [tool.poetry]).
-ARG POETRY_VERSION=2.4.1
+ARG POETRY_VERSION=2.5.1
 
 # System + build deps. build-essential / pkg-config / default-libmysqlclient-dev
 # cover the C-extension deps (mysqlclient etc.) that target repos commonly pull.

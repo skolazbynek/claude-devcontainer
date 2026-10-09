@@ -51,7 +51,7 @@ into pytest's environment only.
 | `VENV_CACHE_KEEP` | `-e` | `10` | most recently used venvs kept in the cache |
 | pytest args | container **argv** | none | passed straight to `pytest`, override `PYTEST_ADDOPTS` |
 
-Requires **Poetry 2.x** (the image ships 2.4.1): it reads PEP 621 `[project]`
+Requires **Poetry 2.x** (the image ships 2.5.1): it reads PEP 621 `[project]`
 metadata, which Poetry 1.x does not.
 
 The container exits with pytest's exit code.
